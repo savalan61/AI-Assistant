@@ -3,7 +3,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.providers import MarketDataProvider, MT5MarketDataProvider
+from app.core.dependencies import get_market_data_service
 from app.services.market import MarketDataService
 
 router = APIRouter()
@@ -17,16 +17,6 @@ class CandleResponse(BaseModel):
     low: float
     close: float
     volume: float
-
-
-# Provider is injected through the service to keep the route independent of MT5.
-# MT5 initialization failure at this boundary is a service availability issue (503).
-def get_market_data_service() -> MarketDataService:
-    try:
-        provider: MarketDataProvider = MT5MarketDataProvider()
-    except RuntimeError:
-        raise HTTPException(status_code=503, detail="Market data service temporarily unavailable")
-    return MarketDataService(provider)
 
 
 @router.get("/market-data/{symbol}", response_model=CandleResponse)

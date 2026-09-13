@@ -11,12 +11,27 @@ mt5_api: Any = mt5
 
 class MT5MarketDataProvider(MarketDataProvider):
     def __init__(self):
-        if not mt5_api.initialize():
+        # Boundary rule: the MT5 C extension raises plain built-in Exception for
+        # terminal/IPC failures instead of returning False. This try block covers
+        # only the external MT5 call and translates it into the application's
+        # RuntimeError (mapped to HTTP 503 by the API layer), with exception
+        # chaining preserved for logs; raw MT5 exceptions must never reach FastAPI.
+        try:
+            initialized = mt5_api.initialize()
+        except Exception as exc:  # expected third-party MT5 exception at this boundary only
+            raise RuntimeError("MT5 terminal initialization failed") from exc
+        if not initialized:
             error = mt5_api.last_error()
             raise RuntimeError(f"MT5 initialization failed: {error}")
 
     def get_market_data(self, symbol: str) -> Candle:
-        rates = mt5_api.copy_rates_from_pos(symbol, mt5_api.TIMEFRAME_M1, 1, 1)
+        # Same boundary rule as __init__: translate an expected plain Exception
+        # raised by the MT5 C extension into RuntimeError. The message carries no
+        # third-party details, so nothing raw can leak into the HTTP response.
+        try:
+            rates = mt5_api.copy_rates_from_pos(symbol, mt5_api.TIMEFRAME_M1, 1, 1)
+        except Exception as exc:  # expected third-party MT5 exception at this boundary only
+            raise RuntimeError("MT5 market data request failed") from exc
 
         if rates is None:
             error = mt5_api.last_error()
