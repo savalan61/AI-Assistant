@@ -20,10 +20,14 @@ class MT5MarketDataProvider(MarketDataProvider):
 
         if rates is None:
             error = mt5_api.last_error()
+            # Error code -1 means the symbol is not recognized by MT5
+            # (invalid/unavailable symbol); other error codes indicate an MT5 infrastructure issue.
+            if error[0] == -1:
+                raise ValueError(f"No candle data returned for {symbol}")
             raise RuntimeError(f"MT5 API error for {symbol}: {error}")
 
         if len(rates) == 0:
-            raise RuntimeError(f"No candle data returned for {symbol}")
+            raise ValueError(f"No candle data returned for {symbol}")
 
         rate = rates[0]
 
