@@ -5,7 +5,7 @@ import MetaTrader5 as mt5
 
 from app.providers.market_data import Candle, MarketDataProvider
 
-
+# MT5 is a C extension without Python type stubs; Any bypasses Pylance type checking.
 mt5_api: Any = mt5
 
 

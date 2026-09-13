@@ -6,6 +6,8 @@ from app.db.base import Base
 
 class User(Base):
     __tablename__ = "users"
+    # Composite unique constraints ensure tenant-scoped uniqueness;
+    # username/email/phone may repeat across different brokers.
     __table_args__ = (
         UniqueConstraint("broker_id", "username", name="uq_users_broker_username"),
         UniqueConstraint("broker_id", "email", name="uq_users_broker_email"),
@@ -17,6 +19,8 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Stored as a hash; must never be recoverable in plaintext.
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Encrypted ciphertext; backend needs it to connect to MT5 later.
     mt5_password_encrypted: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

@@ -9,4 +9,5 @@ app.include_router(market_data_router)
 
 @app.get("/health")
 def health():
+    # Health endpoint used by infrastructure monitors; returns a simple ok.
     return {"status": "ok"}

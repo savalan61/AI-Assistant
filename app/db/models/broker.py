@@ -4,6 +4,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 
+# Broker is the root tenant; all other entities are scoped to a broker.
 class Broker(Base):
     __tablename__ = "brokers"
 

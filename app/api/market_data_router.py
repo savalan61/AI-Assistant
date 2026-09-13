@@ -9,6 +9,7 @@ from app.services.market import MarketDataService
 router = APIRouter()
 
 
+# Maps the Candle contract to a JSON-safe response schema.
 class CandleResponse(BaseModel):
     timestamp: datetime
     open: float
@@ -18,6 +19,7 @@ class CandleResponse(BaseModel):
     volume: float
 
 
+# Provider is injected through the service to keep the route independent of MT5.
 def get_market_data_service() -> MarketDataService:
     provider: MarketDataProvider = MT5MarketDataProvider()
     return MarketDataService(provider)
