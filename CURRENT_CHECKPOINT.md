@@ -2,19 +2,21 @@
 
 ## Current Status
 
-Step 9 — Current User Authentication Dependency
+Step 11 — Protect Market Data Endpoint
 
 Status:
 
-VERIFIED + READY FOR COMMIT
+VERIFIED + COMMITTED
 
-Previous checkpoint (Step 8 — Authentication Security Foundation):
+Latest checkpoint commit:
 
-531e5cbc479ab1c35af8ff0e16ee4c3fb311b347 (531e5cb, "feat(auth): add security foundation")
+5e0302e929ccc18f936c99a59080bfe2cca40dfa (5e0302e, "feat(auth): protect market data endpoint")
 
 Working tree at this checkpoint:
 
-The Step 9 implementation files (app/core/dependencies.py, requirements.txt, tests/test_get_current_user.py) are present and verified but NOT yet committed; they are ready for the next Step 9 commit.
+CLEAN
+
+Nothing has been pushed/synced; the local branch is ahead of origin/master.
 
 ## Completed Stages
 
@@ -42,196 +44,166 @@ Includes:
 - PostgreSQL integration
 
 ### Stage 6 — MT5 Lifecycle / Blocking Boundary
-Completed and committed.
+Completed and committed (cc782e0, "feat(mt5): add lifecycle and blocking boundary").
+
+Includes:
+
+- lazy process-wide MT5 provider singleton
+- thread-safe initialization; failed initialization is not cached
+- provider shutdown via FastAPI lifespan (startup warm-up, graceful shutdown)
+- blocking MT5 call executed through the thread-pool boundary
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
 
+Includes:
+
+- bcrypt password hashing/verification (hash_password / verify_password)
+- PyJWT token creation/decoding with expiration validation (create_access_token / decode_token)
+- SecurityError: one application-level error for invalid/expired/malformed tokens
+- environment-driven JWT configuration (SECRET_KEY from env only, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES)
+- fail-closed behavior when SECRET_KEY is not configured
+
 ### Step 9 — Current User Authentication Dependency
-Verified. Implementation files remain uncommitted in the working tree (see Current Status).
+Status: VERIFIED + COMMITTED
 
-## Stage 6 Implementation
+Commit: 0febd333eb4c13fc953424100dc74cf6a526d67c (0febd33)
 
-### Provider Lifecycle
+Message: feat(auth): add current-user dependency
 
-MT5MarketDataProvider is created lazily.
+Includes:
 
-A process-wide singleton is maintained.
+- get_current_user() in app/core/dependencies.py
+- FastAPI HTTPBearer extraction (Authorization: Bearer <JWT>)
+- JWT validation delegated to decode_token()
+- JWT sub safely validated as User.id
+- User loaded from the database via get_db(); inactive/nonexistent users rejected
+- authentication failures return HTTP 401 with WWW-Authenticate: Bearer
+- broker_id comes from the database User record, never from JWT claims
 
-Initialization is protected against concurrent construction.
+### Step 10 — Login / Authentication Endpoint
+Status: VERIFIED + COMMITTED
 
-Failed initialization is not cached.
+Commit: 004367c69029a02209ac78f9093a4444a58c4169 (004367c)
 
-Provider shutdown clears the cached provider.
+Message: feat(auth): add login endpoint
 
-### FastAPI Lifespan
+Includes:
 
-Application lifespan:
+- POST /auth/login with username/password (application password; MT5 password never used)
+- password verified with verify_password(); active User and active Broker required
+- generic 401 for every failure path; no information leaked about which check failed
+- JWT created with create_access_token(subject=str(user.id)); no broker_id and no MT5 credentials in the JWT
 
-- attempts startup provider warm-up
-- logs a warning if MT5 is unavailable
-- allows application startup to continue
-- shuts down the provider during application teardown
+### Step 11 — Protect Market Data Endpoint
+Status: VERIFIED + COMMITTED
 
-### Blocking Boundary
+Commit: 5e0302e929ccc18f936c99a59080bfe2cca40dfa (5e0302e)
 
-MT5 provider/service methods remain synchronous.
+Message: feat(auth): protect market data endpoint
 
-The FastAPI route uses a thread-pool boundary for the blocking market-data call.
+Includes:
 
-This prevents the blocking MT5 call from blocking the FastAPI event loop.
+- GET /market-data/{symbol} requires get_current_user()
+- unauthenticated/invalid/expired requests return HTTP 401
+- existing 404 (ValueError) and 503 (RuntimeError) behavior preserved
+- MT5/provider architecture and threadpool boundary unchanged
 
-### Error Handling
+## Current Authentication Flow
 
-MT5 integration errors are translated at the provider boundary.
-
-The API maps expected application errors to HTTP responses.
-
-Current known mapping:
-
-- ValueError → 404
-- RuntimeError → 503
+POST /auth/login
+    ↓
+JWT access token
+    ↓
+Authorization: Bearer <token>
+    ↓
+get_current_user()
+    ↓
+database-backed User
+    ↓
+protected API
 
 ## Current Market Data Flow
 
-Current intended flow:
-
-HTTP request
-→ FastAPI router
-→ dependency
-→ MarketDataService
-→ MarketDataProvider
-→ MT5MarketDataProvider
-→ MetaTrader5
-→ Candle
-→ API response
+Authenticated request
+    ↓
+get_current_user()
+    ↓
+MarketDataService
+    ↓
+MarketDataProvider
+    ↓
+MT5MarketDataProvider
+    ↓
+MT5
+    ↓
+Candle
 
 Blocking MT5 work is executed through the thread-pool boundary.
 
-## Verification
+## Current Verified Facts
 
-Known Stage 6 verification:
-
-- pytest tests/ -v → 12 passed
-- git diff --check → clean
-- Python compilation → clean
-- live MT5 endpoint previously verified
-- health endpoint verified
-- no trading/order functionality exists
-- .env is not tracked
+- Application authentication exists.
+- Login endpoint exists.
+- JWT access tokens exist.
+- get_current_user() exists.
+- Market-data endpoint requires authentication.
+- User broker_id comes from the database.
+- MT5 password is separate from application password.
+- No broker_id is trusted from JWT claims.
+- No trading/order functionality exists.
+- No BUY/SELL/OPEN/CLOSE/MODIFY functionality exists.
+- MT5 provider remains read-only.
+- MT5 blocking calls are kept outside the async event loop through the existing threadpool boundary.
+- Test suite currently has 54 passing tests.
+- Only the three pre-existing third-party deprecation warnings remain.
+- Working tree was clean after Step 11.
+- Nothing has been pushed/synced.
 
 Static/type verification:
 
-Direct Pylance/pyright execution was not available in the environment.
+Direct Pylance/pyright execution was not available in the environment for any of
+Steps 8–11. Manual static/type reviews were performed instead. This limitation
+must be reported rather than hidden.
 
-Manual static/type review was performed.
+## Known Issues (current)
 
-This limitation must be reported rather than hidden.
+1. MT5 singleton is process-wide and not tenant-scoped.
+2. MT5 IPC timeout is not implemented.
+3. /health does not currently represent MT5 readiness.
+4. Multi-worker deployment semantics need future documentation/design.
+5. Candle timestamps need future UTC review.
+6. MT5 last_error handling has a minor robustness concern.
+7. MetaTrader5 is currently a Windows-specific dependency and needs future CI/Docker consideration.
+8. Minor cleanup/deprecation/hygiene items remain (Pydantic class-based Config, .env.example format, .gitignore entries).
 
-## Stage 6 Audit
-
-A read-only whole-project audit was performed after Stage 6.
-
-Result:
-
-READY WITH MINOR ISSUES
-
-Known issues:
-
-1. Market-data endpoint currently lacks authentication.
-2. MT5 singleton is process-wide and not tenant-scoped.
-3. MT5 IPC timeout is not implemented.
-4. /health does not currently represent MT5 readiness.
-5. Multi-worker deployment semantics need future documentation/design.
-6. Candle timestamps need future UTC review.
-7. MT5 last_error handling has a minor robustness concern.
-8. MetaTrader5 is currently a Windows-specific dependency and needs future CI/Docker consideration.
-9. Minor cleanup/deprecation/hygiene items remain.
+Resolved since the Stage 6 audit: the market-data endpoint now requires
+authentication (Step 11).
 
 These issues are known and must NOT be fixed automatically.
 
 They should be addressed one controlled stage at a time.
 
-## Step 8 Implementation
+## Next Step
 
-### Security Primitives
+STEP 12 — MT5 Account Information
 
-bcrypt + PyJWT security primitives implemented in app/core/security.py:
+Planned scope:
 
-- hash_password() / verify_password() — bcrypt password hashing and verification
-- create_access_token() / decode_token() — JWT creation and decoding with expiration validation
-- SecurityError — one application-level exception for invalid/expired/malformed tokens; PyJWT details never leak
+- read-only account information from MT5
+- Balance
+- Equity
+- Margin
+- Free Margin
+- account-level data only
+- provider abstraction preserved
+- no trading operations
 
-### Configuration
+Do NOT implement Step 12 until explicitly instructed.
 
-Environment-driven JWT configuration added to app/core/config.py:
-
-- SECRET_KEY (no committed value; must come from the environment)
-- ALGORITHM (default HS256)
-- ACCESS_TOKEN_EXPIRE_MINUTES (default 30)
-
-Fail-closed behavior: token signing refuses to run when SECRET_KEY is not configured.
-
-Dependencies added: bcrypt==5.0.0, PyJWT==2.14.0 (no passlib).
-
-### Step 8 Verification
-
-- pytest tests/ -v → 25 passed (4 service + 8 lifecycle + 13 security)
-- git diff --check → clean
-- py_compile → clean
-- Pylance/pyright/mypy unavailable; manual type review completed
-
-### Explicit Non-Goals (still true after Step 8)
-
-- No authentication endpoint or login route
-- No get_current_user dependency
-- No API protection on the market-data route
-- No authorization or broker/tenant checks
-- No MT5/provider changes
-- No secrets committed
-
-## Step 9 Implementation
-
-### Current-User Dependency
-
-get_current_user() implemented in app/core/dependencies.py:
-
-- FastAPI HTTPBearer extraction (Authorization: Bearer <JWT>); no manual header parsing
-- JWT validation delegated to decode_token(); no duplicated JWT logic
-- JWT sub safely validated as User.id (string check + int coercion)
-- User loaded from the existing get_db() AsyncSession by primary key (session.get)
-- nonexistent users rejected; inactive users rejected (is_active checked)
-- returns the real User ORM object; broker_id comes from the database record, never from token claims
-
-### Authentication Behavior
-
-- All expected authentication failures return HTTP 401 with WWW-Authenticate: Bearer and generic messages
-- JWT and database internals never reach the client
-- Database/infrastructure failures are deliberately not swallowed (propagate as server errors)
-
-### Explicit Non-Goals (still true after Step 9)
-
-- No login endpoint or /auth router
-- No API route protected yet (get_current_user is not attached to any route)
-- No authorization system or broker checks
-- No MT5/provider code changed
-- No secrets committed
-
-### Step 9 Verification
-
-- pytest tests/ -v → 35 passed (4 service + 8 lifecycle + 13 security + 10 dependency)
-- git diff --check → clean
-- py_compile → clean
-- Pylance/pyright/mypy unavailable; manual static/type review completed
-- aiosqlite==0.22.1 added to requirements.txt for the SQLite-backed test database
-
-## Next Logical Area
-
-The next logical authentication slice is the login/authentication endpoint that verifies application credentials and issues an access token.
-
-Do NOT implement it until explicitly instructed.
-
-When instructed, begin by inspecting app/core/security.py (hash_password/verify_password/create_access_token), the User model, and the existing get_current_user dependency.
+When instructed, begin by inspecting the existing provider abstraction
+(app/providers/market_data.py), the MT5 provider (app/providers/mt5_market_data.py),
+and the composition root (app/core/dependencies.py).
 
 ## Architectural Guardrails
 
