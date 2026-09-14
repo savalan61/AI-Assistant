@@ -801,10 +801,7 @@ Do not mix this cleanup into unrelated feature work unless explicitly requested.
 27. Current Immediate Objective
 
 Steps 18–19 (MT5 Open Positions, Consolidate MT5 Blocking Boundary) are
-implemented and verified in the working tree but NOT yet committed.
+implemented, verified, committed (5b367a4) and pushed to origin/master.
 
-The immediate objective is to commit the Step 18/19 work as the next Git
-checkpoint.
-
-After that, wait for explicit instruction before starting any further stage
+Wait for explicit instruction before starting any further stage
 (e.g. read-only trade history).

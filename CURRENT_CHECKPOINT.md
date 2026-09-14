@@ -6,14 +6,24 @@ Step 19 — Consolidate MT5 Blocking Boundary (with Step 18 — MT5 Open Positio
 
 Status:
 
-VERIFIED — NOT YET COMMITTED
+VERIFIED + COMMITTED + SYNCED
 
-The Step 18/19 implementation (MT5 Open Positions + consolidated blocking
-boundary) is fully present in the working tree but has no commit yet. The
-last commit is the documentation checkpoint caa83d5 ("docs: update checkpoint
-through account information").
+Implementation commit:
 
-Nothing has been pushed/synced; the local branch is ahead of origin/master.
+5b367a4 ("feat(mt5): add open positions and consolidate blocking boundary")
+— covers Steps 18 and 19 plus the synchronized documentation
+(full hash: 5b367a4c490a9f19e69d8d0aa8b7fee8baf50478)
+
+Test result at this checkpoint:
+
+pytest tests/ -q → 145 passed, 3 warnings (pre-existing third-party
+deprecation warnings)
+
+Working tree at this checkpoint:
+
+CLEAN
+
+The commit has been pushed/synced to origin/master.
 
 ## Completed Stages
 
@@ -51,7 +61,7 @@ Includes:
 - blocking MT5 call executed through the thread-pool boundary
 
 ### Step 18 — MT5 Open Positions (READ-ONLY)
-Status: VERIFIED — NOT YET COMMITTED (part of the current working tree)
+Status: VERIFIED + COMMITTED (5b367a4)
 
 Includes:
 
@@ -69,7 +79,7 @@ Includes:
   market-data and account-info (failed init not cached)
 
 ### Step 19 — Consolidate MT5 Blocking Boundary
-Status: VERIFIED — NOT YET COMMITTED (part of the current working tree)
+Status: VERIFIED + COMMITTED (5b367a4)
 
 Includes:
 
@@ -326,13 +336,13 @@ provider; unmapped values fail loudly with RuntimeError (→ HTTP 503).
 - Broker Admin / Customer roles exist; POST /users lets a Broker Admin create Customer Users in their own tenant.
 - Account information (AccountInfo contract, MT5AccountInfoProvider, AccountInfoService, GET /account-info) exists and is read-only.
 - Open positions (Position contract, MT5PositionProvider, FakePositionProvider, PositionService, GET /positions) exist and are read-only.
-- Test suite verified 2026-09-14: pytest tests/ -q → 145 passed, 3 warnings.
+- The Step 18/19 work is committed (5b367a4) and pushed to origin/master.
+- Test suite verified 2026-09-14 on the exact committed tree: pytest tests/ -q → 145 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- The Step 18/19 working tree is not committed yet (last commit: caa83d5).
-- Nothing has been pushed/synced.
+- Working tree is clean; commit 5b367a4 has been pushed/synced to origin/master.
 
 Static/type verification:
 
@@ -369,11 +379,9 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–19 are complete. Before any further implementation, the Step 18/19
-working tree (positions + consolidated blocking boundary) should be committed
-as the next Git checkpoint.
+Steps 12–19 are complete and committed (5b367a4) and synced to origin/master.
 
-After that, the next logical areas, in no committed order, are:
+The next logical areas, in no committed order, are:
 
 - read-only MT5 trade history through the established
   provider → service → API pattern
