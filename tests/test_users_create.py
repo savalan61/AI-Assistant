@@ -68,7 +68,9 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
             )
             customer = User(
                 broker_id=broker_a.id,
-                username="existing-customer",
+                # Digit username: the API enforces MT5-login format on created
+                # users, so the seeded row used by duplicate tests matches it.
+                username="10002",
                 password_hash="x-not-a-real-hash",
                 is_active=True,
                 role=UserRole.CUSTOMER,
@@ -108,7 +110,7 @@ def admin_token(user_id: int) -> str:
     return create_access_token(str(user_id))
 
 
-def create_payload(username: str = "new-customer", password: str = "customer password", **extra: object) -> dict[str, object]:
+def create_payload(username: str = "20002", password: str = "customer password", **extra: object) -> dict[str, object]:
     payload: dict[str, object] = {"username": username, "password": password}
     payload.update(extra)
     return payload
@@ -145,7 +147,7 @@ def test_broker_admin_creates_customer_returns_201(users_db) -> None:
     with make_client(factory) as client:
         response = client.post(
             "/users",
-            json=create_payload(email="c@example.com", phone="+123"),
+            json=create_payload(email="c@example.com", phone="+12345678901"),
             headers=auth_header(admin_token(admin_a_id)),
         )
 
@@ -156,9 +158,9 @@ def test_broker_admin_creates_customer_returns_201(users_db) -> None:
     assert body["role"] == "customer"
     assert body["broker_id"] == 1
     assert body["is_active"] is True
-    assert body["username"] == "new-customer"
+    assert body["username"] == "20002"
     assert body["email"] == "c@example.com"
-    assert body["phone"] == "+123"
+    assert body["phone"] == "+12345678901"
     # Exactly the non-sensitive projection; no credential fields exist.
     assert set(body.keys()) == {"id", "broker_id", "username", "email", "phone", "role", "is_active"}
 
@@ -187,7 +189,7 @@ def test_second_broker_admin_creates_user_in_own_tenant(users_db) -> None:
 
     with make_client(factory) as client:
         body = client.post(
-            "/users", json=create_payload(username="b-customer"), headers=auth_header(admin_token(admin_b_id))
+            "/users", json=create_payload(username="30001"), headers=auth_header(admin_token(admin_b_id))
         ).json()
 
     # Broker B's admin gets a user in broker B, never in another tenant.
@@ -278,8 +280,8 @@ def test_duplicate_username_in_same_broker_returns_409(users_db) -> None:
     with make_client(factory) as client:
         response = client.post(
             "/users",
-            # "existing-customer" already exists in broker A.
-            json=create_payload(username="existing-customer"),
+            # "10002" already exists in broker A.
+            json=create_payload(username="10002"),
             headers=auth_header(admin_token(admin_a_id)),
         )
 
@@ -293,9 +295,116 @@ def test_same_username_in_different_broker_is_allowed(users_db) -> None:
         response = client.post(
             "/users",
             # Uniqueness is tenant-scoped: broker B may reuse broker A's name.
-            json=create_payload(username="existing-customer"),
+            json=create_payload(username="10002"),
             headers=auth_header(admin_token(admin_b_id)),
         )
 
     assert response.status_code == 201
     assert response.json()["broker_id"] == 2
+
+
+# --- request validation (422 at the schema boundary) --------------------------------
+
+
+@pytest.mark.parametrize("bad_username", ["new-customer", "123", "1234567890123", "", "12a4", "１２３４"])
+def test_invalid_username_rejected_with_422(users_db, bad_username: str) -> None:
+    factory, admin_a_id, _, _ = users_db
+
+    with make_client(factory) as client:
+        response = client.post(
+            "/users",
+            # Letters, wrong length, empty, mixed, and Unicode digits are all
+            # outside the MT5-login contract (ASCII digits, 4-12).
+            json=create_payload(username=bad_username),
+            headers=auth_header(admin_token(admin_a_id)),
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("valid_username", ["1000", "123456789012"])
+def test_username_length_boundaries_accepted(users_db, valid_username: str) -> None:
+    factory, admin_a_id, _, _ = users_db
+
+    with make_client(factory) as client:
+        response = client.post(
+            "/users",
+            # Exactly 4 and exactly 12 digits are the inclusive boundaries.
+            json=create_payload(username=valid_username),
+            headers=auth_header(admin_token(admin_a_id)),
+        )
+
+    assert response.status_code == 201
+    assert response.json()["username"] == valid_username
+
+
+def test_short_password_rejected_with_422(users_db) -> None:
+    factory, admin_a_id, _, _ = users_db
+
+    with make_client(factory) as client:
+        response = client.post(
+            "/users",
+            json=create_payload(password="short"),
+            headers=auth_header(admin_token(admin_a_id)),
+        )
+
+    assert response.status_code == 422
+
+
+def test_oversized_password_rejected_with_422(users_db) -> None:
+    factory, admin_a_id, _, _ = users_db
+
+    with make_client(factory) as client:
+        response = client.post(
+            "/users",
+            # Beyond bcrypt's 72-byte input limit; must be a 422 at the schema
+            # boundary, never a hashing error inside the endpoint.
+            json=create_payload(password="x" * 73),
+            headers=auth_header(admin_token(admin_a_id)),
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("bad_email", ["not-an-email", "a@b", "a@b.", "@example.com", "a b@example.com", "a@@example.com"])
+def test_malformed_email_rejected_with_422(users_db, bad_email: str) -> None:
+    factory, admin_a_id, _, _ = users_db
+
+    with make_client(factory) as client:
+        response = client.post(
+            "/users",
+            json=create_payload(email=bad_email),
+            headers=auth_header(admin_token(admin_a_id)),
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("bad_phone", ["call-me", "123-456-7890", "+123", "1234567890123456", "phone 123"])
+def test_arbitrary_phone_text_rejected_with_422(users_db, bad_phone: str) -> None:
+    factory, admin_a_id, _, _ = users_db
+
+    with make_client(factory) as client:
+        response = client.post(
+            "/users",
+            json=create_payload(phone=bad_phone),
+            headers=auth_header(admin_token(admin_a_id)),
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("valid_phone", ["1234567890", "+123456789012345"])
+def test_valid_international_phone_accepted(users_db, valid_phone: str) -> None:
+    factory, admin_a_id, _, _ = users_db
+
+    with make_client(factory) as client:
+        response = client.post(
+            "/users",
+            # Without and with '+'; 15 digits is the inclusive upper boundary.
+            json=create_payload(phone=valid_phone),
+            headers=auth_header(admin_token(admin_a_id)),
+        )
+
+    assert response.status_code == 201
+    assert response.json()["phone"] == valid_phone
