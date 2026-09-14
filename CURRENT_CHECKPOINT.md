@@ -14,7 +14,15 @@ cc782e074a73e36bd6a1874cb0c4e712d35f7169 (cc782e0, "feat(mt5): add lifecycle and
 
 Working tree at this checkpoint:
 
-The Step 8 implementation files (app/core/security.py, tests/test_security.py, app/core/config.py, requirements.txt) are present and verified but NOT yet committed; the checkpoint commit records documentation only.
+The Step 8 implementation is now committed:
+
+531e5cbc479ab1c35af8ff0e16ee4c3fb311b347 (531e5cb)
+
+Commit message:
+
+feat(auth): add security foundation
+
+The working tree is CLEAN.
 
 ## Completed Stages
 
@@ -45,7 +53,7 @@ Includes:
 Completed and committed.
 
 ### Step 8 — Authentication Security Foundation
-Verified. Implementation files remain uncommitted in the working tree (see Current Status).
+Completed and committed (531e5cb, "feat(auth): add security foundation").
 
 ## Stage 6 Implementation
 
