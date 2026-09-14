@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.core.dependencies import get_market_data_provider, shutdown_market_data
 from app.api.auth_router import router as auth_router
 from app.api.market_data_router import router as market_data_router
+from app.api.users_router import router as users_router
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(market_data_router)
+app.include_router(users_router)
 
 
 @app.get("/health")

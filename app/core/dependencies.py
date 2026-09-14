@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
-from app.db.models import User
+from app.db.models import User, UserRole
 from app.providers import MarketDataProvider, MT5MarketDataProvider
 from app.services.market import MarketDataService
 
@@ -102,3 +102,18 @@ async def get_current_user(
         raise _unauthorized("User not found or inactive")
 
     return user
+
+
+async def get_current_broker_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Require the authenticated user to be a Broker Admin.
+
+    Authorization rides on top of authentication: the database-backed
+    User.role is the sole authority — no role claim exists in (or is read
+    from) the JWT. Non-admins are rejected with 403 so an authenticated
+    customer is distinguishable from an unauthenticated caller (401).
+    """
+    if current_user.role != UserRole.BROKER_ADMIN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Broker admin privileges required")
+    return current_user
