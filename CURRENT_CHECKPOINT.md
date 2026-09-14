@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 19 — Consolidate MT5 Blocking Boundary (with Step 18 — MT5 Open Positions)
+Step 20 — MT5 Trade History (READ-ONLY)
 
 Status:
 
@@ -10,13 +10,12 @@ VERIFIED + COMMITTED + SYNCED
 
 Implementation commit:
 
-5b367a4 ("feat(mt5): add open positions and consolidate blocking boundary")
-— covers Steps 18 and 19 plus the synchronized documentation
-(full hash: 5b367a4c490a9f19e69d8d0aa8b7fee8baf50478)
+544cd51 ("feat(mt5): add read-only trade history")
+(full hash: 544cd5173b6500963e729b6aea808c3a2c91e550)
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 145 passed, 3 warnings (pre-existing third-party
+pytest tests/ -q → 200 passed, 3 warnings (pre-existing third-party
 deprecation warnings)
 
 Working tree at this checkpoint:
@@ -92,6 +91,30 @@ Includes:
 - GET /market-data/{symbol} migrated to the same boundary
 - providers and services remain synchronous; the async boundary lives only
   in the API layer through run_mt5_call
+
+### Step 20 — MT5 Trade History (READ-ONLY)
+Status: VERIFIED + COMMITTED (544cd51)
+
+Includes:
+
+- TradeHistoryEntry NamedTuple contract (11 fields) with TradeType StrEnum
+  ("BUY"/"SELL") and TradeCloseReason StrEnum ("TP"/"SL"/"MANUAL"/"OTHER"),
+  plus TradeHistoryProvider abstraction, exported through app/providers/__init__.py
+- MT5TradeHistoryProvider in app/providers/mt5_trade_history.py: read-only
+  history_deals_get translation into the contract — DEAL_ENTRY_OUT-only
+  filtering, DEAL_REASON_* mapped to TP/SL/MANUAL/OTHER (unmapped → OTHER,
+  missing → None), SL/TP taken from the related closing order via
+  history_orders_get(ticket=...) or None, UTC-aware deal timestamps,
+  RuntimeError translation, never-raising shutdown()
+- FakeTradeHistoryProvider for tests
+- TradeHistoryService in app/services/trade_history/ (synchronous passthrough)
+- GET /trade-history?from=&to= protected by get_current_user(); from/to are
+  required (422), must be UTC-aware (400) and from < to (400); non-UTC offsets
+  are converted to UTC; wrapped contract {"trades": [...]} — empty result is
+  200 with {"trades": []}, never 404
+- process-wide trade-history provider cache in the composition root,
+  mirroring market-data/account-info/positions (failed init not cached);
+  blocking call routed through run_mt5_call
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
@@ -288,7 +311,25 @@ MT5
     ↓
 tuple[Position, ...]
 
-All three MT5-backed endpoints route their blocking calls through the same
+## Current Trade History Flow
+
+Authenticated request
+    ↓
+get_current_user()
+    ↓
+run_mt5_call (blocking boundary, app/core/blocking.py)
+    ↓
+TradeHistoryService
+    ↓
+TradeHistoryProvider (abstraction)
+    ↓
+MT5TradeHistoryProvider
+    ↓
+MT5 (history_deals_get + related history orders)
+    ↓
+tuple[TradeHistoryEntry, ...]
+
+All four MT5-backed endpoints route their blocking calls through the same
 consolidated boundary (run_mt5_call); providers and services remain synchronous.
 
 ## Positions API Contract
@@ -317,13 +358,44 @@ It is never a 404. Position.type is the string "BUY" or "SELL" (PositionType
 StrEnum). MT5 direction codes (0 = BUY, 1 = SELL) are translated in the
 provider; unmapped values fail loudly with RuntimeError (→ HTTP 503).
 
+## Trade History API Contract
+
+GET /trade-history?from=<UTC ISO datetime>&to=<UTC ISO datetime> returns the
+wrapped response:
+
+    {
+      "trades": [
+        {
+          "ticket": 246802468,
+          "order_ticket": 987654321,
+          "symbol": "XAUUSD",
+          "type": "BUY",
+          "volume": 0.10,
+          "price": 3648.20,
+          "profit": 57.00,
+          "time": "2026-09-14T12:30:00Z",
+          "close_reason": "TP",
+          "stop_loss": 3635.00,
+          "take_profit": 3650.00
+        }
+      ]
+    }
+
+- from/to are required: missing or malformed → 422; naive (non-UTC-aware)
+  → 400; from >= to → 400; non-UTC offsets are converted to UTC before the
+  provider call.
+- No executed trades in the window is a normal 200: {"trades": []} — never 404.
+- close_reason is TP/SL/MANUAL/OTHER, or null when MT5 supplies no reason.
+- stop_loss/take_profit come from the related closing order when it can be
+  retrieved, otherwise null — never invented.
+
 ## Current Verified Facts
 
 - Application authentication exists.
 - Login endpoint exists.
 - JWT access tokens exist.
 - get_current_user() exists.
-- Market-data, account-info, and positions endpoints all require authentication.
+- Market-data, account-info, positions, and trade-history endpoints all require authentication.
 - User broker_id comes from the database.
 - MT5 password is separate from application password.
 - No broker_id is trusted from JWT claims.
@@ -331,13 +403,15 @@ provider; unmapped values fail loudly with RuntimeError (→ HTTP 503).
 - No BUY/SELL/OPEN/CLOSE/MODIFY functionality exists.
 - MT5 providers remain read-only (verified by code inspection: no trading
   function exists anywhere in app/).
-- All MT5 blocking calls (market-data, account-info, positions) are kept
+- All MT5 blocking calls (market-data, account-info, positions, trade-history) are kept
   outside the event loop through the consolidated run_mt5_call boundary.
 - Broker Admin / Customer roles exist; POST /users lets a Broker Admin create Customer Users in their own tenant.
 - Account information (AccountInfo contract, MT5AccountInfoProvider, AccountInfoService, GET /account-info) exists and is read-only.
 - Open positions (Position contract, MT5PositionProvider, FakePositionProvider, PositionService, GET /positions) exist and are read-only.
+- Trade history (TradeHistoryEntry contract, MT5TradeHistoryProvider,
+  FakeTradeHistoryProvider, TradeHistoryService, GET /trade-history) exists and is read-only.
 - The Step 18/19 work is committed (5b367a4) and pushed to origin/master.
-- Test suite verified 2026-09-14 on the exact committed tree: pytest tests/ -q → 145 passed, 3 warnings.
+- Test suite verified 2026-09-14 on the exact committed tree: pytest tests/ -q → 200 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
@@ -379,22 +453,20 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–19 are complete and committed (5b367a4) and synced to origin/master.
+Steps 12–20 are complete, committed (544cd51), and synced to origin/master.
 
 The next logical areas, in no committed order, are:
 
-- read-only MT5 trade history through the established
-  provider → service → API pattern
 - GET /users listing for Broker Admins (tenant-scoped)
 - tenant-scoped MT5 design (known issue 1)
 
 Do NOT implement any next step until explicitly instructed.
 
 When instructed, begin by inspecting the existing provider abstractions
-(app/providers/position.py, app/providers/account_info.py,
-app/providers/market_data.py), the MT5 providers, the consolidated blocking
-boundary (app/core/blocking.py), and the composition root
-(app/core/dependencies.py).
+(app/providers/position.py, app/providers/trade_history.py,
+app/providers/account_info.py, app/providers/market_data.py), the MT5
+providers, the consolidated blocking boundary (app/core/blocking.py), and
+the composition root (app/core/dependencies.py).
 
 ## Architectural Guardrails
 

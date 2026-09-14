@@ -304,6 +304,9 @@ app/services/account/account_info_service.py
 app/services/positions/position_service.py
     → application/service logic (open positions)
 
+app/services/trade_history/trade_history_service.py
+    → application/service logic (executed trade history)
+
 app/providers/market_data.py
     → provider abstraction + Candle contract
 
@@ -322,6 +325,21 @@ app/providers/position.py
 app/providers/mt5_positions.py
     → MT5 implementation (open positions)
 
+app/providers/trade_history.py
+    → provider abstraction + TradeHistoryEntry contract
+
+app/providers/mt5_trade_history.py
+    → MT5 implementation (executed trade history)
+
+app/providers/fake_market_data.py
+    → deterministic fake (market data, tests)
+
+app/providers/fake_position.py
+    → deterministic fake (positions, tests)
+
+app/providers/fake_trade_history.py
+    → deterministic fake (trade history, tests)
+
 app/api/market_data_router.py
     → HTTP route + HTTP error mapping + CandleResponse
 
@@ -330,6 +348,9 @@ app/api/account_info_router.py
 
 app/api/positions_router.py
     → HTTP route + HTTP error mapping + PositionsResponse
+
+app/api/trade_history_router.py
+    → HTTP route + from/to window validation + TradeHistoryResponse
 
 Keep this separation unless an explicit architecture task changes it.
 
@@ -360,6 +381,7 @@ Current real providers:
 app/providers/mt5_market_data.py
 app/providers/mt5_account_info.py
 app/providers/mt5_positions.py
+app/providers/mt5_trade_history.py
 
 They use the Python MetaTrader 5 package.
 
@@ -386,6 +408,7 @@ POST /auth/login
 GET /market-data/{symbol}
 GET /account-info
 GET /positions
+GET /trade-history?from=<UTC ISO>&to=<UTC ISO>
 POST /users (Broker Admin only)
 GET /health (unauthenticated infrastructure probe; does not reflect MT5 readiness)
 
@@ -402,10 +425,13 @@ Error mapping for the MT5 endpoints:
 401 unauthenticated/invalid token
 404 market data unavailable for the requested symbol (market-data only)
 409 duplicate user (POST /users)
+422 missing/malformed query parameters (trade-history from/to)
+400 non-UTC-aware window boundary or from >= to (trade-history)
 503 MT5 infrastructure/availability failure
 
-GET /positions returns {"positions": [...]}; an empty result is a normal 200
-with {"positions": []}, never a 404.
+GET /positions returns {"positions": [...]} and GET /trade-history returns
+{"trades": [...]} for a required UTC-aware window; an empty result is a
+normal 200 with an empty array, never a 404.
 
 Do not change the API contract unless the current task explicitly requires it.
 
@@ -421,7 +447,7 @@ Current test directory:
 
 tests/
 
-The suite currently has 145 passing tests (verified 2026-09-14 with
+The suite currently has 200 passing tests (verified 2026-09-14 with
 pytest tests/ -q; the 3 remaining warnings are pre-existing third-party
 deprecation warnings).
 
@@ -435,6 +461,7 @@ Current Fake Providers:
 
 app/providers/fake_market_data.py
 app/providers/fake_position.py
+app/providers/fake_trade_history.py
 
 Note: the Fake Providers are used to test service/API behavior without MT5;
 authentication endpoints are tested against a SQLite/AIOSQLite-backed
@@ -468,17 +495,19 @@ Completed:
 12. Read-only MT5 open positions (contract, provider, service, API)
 13. Consolidated MT5 blocking boundary (app/core/blocking.py, run_mt5_call)
     used by market-data, account-info, and positions
+14. Read-only MT5 trade history (contract, provider, service, API)
 
 The repository remains strictly read-only with respect to trading.
 14. Current Development Stage
 
 The project has completed the MT5 read-only data foundation (lifecycle,
-market data, account information, open positions) and the consolidated
-blocking boundary.
+market data, account information, open positions, trade history) and the
+consolidated blocking boundary.
 
 The next planned stage is:
 
-Stage 20 — MT5 Trade History (READ-ONLY) or another explicitly chosen area
+Stage 21 — GET /users listing or tenant-scoped MT5 design, or another
+explicitly chosen area
 
 However:
 
@@ -800,8 +829,9 @@ Do not mix this cleanup into unrelated feature work unless explicitly requested.
 
 27. Current Immediate Objective
 
-Steps 18–19 (MT5 Open Positions, Consolidate MT5 Blocking Boundary) are
-implemented, verified, committed (5b367a4) and pushed to origin/master.
+Steps 18–20 (MT5 Open Positions, Consolidate MT5 Blocking Boundary, MT5
+Trade History) are implemented, verified, committed (544cd51) and pushed to
+origin/master.
 
 Wait for explicit instruction before starting any further stage
-(e.g. read-only trade history).
+(e.g. GET /users listing or tenant-scoped MT5 design).
