@@ -5,5 +5,7 @@ python-dotenv==1.2.3
 sqlalchemy==2.0.52
 asyncpg==0.31.0
 alembic==1.20.0
+bcrypt==5.0.0
+PyJWT==2.14.0
 MetaTrader5==5.0.6180
 pytest==9.1.1
