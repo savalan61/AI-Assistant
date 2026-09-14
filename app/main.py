@@ -9,11 +9,13 @@ from app.core.dependencies import (
     shutdown_account_info,
     shutdown_market_data,
     shutdown_positions,
+    shutdown_trade_history,
 )
 from app.api.account_info_router import router as account_info_router
 from app.api.auth_router import router as auth_router
 from app.api.market_data_router import router as market_data_router
 from app.api.positions_router import router as positions_router
+from app.api.trade_history_router import router as trade_history_router
 from app.api.users_router import router as users_router
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,7 @@ async def lifespan(app: FastAPI):
     shutdown_market_data()
     shutdown_account_info()
     shutdown_positions()
+    shutdown_trade_history()
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
@@ -41,6 +44,7 @@ app.include_router(market_data_router)
 app.include_router(users_router)
 app.include_router(account_info_router)
 app.include_router(positions_router)
+app.include_router(trade_history_router)
 
 
 @app.get("/health")

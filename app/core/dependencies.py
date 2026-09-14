@@ -12,12 +12,15 @@ from app.providers import (
     MT5AccountInfoProvider,
     MT5MarketDataProvider,
     MT5PositionProvider,
+    MT5TradeHistoryProvider,
     MarketDataProvider,
     PositionProvider,
+    TradeHistoryProvider,
 )
 from app.services.account import AccountInfoService
 from app.services.market import MarketDataService
 from app.services.positions import PositionService
+from app.services.trade_history import TradeHistoryService
 
 # Process-wide provider cache. It stays None until a construction succeeds, so
 # a failed MT5 initialization is never cached and later requests may retry.
@@ -122,6 +125,41 @@ def shutdown_positions() -> None:
     # so the next request constructs a fresh one. Safe when nothing was built.
     global _position_provider
     provider, _position_provider = _position_provider, None
+    shutdown = getattr(provider, "shutdown", None)
+    if callable(shutdown):
+        shutdown()
+
+
+# Process-wide trade-history provider cache, mirroring the market-data,
+# account-info, and positions ones: lazy, lock-guarded, failed initialization
+# never cached.
+_trade_history_provider: TradeHistoryProvider | None = None
+_trade_history_provider_lock = threading.Lock()
+
+
+def get_trade_history_provider() -> TradeHistoryProvider:
+    global _trade_history_provider
+    if _trade_history_provider is None:
+        with _trade_history_provider_lock:
+            if _trade_history_provider is None:
+                _trade_history_provider = MT5TradeHistoryProvider()
+    return _trade_history_provider
+
+
+def get_trade_history_service() -> TradeHistoryService:
+    # MT5 initialization failure at this boundary is a service availability issue (503).
+    try:
+        provider = get_trade_history_provider()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Trade history service temporarily unavailable")
+    return TradeHistoryService(provider)
+
+
+def shutdown_trade_history() -> None:
+    # Shut down the cached trade-history provider, if any, and clear the cache
+    # so the next request constructs a fresh one. Safe when nothing was built.
+    global _trade_history_provider
+    provider, _trade_history_provider = _trade_history_provider, None
     shutdown = getattr(provider, "shutdown", None)
     if callable(shutdown):
         shutdown()
