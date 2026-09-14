@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
 from app.db.models import User, UserRole
-from app.providers import MarketDataProvider, MT5MarketDataProvider
+from app.providers import AccountInfoProvider, MT5AccountInfoProvider, MarketDataProvider, MT5MarketDataProvider
+from app.services.account import AccountInfoService
 from app.services.market import MarketDataService
 
 # Process-wide provider cache. It stays None until a construction succeeds, so
@@ -44,6 +45,41 @@ def shutdown_market_data() -> None:
     # request constructs a fresh one. Safe to call when nothing was initialized.
     global _provider
     provider, _provider = _provider, None
+    shutdown = getattr(provider, "shutdown", None)
+    if callable(shutdown):
+        shutdown()
+
+
+# Process-wide account-info provider cache, mirroring the market-data one:
+# lazy, lock-guarded, and a failed initialization is never cached so later
+# requests may retry. Both providers attach to the same MT5 terminal session.
+_account_info_provider: AccountInfoProvider | None = None
+_account_info_provider_lock = threading.Lock()
+
+
+def get_account_info_provider() -> AccountInfoProvider:
+    global _account_info_provider
+    if _account_info_provider is None:
+        with _account_info_provider_lock:
+            if _account_info_provider is None:
+                _account_info_provider = MT5AccountInfoProvider()
+    return _account_info_provider
+
+
+def get_account_info_service() -> AccountInfoService:
+    # MT5 initialization failure at this boundary is a service availability issue (503).
+    try:
+        provider = get_account_info_provider()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Account information service temporarily unavailable")
+    return AccountInfoService(provider)
+
+
+def shutdown_account_info() -> None:
+    # Shut down the cached account-info provider, if any, and clear the cache
+    # so the next request constructs a fresh one. Safe when nothing was built.
+    global _account_info_provider
+    provider, _account_info_provider = _account_info_provider, None
     shutdown = getattr(provider, "shutdown", None)
     if callable(shutdown):
         shutdown()

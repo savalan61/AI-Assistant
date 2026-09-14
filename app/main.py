@@ -4,7 +4,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.core.config import settings
-from app.core.dependencies import get_market_data_provider, shutdown_market_data
+from app.core.dependencies import (
+    get_market_data_provider,
+    shutdown_account_info,
+    shutdown_market_data,
+)
+from app.api.account_info_router import router as account_info_router
 from app.api.auth_router import router as auth_router
 from app.api.market_data_router import router as market_data_router
 from app.api.users_router import router as users_router
@@ -21,14 +26,17 @@ async def lifespan(app: FastAPI):
     except RuntimeError as exc:
         logger.warning("MT5 provider warm-up failed (requests will retry): %s", exc)
     yield
-    # Release the terminal connection exactly once at shutdown.
+    # Release the terminal connection exactly once at shutdown: both provider
+    # caches attach to the same MT5 terminal session.
     shutdown_market_data()
+    shutdown_account_info()
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(market_data_router)
 app.include_router(users_router)
+app.include_router(account_info_router)
 
 
 @app.get("/health")

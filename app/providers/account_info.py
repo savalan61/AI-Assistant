@@ -1,3 +1,4 @@
+import abc
 from typing import NamedTuple
 
 
@@ -14,3 +15,11 @@ class AccountInfo(NamedTuple):
     margin_level: float
     currency: str
     server: str
+
+
+# Abstraction boundary: services depend on this, never on MT5 directly
+# (mirrors MarketDataProvider in market_data.py).
+class AccountInfoProvider(abc.ABC):
+    @abc.abstractmethod
+    def get_account_info(self) -> AccountInfo:
+        ...
