@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from app.core.dependencies import get_market_data_service
+from app.core.dependencies import get_current_user, get_market_data_service
+from app.db.models import User
 from app.services.market import MarketDataService
 
 router = APIRouter()
@@ -21,7 +22,16 @@ class CandleResponse(BaseModel):
 
 
 @router.get("/market-data/{symbol}", response_model=CandleResponse)
-async def get_market_data(symbol: str, service: MarketDataService = Depends(get_market_data_service)):
+async def get_market_data(
+    symbol: str,
+    # Authentication boundary: a valid Bearer JWT for an active user is
+    # required. get_current_user loads the User from the database, so the
+    # authoritative broker_id comes from the record, never from token claims.
+    # No further authorization is applied yet; the market-data path itself is
+    # not user-scoped at this stage.
+    current_user: User = Depends(get_current_user),
+    service: MarketDataService = Depends(get_market_data_service),
+):
     # The provider call blocks (MT5), so it is explicitly offloaded from the
     # event loop into the worker threadpool.
     # ValueError means invalid/unavailable symbol (client error 404);

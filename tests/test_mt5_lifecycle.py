@@ -3,17 +3,28 @@
 All tests patch the composition-root seam (app.core.dependencies.MT5MarketDataProvider),
 so none of them require MT5, PostgreSQL, network, credentials, or .env.
 """
+import asyncio
 import threading
 from datetime import datetime
+from typing import AsyncIterator
 
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import app.core.dependencies as deps
 import app.main
 from app.api.market_data_router import router
+from app.core.config import settings as app_settings
+from app.core.security import create_access_token
+from app.db.base import Base
+from app.db.database import get_db
+from app.db.models import Broker, User
 from app.providers.market_data import Candle, MarketDataProvider
+
+TEST_SECRET = "unit-test-secret-not-a-real-credential"
+TEST_ALGORITHM = "HS256"
 
 CANDLE = Candle(
     timestamp=datetime(2024, 1, 15, 12, 0, 0),
@@ -60,6 +71,48 @@ def patched_provider(monkeypatch):
     deps._provider = None
     yield cls, record
     deps._provider = None  # never leak a recording provider into other tests
+
+
+@pytest.fixture()
+def auth_env(tmp_path, monkeypatch):
+    """Test-only JWT config plus a seeded user for authenticated HTTP probes.
+
+    The market-data route requires authentication since Step 11; these probes
+    override get_db with a per-test SQLite database and mint a real token.
+    """
+    monkeypatch.setattr(app_settings, "SECRET_KEY", TEST_SECRET, raising=True)
+    monkeypatch.setattr(app_settings, "ALGORITHM", TEST_ALGORITHM, raising=True)
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/lifecycle_auth.db")
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def seed() -> int:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with factory() as session:
+            broker = Broker(name="Test Broker", code="TB-1")
+            session.add(broker)
+            await session.commit()
+            user = User(broker_id=broker.id, username="10001", password_hash="x" * 60, is_active=True)
+            session.add(user)
+            await session.commit()
+            return user.id
+
+    user_id = asyncio.run(seed())
+
+    def apply_overrides(target_app) -> None:
+        async def override_get_db() -> AsyncIterator[AsyncSession]:
+            async with factory() as session:
+                yield session
+
+        target_app.dependency_overrides[get_db] = override_get_db
+
+    # app.main.app is global: its override must be cleaned up after the test.
+    apply_overrides(app.main.app)
+    token = create_access_token(str(user_id))
+    yield {"token": token, "apply_overrides": apply_overrides}
+    app.main.app.dependency_overrides.pop(get_db, None)
+    asyncio.run(engine.dispose())
 
 
 # --- singleton provider identity / construction once -----------------------
@@ -159,7 +212,7 @@ def test_shutdown_clears_cache_and_next_request_gets_fresh_provider(patched_prov
     assert len(record.instances) == 2
 
 
-def test_request_after_shutdown_maps_to_503(patched_provider, monkeypatch):
+def test_request_after_shutdown_maps_to_503(patched_provider, monkeypatch, auth_env):
     cls, record = patched_provider
     deps.get_market_data_service()
     deps.shutdown_market_data()
@@ -170,7 +223,9 @@ def test_request_after_shutdown_maps_to_503(patched_provider, monkeypatch):
 
     monkeypatch.setattr(cls, "get_market_data", dead)
     client = TestClient(app.main.app)
-    response = client.get("/market-data/EURUSD")
+    # The route requires authentication: send a valid token so the request
+    # reaches the (dead) provider and still maps to 503.
+    response = client.get("/market-data/EURUSD", headers={"Authorization": f"Bearer {auth_env['token']}"})
 
     assert response.status_code == 503
 
@@ -178,7 +233,7 @@ def test_request_after_shutdown_maps_to_503(patched_provider, monkeypatch):
 # --- blocking call is explicitly offloaded to the threadpool -----------------
 
 
-def test_blocking_call_runs_off_the_event_loop_thread(patched_provider):
+def test_blocking_call_runs_off_the_event_loop_thread(patched_provider, auth_env):
     _, record = patched_provider
     loop_thread = {}
 
@@ -188,9 +243,10 @@ def test_blocking_call_runs_off_the_event_loop_thread(patched_provider):
 
     probe_app = FastAPI()
     probe_app.include_router(router, dependencies=[Depends(capture_loop_thread)])
+    auth_env["apply_overrides"](probe_app)  # authenticated route needs a DB-backed user
 
     client = TestClient(probe_app)
-    response = client.get("/market-data/EURUSD")
+    response = client.get("/market-data/EURUSD", headers={"Authorization": f"Bearer {auth_env['token']}"})
 
     assert response.status_code == 200
     assert response.json()["close"] == 105.0
