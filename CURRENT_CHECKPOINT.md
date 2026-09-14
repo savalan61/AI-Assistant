@@ -2,27 +2,19 @@
 
 ## Current Status
 
-Stage 6 — MT5 Lifecycle / Blocking Boundary
+Step 8 — Authentication Security Foundation
 
 Status:
 
-VERIFIED + COMMITTED
+VERIFIED + READY FOR CHECKPOINT
 
-Git commit:
+Previous checkpoint (Stage 6 — MT5 Lifecycle / Blocking Boundary):
 
-cc782e074a73e36bd6a1874cb0c4e712d35f7169
+cc782e074a73e36bd6a1874cb0c4e712d35f7169 (cc782e0, "feat(mt5): add lifecycle and blocking boundary")
 
-Short hash:
+Working tree at this checkpoint:
 
-cc782e0
-
-Commit message:
-
-feat(mt5): add lifecycle and blocking boundary
-
-Working tree at checkpoint:
-
-CLEAN
+The Step 8 implementation files (app/core/security.py, tests/test_security.py, app/core/config.py, requirements.txt) are present and verified but NOT yet committed; the checkpoint commit records documentation only.
 
 ## Completed Stages
 
@@ -51,6 +43,9 @@ Includes:
 
 ### Stage 6 — MT5 Lifecycle / Blocking Boundary
 Completed and committed.
+
+### Step 8 — Authentication Security Foundation
+Verified. Implementation files remain uncommitted in the working tree (see Current Status).
 
 ## Stage 6 Implementation
 
@@ -154,17 +149,51 @@ These issues are known and must NOT be fixed automatically.
 
 They should be addressed one controlled stage at a time.
 
+## Step 8 Implementation
+
+### Security Primitives
+
+bcrypt + PyJWT security primitives implemented in app/core/security.py:
+
+- hash_password() / verify_password() — bcrypt password hashing and verification
+- create_access_token() / decode_token() — JWT creation and decoding with expiration validation
+- SecurityError — one application-level exception for invalid/expired/malformed tokens; PyJWT details never leak
+
+### Configuration
+
+Environment-driven JWT configuration added to app/core/config.py:
+
+- SECRET_KEY (no committed value; must come from the environment)
+- ALGORITHM (default HS256)
+- ACCESS_TOKEN_EXPIRE_MINUTES (default 30)
+
+Fail-closed behavior: token signing refuses to run when SECRET_KEY is not configured.
+
+Dependencies added: bcrypt==5.0.0, PyJWT==2.14.0 (no passlib).
+
+### Step 8 Verification
+
+- pytest tests/ -v → 25 passed (4 service + 8 lifecycle + 13 security)
+- git diff --check → clean
+- py_compile → clean
+- Pylance/pyright/mypy unavailable; manual type review completed
+
+### Explicit Non-Goals (still true after Step 8)
+
+- No authentication endpoint or login route
+- No get_current_user dependency
+- No API protection on the market-data route
+- No authorization or broker/tenant checks
+- No MT5/provider changes
+- No secrets committed
+
 ## Next Logical Area
 
-Authentication and Authorization for the market-data API.
+The next logical authentication slice is the authentication dependency / current-user foundation (get_current_user), built on the Step 8 security primitives.
 
-IMPORTANT:
+Do NOT implement it until explicitly instructed.
 
-Before implementing authentication, inspect the actual repository and determine what JWT/authentication foundation currently exists.
-
-Do not assume authentication exists merely because it appears in historical context.
-
-The next task should begin with inspection/audit of the existing authentication foundation if necessary.
+When instructed, begin by inspecting the existing app/core/security.py primitives, the User model, and the currently unused get_db() session dependency.
 
 ## Architectural Guardrails
 
