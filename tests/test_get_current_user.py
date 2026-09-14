@@ -20,7 +20,7 @@ from app.core.dependencies import get_current_user
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
-from app.db.models import Broker, User
+from app.db.models import Broker, User, UserRole
 
 TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
@@ -52,6 +52,7 @@ def user_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int]":
                 username="10001",
                 password_hash="$2b$12$notarealhashbutcolumnisrequired01234567890123456789",
                 is_active=True,
+                role=UserRole.BROKER_ADMIN,
             )
             session.add(user)
             await session.commit()
@@ -71,9 +72,10 @@ def make_client(factory: async_sessionmaker[AsyncSession]) -> TestClient:
     probe_app = FastAPI()
 
     @probe_app.get("/whoami")
-    async def whoami(current_user: User = Depends(get_current_user)) -> dict[str, int]:
+    async def whoami(current_user: User = Depends(get_current_user)) -> dict[str, int | str]:
         # Deliberately exposes only non-sensitive identifiers for assertions.
-        return {"user_id": current_user.id, "broker_id": current_user.broker_id}
+        # role comes from the database-backed User, never from the token.
+        return {"user_id": current_user.id, "broker_id": current_user.broker_id, "role": current_user.role.value}
 
     probe_app.dependency_overrides[get_db] = override_get_db
     return TestClient(probe_app)
@@ -104,7 +106,8 @@ def test_valid_token_and_active_user_returns_user(user_db):
         response = client.get("/whoami", headers=auth_header(create_access_token(str(user_id))))
 
     assert response.status_code == 200
-    assert response.json() == {"user_id": user_id, "broker_id": 1}
+    # role is served from the database record, not from any token claim.
+    assert response.json() == {"user_id": user_id, "broker_id": 1, "role": "broker_admin"}
 
 
 def test_bearer_prefix_is_required(user_db):

@@ -1,7 +1,21 @@
-from sqlalchemy import Boolean, ForeignKey, Integer, String, UniqueConstraint
+from enum import StrEnum
+
+from sqlalchemy import Boolean, CheckConstraint, Enum, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+
+
+class UserRole(StrEnum):
+    """User roles within a broker tenant.
+
+    A StrEnum (not plain strings) so the role is a typed value everywhere and
+    new roles can only be introduced deliberately. The database stores the
+    plain value ("broker_admin" / "customer"), matching StrEnum semantics.
+    """
+
+    BROKER_ADMIN = "broker_admin"
+    CUSTOMER = "customer"
 
 
 class User(Base):
@@ -12,6 +26,10 @@ class User(Base):
         UniqueConstraint("broker_id", "username", name="uq_users_broker_username"),
         UniqueConstraint("broker_id", "email", name="uq_users_broker_email"),
         UniqueConstraint("broker_id", "phone", name="uq_users_broker_phone"),
+        # Non-native enum: a plain VARCHAR plus a CHECK constraint keeps the
+        # schema portable (same shape on PostgreSQL and SQLite) and evolvable
+        # without native enum-type alterations when roles change.
+        CheckConstraint("role IN ('broker_admin', 'customer')", name="ck_users_role"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -24,3 +42,12 @@ class User(Base):
     # Encrypted ciphertext; backend needs it to connect to MT5 later.
     mt5_password_encrypted: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Role defaults to customer (least privilege); existing rows are backfilled
+    # to it by migration. Authorization must read this from the database User,
+    # never from a token claim.
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, native_enum=False, length=20, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+        default=UserRole.CUSTOMER,
+        server_default=UserRole.CUSTOMER.value,
+    )
