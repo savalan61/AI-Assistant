@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.core.blocking import run_mt5_call
 from app.core.dependencies import get_account_info_service, get_current_user
 from app.db.models import User
 from app.providers.account_info import AccountInfo
@@ -32,10 +33,12 @@ async def get_account_info(
     current_user: User = Depends(get_current_user),
     service: AccountInfoService = Depends(get_account_info_service),
 ) -> AccountInfoResponse:
+    # The provider call blocks (MT5), so it is explicitly offloaded from the
+    # event loop through the consolidated MT5 blocking boundary.
     # RuntimeError means an MT5 infrastructure failure (server error 503);
     # the generic detail never leaks provider internals.
     try:
-        info = service.get_account_info()
+        info = await run_mt5_call(service.get_account_info)
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Account information service temporarily unavailable")
     return info

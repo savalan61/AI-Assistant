@@ -2,19 +2,16 @@
 
 ## Current Status
 
-Step 17 — MT5 Account Information API
+Step 19 — Consolidate MT5 Blocking Boundary (with Step 18 — MT5 Open Positions)
 
 Status:
 
-VERIFIED + COMMITTED
+VERIFIED — NOT YET COMMITTED
 
-Latest checkpoint commit:
-
-4bae954 ("feat(account): add MT5 account information") — covers Steps 16 and 17
-
-Working tree at this checkpoint:
-
-CLEAN
+The Step 18/19 implementation (MT5 Open Positions + consolidated blocking
+boundary) is fully present in the working tree but has no commit yet. The
+last commit is the documentation checkpoint caa83d5 ("docs: update checkpoint
+through account information").
 
 Nothing has been pushed/synced; the local branch is ahead of origin/master.
 
@@ -52,6 +49,39 @@ Includes:
 - thread-safe initialization; failed initialization is not cached
 - provider shutdown via FastAPI lifespan (startup warm-up, graceful shutdown)
 - blocking MT5 call executed through the thread-pool boundary
+
+### Step 18 — MT5 Open Positions (READ-ONLY)
+Status: VERIFIED — NOT YET COMMITTED (part of the current working tree)
+
+Includes:
+
+- Position NamedTuple contract with PositionType StrEnum ("BUY"/"SELL") and
+  PositionProvider abstraction, exported through app/providers/__init__.py
+- MT5PositionProvider in app/providers/mt5_positions.py: read-only
+  positions_get() translation into the Position contract, RuntimeError
+  translation, explicit failure on unmapped position types, never-raising
+  shutdown()
+- FakePositionProvider for tests
+- PositionService in app/services/positions/ (synchronous passthrough)
+- GET /positions protected by get_current_user(); wrapped contract
+  {"positions": [...]} — empty result is 200 with {"positions": []}, never 404
+- process-wide positions provider cache in the composition root, mirroring
+  market-data and account-info (failed init not cached)
+
+### Step 19 — Consolidate MT5 Blocking Boundary
+Status: VERIFIED — NOT YET COMMITTED (part of the current working tree)
+
+Includes:
+
+- app/core/blocking.py with run_mt5_call(...): the single consolidated
+  blocking boundary; synchronous MT5-backed service calls are executed on the
+  worker threadpool (starlette run_in_threadpool), never on the event loop
+- GET /account-info now routes its service call through run_mt5_call,
+  resolving the Known Issues item 9 debt from Step 17
+- GET /positions built on the same boundary from the start
+- GET /market-data/{symbol} migrated to the same boundary
+- providers and services remain synchronous; the async boundary lives only
+  in the API layer through run_mt5_call
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
@@ -178,7 +208,7 @@ Includes:
 - AccountInfoResponse Pydantic model exposing exactly the nine AccountInfo fields
 - composition-root provider cache mirroring market-data (failed init not cached)
 - RuntimeError from the provider mapped to HTTP 503 with a generic detail
-- full test suite: 115 passed
+- full test suite at that checkpoint: 115 passed
 
 ## Current Authentication Flow
 
@@ -200,6 +230,8 @@ Authenticated request
     ↓
 get_current_user()
     ↓
+run_mt5_call (blocking boundary, app/core/blocking.py)
+    ↓
 MarketDataService
     ↓
 MarketDataProvider
@@ -210,13 +242,13 @@ MT5
     ↓
 Candle
 
-Blocking MT5 work is executed through the thread-pool boundary.
-
 ## Current Account Information Flow
 
 Authenticated request
     ↓
 get_current_user()
+    ↓
+run_mt5_call (blocking boundary, app/core/blocking.py)
     ↓
 AccountInfoService
     ↓
@@ -228,8 +260,52 @@ MT5
     ↓
 AccountInfo
 
-Known technical debt: this path currently runs the synchronous MT5 call on the
-FastAPI event loop (see Known Issues item 9).
+## Current Positions Flow
+
+Authenticated request
+    ↓
+get_current_user()
+    ↓
+run_mt5_call (blocking boundary, app/core/blocking.py)
+    ↓
+PositionService
+    ↓
+PositionProvider (abstraction)
+    ↓
+MT5PositionProvider
+    ↓
+MT5
+    ↓
+tuple[Position, ...]
+
+All three MT5-backed endpoints route their blocking calls through the same
+consolidated boundary (run_mt5_call); providers and services remain synchronous.
+
+## Positions API Contract
+
+GET /positions returns the wrapped response:
+
+    {
+      "positions": [
+        {
+          "ticket": 123456789,
+          "symbol": "XAUUSD",
+          "type": "BUY",
+          "volume": 0.10,
+          "open_price": 3642.50,
+          "current_price": 3648.20,
+          "profit": 57.00
+        }
+      ]
+    }
+
+No open positions is a normal 200 response:
+
+    {"positions": []}
+
+It is never a 404. Position.type is the string "BUY" or "SELL" (PositionType
+StrEnum). MT5 direction codes (0 = BUY, 1 = SELL) are translated in the
+provider; unmapped values fail loudly with RuntimeError (→ HTTP 503).
 
 ## Current Verified Facts
 
@@ -237,19 +313,25 @@ FastAPI event loop (see Known Issues item 9).
 - Login endpoint exists.
 - JWT access tokens exist.
 - get_current_user() exists.
-- Market-data endpoint requires authentication.
+- Market-data, account-info, and positions endpoints all require authentication.
 - User broker_id comes from the database.
 - MT5 password is separate from application password.
 - No broker_id is trusted from JWT claims.
 - No trading/order functionality exists.
 - No BUY/SELL/OPEN/CLOSE/MODIFY functionality exists.
-- MT5 provider remains read-only.
-- MT5 market-data blocking calls are kept outside the async event loop through the existing threadpool boundary.
+- MT5 providers remain read-only (verified by code inspection: no trading
+  function exists anywhere in app/).
+- All MT5 blocking calls (market-data, account-info, positions) are kept
+  outside the event loop through the consolidated run_mt5_call boundary.
 - Broker Admin / Customer roles exist; POST /users lets a Broker Admin create Customer Users in their own tenant.
 - Account information (AccountInfo contract, MT5AccountInfoProvider, AccountInfoService, GET /account-info) exists and is read-only.
-- Test suite currently has 115 passing tests.
-- Only the three pre-existing third-party deprecation warnings remain.
-- Working tree was clean after Step 17 (commit 4bae954).
+- Open positions (Position contract, MT5PositionProvider, FakePositionProvider, PositionService, GET /positions) exist and are read-only.
+- Test suite verified 2026-09-14: pytest tests/ -q → 145 passed, 3 warnings.
+- The 3 warnings are pre-existing third-party deprecation warnings (anyio
+  PortalFactoryType and Pydantic class-based Config in app/core/config.py).
+- compileall over app, tests, and scripts is clean.
+- git diff --check is clean.
+- The Step 18/19 working tree is not committed yet (last commit: caa83d5).
 - Nothing has been pushed/synced.
 
 Static/type verification:
@@ -260,23 +342,26 @@ must be reported rather than hidden.
 
 ## Known Issues (current)
 
-1. MT5 singleton is process-wide and not tenant-scoped.
+1. MT5 singleton is process-wide and not tenant-scoped. Every provider cache
+   attaches to the same MT5 terminal session; connection semantics are
+   process-wide, non-tenant-scoped, process-attached. This is intentional for
+   the current stage and remains a known limitation.
 2. MT5 IPC timeout is not implemented.
 3. /health does not currently represent MT5 readiness.
 4. Multi-worker deployment semantics need future documentation/design.
 5. Candle timestamps need future UTC review.
 6. MT5 last_error handling has a minor robustness concern.
 7. MetaTrader5 is currently a Windows-specific dependency and needs future CI/Docker consideration.
-8. Minor cleanup/deprecation/hygiene items remain (Pydantic class-based Config, .env.example format, .gitignore entries).
-9. MT5 blocking-call technical debt:
-   - GET /account-info currently invokes the synchronous MT5 provider directly from the FastAPI request path.
-   - Therefore the blocking MT5 operation currently runs on the FastAPI event loop.
-   - This is intentional for the current Step 17 scope and is NOT considered a Step 17 defect.
-   - It must be corrected later when MT5 blocking-call handling is consolidated across account information, positions, trade history, and other MT5 operations.
-   - Do NOT fix this issue now.
+8. Minor cleanup/deprecation/hygiene items remain (Pydantic class-based Config,
+   .gitignore entries such as .pytest_cache/).
 
-Resolved since the Stage 6 audit: the market-data endpoint now requires
-authentication (Step 11).
+Resolved:
+
+- (Former item 9) MT5 blocking-call technical debt — RESOLVED by Step 19.
+  All MT5-backed endpoints (account-info, positions, market-data) now execute
+  their synchronous service calls off the event loop through the consolidated
+  run_mt5_call boundary in app/core/blocking.py.
+- The market-data endpoint now requires authentication (Step 11).
 
 These issues are known and must NOT be fixed automatically.
 
@@ -284,19 +369,24 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–17 are complete. The next logical areas, in no committed order, are:
+Steps 12–19 are complete. Before any further implementation, the Step 18/19
+working tree (positions + consolidated blocking boundary) should be committed
+as the next Git checkpoint.
 
-- consolidation of MT5 blocking-call handling across all MT5 operations
-  (resolves Known Issues item 9)
-- read-only MT5 positions and trade history through the established
+After that, the next logical areas, in no committed order, are:
+
+- read-only MT5 trade history through the established
   provider → service → API pattern
 - GET /users listing for Broker Admins (tenant-scoped)
+- tenant-scoped MT5 design (known issue 1)
 
 Do NOT implement any next step until explicitly instructed.
 
 When instructed, begin by inspecting the existing provider abstractions
-(app/providers/account_info.py, app/providers/market_data.py), the MT5 providers,
-and the composition root (app/core/dependencies.py).
+(app/providers/position.py, app/providers/account_info.py,
+app/providers/market_data.py), the MT5 providers, the consolidated blocking
+boundary (app/core/blocking.py), and the composition root
+(app/core/dependencies.py).
 
 ## Architectural Guardrails
 

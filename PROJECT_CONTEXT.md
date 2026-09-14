@@ -41,14 +41,19 @@ A Broker may reset an application password but should not see the user's current
 
 ## Core Entities
 
-Current implemented core entities:
+Current implemented core entities (database models):
 
 - Broker
-- User
+- User (with broker_admin/customer role)
+
+Current implemented provider contracts (not database models):
+
+- AccountInfo
+- Position
+- Candle
 
 Future/domain entities planned:
 
-- Position
 - Trade
 
 The repository must be treated as the source of truth for the exact current model implementation.
@@ -77,6 +82,7 @@ Current known fields:
 - password_hash
 - mt5_password_encrypted
 - is_active
+- role (broker_admin / customer)
 
 Important:
 
@@ -124,36 +130,35 @@ Primary structure:
 core/
 db/
 api/
-schemas/
 services/
 providers/
-utils/
 tests/
+scripts/
+alembic/
+
+(schemas/ and utils/ do not currently exist and must not be assumed.)
 
 No microservices unless there is a future explicit architectural decision.
 
 ## Provider Architecture
 
-MarketDataProvider is the abstraction for market-data access.
+The provider pattern is established for three MT5 data flows:
 
-Current contract:
+- MarketDataProvider: get_market_data(symbol) -> Candle
+- AccountInfoProvider: get_account_info() -> AccountInfo (nine fields)
+- PositionProvider: get_positions() -> tuple[Position, ...] (READ-ONLY)
 
-get_market_data(symbol: str) -> Candle
+Each contract is a typed NamedTuple (Candle, AccountInfo, Position) so raw
+MT5 objects never cross the provider boundary.
 
-Candle is a typed market-data contract containing:
+MT5MarketDataProvider, MT5AccountInfoProvider, and MT5PositionProvider
+implement the providers; FakeMarketDataProvider and FakePositionProvider
+back the tests.
 
-- timestamp
-- open
-- high
-- low
-- close
-- volume
+Services delegate to the provider abstractions.
 
-MT5MarketDataProvider implements the provider.
-
-MarketDataService delegates to the provider.
-
-The API exposes market data through the market-data route.
+The API exposes them through the market-data, account-info, and positions
+routes; all three are JWT-protected.
 
 ## MT5
 
@@ -165,7 +170,11 @@ MetaTrader5==5.0.6180
 
 MT5 operations can block.
 
-The current market-data API therefore keeps provider/service methods synchronous and moves the blocking operation outside the FastAPI event loop using a thread-pool boundary.
+Providers and services are deliberately synchronous.
+
+All MT5-backed endpoints move the blocking operation outside the FastAPI
+event loop through the consolidated blocking boundary run_mt5_call in
+app/core/blocking.py (worker threadpool).
 
 The provider contains MT5-specific integration logic.
 
@@ -176,14 +185,16 @@ The application must not expose MT5 implementation details unnecessarily.
 The current architecture includes:
 
 - lazy MT5 provider initialization
-- process-wide provider singleton
+- process-wide provider singleton (one cache per provider type, all
+  attaching to the same terminal session)
 - thread-safe initialization
 - failed initialization is not cached
 - provider shutdown
 - FastAPI lifespan
 - startup warm-up
 - graceful shutdown
-- blocking MT5 call through threadpool
+- blocking MT5 calls through the consolidated run_mt5_call boundary
+  (app/core/blocking.py)
 
 This process-wide singleton is a known current limitation and is not yet tenant-scoped.
 
@@ -191,20 +202,26 @@ Do not redesign it unless explicitly instructed.
 
 ## API
 
-Current market-data endpoint:
+Current JWT-protected, read-only endpoints:
 
-GET /market-data/{symbol}
+- GET /market-data/{symbol} → Candle response
+- GET /account-info → AccountInfo response (nine fields)
+- GET /positions → wrapped positions response; empty result is 200 with
+  {"positions": []}, never 404
+- POST /users → Broker-Admin-protected customer creation
 
-The endpoint returns a Candle response.
+Plus unauthenticated infrastructure:
+
+- POST /auth/login → JWT access token
+- GET /health → simple liveness probe (does not reflect MT5 readiness)
 
 Expected error mapping currently includes:
 
+- 401 for unauthenticated/invalid/expired tokens
+- 403 for non-admin access to admin-only endpoints
 - 404 when requested market data is unavailable
-- 503 when the market-data service is temporarily unavailable
-
-Authentication is a known next security concern for this endpoint.
-
-Do not assume authentication is currently implemented. Inspect the repository.
+- 409 for duplicate user creation conflicts
+- 503 when an MT5-backed service is temporarily unavailable
 
 ## Security
 
@@ -231,18 +248,19 @@ Do not add caching, queues, workers, microservices, AI orchestration, or other i
 
 ## Future Capabilities
 
+Already implemented today:
+
+- market data
+- account information (balance, equity, margin, free margin)
+- open positions
+- JWT authentication and user management
+
 Eventually the system may support:
 
-- account information
-- balance
-- equity
-- margin
-- positions
 - trade history
 - P&L
 - risk
 - exposure
-- market data
 - technical analysis
 - fundamental analysis
 - news

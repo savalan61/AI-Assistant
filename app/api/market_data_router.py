@@ -2,8 +2,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from starlette.concurrency import run_in_threadpool
 
+from app.core.blocking import run_mt5_call
 from app.core.dependencies import get_current_user, get_market_data_service
 from app.db.models import User
 from app.services.market import MarketDataService
@@ -33,11 +33,11 @@ async def get_market_data(
     service: MarketDataService = Depends(get_market_data_service),
 ):
     # The provider call blocks (MT5), so it is explicitly offloaded from the
-    # event loop into the worker threadpool.
+    # event loop through the consolidated MT5 blocking boundary.
     # ValueError means invalid/unavailable symbol (client error 404);
     # RuntimeError means MT5 infrastructure failure (server error 503).
     try:
-        candle = await run_in_threadpool(service.get_market_data, symbol)
+        candle = await run_mt5_call(service.get_market_data, symbol)
     except ValueError:
         raise HTTPException(status_code=404, detail="Market data unavailable for the requested symbol")
     except RuntimeError:

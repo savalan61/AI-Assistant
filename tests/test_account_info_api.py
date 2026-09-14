@@ -9,16 +9,18 @@ dependency all run. JWT config uses test-only values. No pytest asyncio
 plugin: async setup is driven with asyncio.run.
 """
 import asyncio
+import threading
 from typing import AsyncIterator
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import app.core.dependencies as deps
 from app.api.account_info_router import router
+from app.core.blocking import run_mt5_call
 from app.core.config import settings as app_settings
 from app.core.security import create_access_token
 from app.db.base import Base
@@ -52,16 +54,18 @@ def make_fake_provider_class(info: AccountInfo = ACCOUNT_INFO, error: Exception 
     """Build a fake provider class at the composition-root seam.
 
     The composition root constructs the class with no arguments, so the
-    configured result/error travel via closure; call counts are recorded.
+    configured result/error travel via closure; call counts and the thread ids
+    the provider ran on are recorded (thread offload is asserted in tests).
     """
-    record: dict[str, int] = {"calls": 0}
+    record: dict[str, object] = {"calls": 0, "call_threads": []}
 
     class FakeAccountInfoProvider:
         def __init__(self) -> None:
             pass
 
         def get_account_info(self) -> AccountInfo:
-            record["calls"] += 1
+            record["calls"] = int(record["calls"]) + 1  # type: ignore[call-overload]
+            record["call_threads"] = [*record["call_threads"], threading.get_ident()]  # type: ignore[dict-item]
             if error is not None:
                 raise error
             return info
@@ -336,3 +340,54 @@ def test_service_delegates_to_provider_exactly_once(account_env, patched_account
         c.get("/account-info", headers=auth_header(create_access_token(str(account_env["ids"]["customer_id"]))))
 
     assert record["calls"] == 1
+
+
+# --- blocking boundary (Step 19: consolidation) --------------------------------------
+
+
+def test_blocking_call_runs_off_the_event_loop_thread(account_env, patched_account_provider):
+    record = patched_account_provider()
+    loop_thread: dict[str, int] = {}
+
+    async def capture_loop_thread() -> None:
+        # Async dependencies run on the event loop: record its thread id
+        # (same mechanism as the positions boundary test).
+        loop_thread["id"] = threading.get_ident()
+
+    app = FastAPI()
+    app.include_router(router, dependencies=[Depends(capture_loop_thread)])
+    apply_overrides(account_env, app)
+    client = TestClient(app)
+
+    with client as c:
+        response = c.get(
+            "/account-info", headers=auth_header(create_access_token(str(account_env["ids"]["customer_id"])))
+        )
+
+    assert response.status_code == 200
+    assert response.json()["login"] == 10001
+    assert record["call_threads"], "provider was never called"
+    # The provider must have run on a worker thread, never the event loop.
+    assert all(t != loop_thread["id"] for t in record["call_threads"])  # type: ignore[union-attr]
+
+
+def test_consolidated_boundary_is_the_single_mt5_execution_path():
+    # Every MT5-touching router must go through run_mt5_call; a direct
+    # starlette run_in_threadpool import in a router would signal a second,
+    # unconsolidated boundary.
+    import inspect
+
+    from app.api import account_info_router, market_data_router, positions_router
+
+    for module in (account_info_router, market_data_router, positions_router):
+        source = inspect.getsource(module)
+        assert "run_mt5_call" in source, f"{module.__name__} bypasses the consolidated boundary"
+        assert "starlette.concurrency" not in source, f"{module.__name__} imports its own boundary"
+
+
+def apply_overrides(account_env, target_app: FastAPI) -> None:
+    async def override_get_db() -> AsyncIterator[AsyncSession]:
+        async with account_env["factory"]() as session:
+            yield session
+
+    target_app.dependency_overrides[get_db] = override_get_db

@@ -7,9 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
 from app.db.models import User, UserRole
-from app.providers import AccountInfoProvider, MT5AccountInfoProvider, MarketDataProvider, MT5MarketDataProvider
+from app.providers import (
+    AccountInfoProvider,
+    MT5AccountInfoProvider,
+    MT5MarketDataProvider,
+    MT5PositionProvider,
+    MarketDataProvider,
+    PositionProvider,
+)
 from app.services.account import AccountInfoService
 from app.services.market import MarketDataService
+from app.services.positions import PositionService
 
 # Process-wide provider cache. It stays None until a construction succeeds, so
 # a failed MT5 initialization is never cached and later requests may retry.
@@ -80,6 +88,40 @@ def shutdown_account_info() -> None:
     # so the next request constructs a fresh one. Safe when nothing was built.
     global _account_info_provider
     provider, _account_info_provider = _account_info_provider, None
+    shutdown = getattr(provider, "shutdown", None)
+    if callable(shutdown):
+        shutdown()
+
+
+# Process-wide positions provider cache, mirroring the market-data and
+# account-info ones: lazy, lock-guarded, failed initialization never cached.
+_position_provider: PositionProvider | None = None
+_position_provider_lock = threading.Lock()
+
+
+def get_position_provider() -> PositionProvider:
+    global _position_provider
+    if _position_provider is None:
+        with _position_provider_lock:
+            if _position_provider is None:
+                _position_provider = MT5PositionProvider()
+    return _position_provider
+
+
+def get_position_service() -> PositionService:
+    # MT5 initialization failure at this boundary is a service availability issue (503).
+    try:
+        provider = get_position_provider()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Positions service temporarily unavailable")
+    return PositionService(provider)
+
+
+def shutdown_positions() -> None:
+    # Shut down the cached positions provider, if any, and clear the cache
+    # so the next request constructs a fresh one. Safe when nothing was built.
+    global _position_provider
+    provider, _position_provider = _position_provider, None
     shutdown = getattr(provider, "shutdown", None)
     if callable(shutdown):
         shutdown()

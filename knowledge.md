@@ -63,6 +63,7 @@ app/
     
 tests/
 alembic/
+scripts/
 
 Current known modules:
 
@@ -72,6 +73,7 @@ app/api/
 app/services/
 app/providers/
 tests/
+scripts/
 
 The following directories are NOT currently present and must not be assumed to exist:
 
@@ -90,6 +92,7 @@ security
 exceptions
 logging
 dependency/composition wiring
+consolidated MT5 blocking boundary (app/core/blocking.py)
 db
 
 Database infrastructure:
@@ -107,6 +110,7 @@ HTTP dependencies
 HTTP-specific behavior
 HTTP error mapping
 HTTP response schemas when appropriate
+offloading of blocking MT5-backed service calls via run_mt5_call
 services
 
 Application/business logic.
@@ -152,6 +156,18 @@ MT5MarketDataProvider
  ↓
 MetaTrader 5
 
+The same pattern is established for account information and open positions:
+
+API
+ ↓
+AccountInfoService / PositionService
+ ↓
+AccountInfoProvider / PositionProvider
+ ↓
+MT5AccountInfoProvider / MT5PositionProvider
+ ↓
+MetaTrader 5
+
 The API must not contain MT5/business logic.
 
 The service must not directly depend on MT5.
@@ -183,13 +199,23 @@ Do not modify database models unless the current task explicitly requires it.
 
 5. Authentication Status
 
-JWT authentication is a planned part of the product architecture, but it is not currently implemented in the repository.
+JWT authentication IS implemented and verified:
 
-Do not assume that authentication already exists.
+bcrypt password hashing/verification (app/core/security.py)
+PyJWT access-token creation/decoding with expiration validation
+POST /auth/login issues the token
+get_current_user() in app/core/dependencies.py resolves a Bearer JWT to the
+database-backed active User
+get_current_broker_admin() adds database-backed role authorization
+All MT5-touching endpoints (market-data, account-info, positions) and
+POST /users require authentication
 
-Do not add authentication as part of an unrelated task.
+Authentication failures return HTTP 401 with WWW-Authenticate: Bearer; the
+authoritative broker_id and role always come from the database User record,
+never from JWT claims.
 
-Authentication will be implemented deliberately in a future stage.
+Future stages may extend authentication (refresh tokens, channel identity,
+etc.), but the core login/JWT/dependency path must be treated as existing.
 
 6. Multi-Tenant Architecture
 
@@ -205,9 +231,16 @@ The database architecture is intended to support broker-level isolation and pote
 
 However:
 
-Tenant isolation is not currently implemented in the market-data flow.
+Tenant isolation is implemented at the database level (broker-scoped unique
+constraints, broker_id on User) and in user management (a Broker Admin can
+only create users in their own tenant).
 
-Do NOT implement tenant isolation during unrelated tasks.
+Tenant isolation is NOT yet implemented in the MT5 data flows: the MT5
+terminal connection is process-wide and non-tenant-scoped, so market-data,
+account-info, and positions are not scoped to the authenticated user's
+broker.
+
+Do NOT implement MT5 tenant isolation during unrelated tasks.
 
 When tenant isolation is introduced, it must be designed explicitly and consistently across:
 
@@ -246,7 +279,7 @@ without changing application/business logic.
 
 8. Current Composition Root
 
-The current market-data composition/wiring is located in:
+The current composition/wiring is located in:
 
 app/core/dependencies.py
 
@@ -255,19 +288,48 @@ The API router should not directly construct the concrete MT5 provider.
 Current responsibility separation:
 
 app/core/dependencies.py
-    → dependency/composition wiring
+    → dependency/composition wiring + provider caches (market-data,
+      account-info, positions) + authentication dependencies
+
+app/core/blocking.py
+    → consolidated blocking boundary: run_mt5_call(...) executes synchronous
+      MT5-backed service calls on the worker threadpool, never on the event loop
 
 app/services/market/market_data_service.py
-    → application/service logic
+    → application/service logic (market data)
+
+app/services/account/account_info_service.py
+    → application/service logic (account information)
+
+app/services/positions/position_service.py
+    → application/service logic (open positions)
 
 app/providers/market_data.py
     → provider abstraction + Candle contract
 
 app/providers/mt5_market_data.py
-    → MT5 implementation
+    → MT5 implementation (market data)
+
+app/providers/account_info.py
+    → provider abstraction + AccountInfo contract
+
+app/providers/mt5_account_info.py
+    → MT5 implementation (account information)
+
+app/providers/position.py
+    → provider abstraction + Position contract
+
+app/providers/mt5_positions.py
+    → MT5 implementation (open positions)
 
 app/api/market_data_router.py
     → HTTP route + HTTP error mapping + CandleResponse
+
+app/api/account_info_router.py
+    → HTTP route + HTTP error mapping + AccountInfoResponse
+
+app/api/positions_router.py
+    → HTTP route + HTTP error mapping + PositionsResponse
 
 Keep this separation unless an explicit architecture task changes it.
 
@@ -293,36 +355,57 @@ Do not change the provider contract to async unless explicitly requested.
 
 10. MT5 Provider
 
-Current real provider:
+Current real providers:
 
 app/providers/mt5_market_data.py
+app/providers/mt5_account_info.py
+app/providers/mt5_positions.py
 
-It uses the Python MetaTrader 5 package.
+They use the Python MetaTrader 5 package.
 
 Installed version:
 
-metatrader5 5.0.6180
+MetaTrader5==5.0.6180 (pinned in requirements.txt)
 
 Important:
 
 MT5 Python calls are blocking.
 
-Future architecture must handle this explicitly.
+The blocking boundary is now consolidated in app/core/blocking.py
+(run_mt5_call): every MT5-touching endpoint routes its synchronous service
+call through it so the blocking operation never runs on the FastAPI event
+loop. Providers and services stay deliberately synchronous.
 
 Do not modify MT5 lifecycle or blocking behavior during unrelated tasks.
 
 11. Current API
 
-Current market-data endpoint:
+Current read-only, JWT-protected endpoints:
 
+POST /auth/login
 GET /market-data/{symbol}
+GET /account-info
+GET /positions
+POST /users (Broker Admin only)
+GET /health (unauthenticated infrastructure probe; does not reflect MT5 readiness)
 
 Current HTTP layer is responsible for:
 
 receiving the request
+offloading the blocking MT5-backed service call via run_mt5_call
 calling the service
 converting service/provider failures into HTTP responses
 returning the HTTP/Pydantic response schema
+
+Error mapping for the MT5 endpoints:
+
+401 unauthenticated/invalid token
+404 market data unavailable for the requested symbol (market-data only)
+409 duplicate user (POST /users)
+503 MT5 infrastructure/availability failure
+
+GET /positions returns {"positions": [...]}; an empty result is a normal 200
+with {"positions": []}, never a 404.
 
 Do not change the API contract unless the current task explicitly requires it.
 
@@ -338,21 +421,24 @@ Current test directory:
 
 tests/
 
+The suite currently has 145 passing tests (verified 2026-09-14 with
+pytest tests/ -q; the 3 remaining warnings are pre-existing third-party
+deprecation warnings).
+
 A root-level:
 
 conftest.py
 
 exists to make project imports work during pytest execution.
 
-Current Fake Provider:
+Current Fake Providers:
 
 app/providers/fake_market_data.py
+app/providers/fake_position.py
 
-Current service tests:
-
-tests/test_market_data_service.py
-
-The Fake Provider is intended for testing and returns deterministic Candle data.
+Note: the Fake Providers are used to test service/API behavior without MT5;
+authentication endpoints are tested against a SQLite/AIOSQLite-backed
+session. Tests never require a real MetaTrader terminal.
 
 Tests do not require:
 
@@ -373,30 +459,30 @@ Completed:
 5. Provider dependency/composition extraction
 6. Fake Market Data Provider
 7. MarketDataService unit tests
+8. MT5 lifecycle (lazy process-wide singleton, thread-safe init, failed init
+   not cached, FastAPI lifespan startup/shutdown, graceful shutdown)
+9. JWT authentication (hashing, tokens, login endpoint, get_current_user,
+   broker-admin authorization)
+10. User roles (broker_admin/customer) and POST /users customer creation
+11. Read-only MT5 account information (contract, provider, service, API)
+12. Read-only MT5 open positions (contract, provider, service, API)
+13. Consolidated MT5 blocking boundary (app/core/blocking.py, run_mt5_call)
+    used by market-data, account-info, and positions
 
-Stage 5 verification:
-
-pytest tests/ -v
-4 passed
-
-The tests verify:
-
-service works with FakeMarketDataProvider
-provider abstraction is respected
-get_market_data(symbol) delegation works
-symbol is passed correctly
-deterministic Candle values are returned
+The repository remains strictly read-only with respect to trading.
 14. Current Development Stage
 
-The project has completed the initial Provider Architecture validation.
+The project has completed the MT5 read-only data foundation (lifecycle,
+market data, account information, open positions) and the consolidated
+blocking boundary.
 
 The next planned stage is:
 
-Stage 6 — MT5 Lifecycle / Blocking Boundary
+Stage 20 — MT5 Trade History (READ-ONLY) or another explicitly chosen area
 
 However:
 
-Do not start Stage 6 automatically.
+Do not start any next stage automatically.
 
 Wait for explicit instruction.
 
@@ -420,6 +506,14 @@ Blocking MT5 / async boundary
         ↓
 Authentication
         ↓
+User roles / user management
+        ↓
+Account information (read-only)
+        ↓
+Open positions (read-only)
+        ↓
+Trade history (read-only)
+        ↓
 Tenant-aware market data
         ↓
 Trading/account data
@@ -442,46 +536,45 @@ The exact order may change as architecture decisions are made.
 
 Do not implement future stages without explicit instruction.
 
-16. Future MT5 Lifecycle
+16. MT5 Lifecycle and Blocking Boundary
 
-The current implementation requires future lifecycle improvements.
-
-Future work should address:
+The current implementation already provides:
 
 process-level MT5 lifecycle
-initialization
-shutdown
-avoiding unnecessary repeated initialization
-controlled execution of blocking MT5 calls
-timeouts where appropriate
-multiple broker/customer MT5 sessions
+lazy process-wide provider initialization (one cache per provider type,
+all attaching to the same terminal session)
+thread-safe initialization; failed initialization is not cached
+provider shutdown via FastAPI lifespan (startup warm-up, graceful shutdown)
+controlled execution of blocking MT5 calls through run_mt5_call
+(app/core/blocking.py)
+
+Future work should still address:
+
+MT5 IPC timeouts where appropriate
+multiple broker/customer MT5 sessions (tenant-scoped connections)
 broker-specific MT5 configuration
+multi-worker deployment semantics
 
 These are future architecture tasks.
 
 Do not implement them during unrelated work.
 
-17. Future Async Boundary
+17. Async Boundary
 
 MT5 is blocking.
 
-Future architecture should explicitly separate:
+The async boundary is now explicitly implemented:
 
 Async FastAPI
       ↓
-Async Service Boundary
+run_mt5_call (worker threadpool) — app/core/blocking.py
       ↓
-Blocking MT5 Adapter
+Synchronous Service
+      ↓
+Synchronous Provider (Blocking MT5 Adapter)
 
-A possible implementation may use:
-
-asyncio.to_thread(...)
-
-or another controlled execution mechanism.
-
-The exact implementation must be decided when Stage 6 begins.
-
-Do not introduce async changes prematurely.
+It uses starlette's run_in_threadpool. Do not change this mechanism during
+unrelated work.
 
 18. Time Handling
 
@@ -707,12 +800,11 @@ Do not mix this cleanup into unrelated feature work unless explicitly requested.
 
 27. Current Immediate Objective
 
-Stage 5 is complete and verified.
+Steps 18–19 (MT5 Open Positions, Consolidate MT5 Blocking Boundary) are
+implemented and verified in the working tree but NOT yet committed.
 
-The next planned objective is:
+The immediate objective is to commit the Step 18/19 work as the next Git
+checkpoint.
 
-Stage 6 — MT5 Lifecycle / Blocking Boundary
-
-Do not implement Stage 6 automatically.
-
-Wait for explicit instruction from the project owner.
+After that, wait for explicit instruction before starting any further stage
+(e.g. read-only trade history).
