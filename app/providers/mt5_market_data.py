@@ -54,3 +54,12 @@ class MT5MarketDataProvider(MarketDataProvider):
             close=float(rate[4]),
             volume=float(rate[5]),
         )
+
+    def shutdown(self) -> None:
+        # Release the terminal connection. Runs during application shutdown, so
+        # any failure (e.g. terminal already gone) is deliberately swallowed:
+        # shutdown must never raise at process exit.
+        try:
+            mt5_api.shutdown()
+        except Exception:  # expected third-party MT5 failure during teardown only
+            pass
