@@ -2,27 +2,19 @@
 
 ## Current Status
 
-Step 8 — Authentication Security Foundation
+Step 9 — Current User Authentication Dependency
 
 Status:
 
-VERIFIED + READY FOR CHECKPOINT
+VERIFIED + READY FOR COMMIT
 
-Previous checkpoint (Stage 6 — MT5 Lifecycle / Blocking Boundary):
+Previous checkpoint (Step 8 — Authentication Security Foundation):
 
-cc782e074a73e36bd6a1874cb0c4e712d35f7169 (cc782e0, "feat(mt5): add lifecycle and blocking boundary")
+531e5cbc479ab1c35af8ff0e16ee4c3fb311b347 (531e5cb, "feat(auth): add security foundation")
 
 Working tree at this checkpoint:
 
-The Step 8 implementation is now committed:
-
-531e5cbc479ab1c35af8ff0e16ee4c3fb311b347 (531e5cb)
-
-Commit message:
-
-feat(auth): add security foundation
-
-The working tree is CLEAN.
+The Step 9 implementation files (app/core/dependencies.py, requirements.txt, tests/test_get_current_user.py) are present and verified but NOT yet committed; they are ready for the next Step 9 commit.
 
 ## Completed Stages
 
@@ -54,6 +46,9 @@ Completed and committed.
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
+
+### Step 9 — Current User Authentication Dependency
+Verified. Implementation files remain uncommitted in the working tree (see Current Status).
 
 ## Stage 6 Implementation
 
@@ -195,13 +190,48 @@ Dependencies added: bcrypt==5.0.0, PyJWT==2.14.0 (no passlib).
 - No MT5/provider changes
 - No secrets committed
 
+## Step 9 Implementation
+
+### Current-User Dependency
+
+get_current_user() implemented in app/core/dependencies.py:
+
+- FastAPI HTTPBearer extraction (Authorization: Bearer <JWT>); no manual header parsing
+- JWT validation delegated to decode_token(); no duplicated JWT logic
+- JWT sub safely validated as User.id (string check + int coercion)
+- User loaded from the existing get_db() AsyncSession by primary key (session.get)
+- nonexistent users rejected; inactive users rejected (is_active checked)
+- returns the real User ORM object; broker_id comes from the database record, never from token claims
+
+### Authentication Behavior
+
+- All expected authentication failures return HTTP 401 with WWW-Authenticate: Bearer and generic messages
+- JWT and database internals never reach the client
+- Database/infrastructure failures are deliberately not swallowed (propagate as server errors)
+
+### Explicit Non-Goals (still true after Step 9)
+
+- No login endpoint or /auth router
+- No API route protected yet (get_current_user is not attached to any route)
+- No authorization system or broker checks
+- No MT5/provider code changed
+- No secrets committed
+
+### Step 9 Verification
+
+- pytest tests/ -v → 35 passed (4 service + 8 lifecycle + 13 security + 10 dependency)
+- git diff --check → clean
+- py_compile → clean
+- Pylance/pyright/mypy unavailable; manual static/type review completed
+- aiosqlite==0.22.1 added to requirements.txt for the SQLite-backed test database
+
 ## Next Logical Area
 
-The next logical authentication slice is the authentication dependency / current-user foundation (get_current_user), built on the Step 8 security primitives.
+The next logical authentication slice is the login/authentication endpoint that verifies application credentials and issues an access token.
 
 Do NOT implement it until explicitly instructed.
 
-When instructed, begin by inspecting the existing app/core/security.py primitives, the User model, and the currently unused get_db() session dependency.
+When instructed, begin by inspecting app/core/security.py (hash_password/verify_password/create_access_token), the User model, and the existing get_current_user dependency.
 
 ## Architectural Guardrails
 
