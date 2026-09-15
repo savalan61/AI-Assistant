@@ -3,16 +3,16 @@
 Require none of: real MT5, PostgreSQL, network, or real credentials. Provider
 tests use a deterministic fake at the TradeHistoryProvider abstraction (the
 FakePositionProvider pattern); API tests patch the composition-root provider
-class seam (app.core.dependencies.MT5TradeHistoryProvider) with the singleton
-cache reset, following the established lifecycle-test pattern, and override
-get_db with a per-test file-based async SQLite database. JWT config uses
-test-only values. No pytest asyncio plugin: async setup is driven with
-asyncio.run.
+class seam (app.core.dependencies.MT5TradeHistoryProvider), which now receives
+the authenticated tenant's MT5 credentials and the process-wide session
+manager, and override get_db with a per-test file-based async SQLite database.
+JWT config uses test-only values. No pytest asyncio plugin: async setup is
+driven with asyncio.run.
 """
 import asyncio
 import threading
 from datetime import UTC, datetime
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from urllib.parse import urlencode
 
 import pytest
@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import app.core.dependencies as deps
 from app.api.trade_history_router import router
 from app.core.config import settings as app_settings
+from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
@@ -96,19 +97,41 @@ def test_service_returns_exactly_what_provider_returns():
 # --- API fixtures / helpers ----------------------------------------------------------
 
 
+class _FakeMT5:
+    """Minimal MT5 seam so a real MT5SessionManager can run without a terminal."""
+
+    def initialize(self, **kwargs: object) -> bool:
+        return True
+
+    def login(self, **kwargs: object) -> bool:
+        return True
+
+    def last_error(self) -> tuple[int, str]:
+        return (-1, "simulated MT5 failure")
+
+    def shutdown(self) -> None:
+        pass
+
+
 def make_fake_provider_class(trades: tuple[TradeHistoryEntry, ...], error: Exception | None = None):
     """Fake provider class at the composition-root seam; calls and threads recorded."""
-    record: dict[str, object] = {"calls": 0, "call_threads": [], "from_time": None, "to_time": None}
+    record: dict[str, Any] = {
+        "calls": 0,
+        "call_threads": [],
+        "from_time": None,
+        "to_time": None,
+        "credentials": [],
+    }
 
     class FakeTradeHistoryProvider:
-        def __init__(self) -> None:
-            pass
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            record["credentials"].append(credentials)
 
         def get_trade_history(self, from_time: datetime, to_time: datetime) -> tuple[TradeHistoryEntry, ...]:
             record["calls"] = int(record["calls"]) + 1
-            record["call_threads"] = [*record["call_threads"], threading.get_ident()]  # type: ignore[dict-item]
-            record["from_time"] = from_time  # type: ignore[assignment]
-            record["to_time"] = to_time  # type: ignore[assignment]
+            record["call_threads"].append(threading.get_ident())
+            record["from_time"] = from_time
+            record["to_time"] = to_time
             if error is not None:
                 raise error
             return trades
@@ -127,12 +150,10 @@ def patched_trade_history_provider(monkeypatch):
     def _install(trades: tuple[TradeHistoryEntry, ...] = (), error: Exception | None = None):
         cls, record = make_fake_provider_class(trades, error)
         monkeypatch.setattr(deps, "MT5TradeHistoryProvider", cls)
-        deps._trade_history_provider = None
         return record
 
     yield _install
-    # Never leak a fake (or real) provider into other tests.
-    deps._trade_history_provider = None
+    # monkeypatch restores the real provider class after each test.
 
 
 @pytest.fixture()
@@ -506,14 +527,11 @@ def test_provider_runtime_error_maps_to_503(trade_history_env, patched_trade_his
     assert response.json()["detail"] == "Trade history service temporarily unavailable"
 
 
-def test_provider_initialization_failure_maps_to_503_and_is_not_cached(trade_history_env, monkeypatch):
-    def failing_init(self) -> None:
-        raise RuntimeError("MT5 initialization failed: simulated")
-
-    cls, _ = make_fake_provider_class(())
-    monkeypatch.setattr(cls, "__init__", failing_init)
-    monkeypatch.setattr(deps, "MT5TradeHistoryProvider", cls)
-    deps._trade_history_provider = None
+def test_mt5_session_failure_maps_to_503_and_is_not_cached(trade_history_env, monkeypatch):
+    # The real provider runs (no provider-class fake): the seeded user has no
+    # stored MT5 password, so the session boundary refuses and the failure maps
+    # to a service-availability error — with no credentials disclosed.
+    monkeypatch.setattr(deps, "_mt5_session_manager", MT5SessionManager(mt5_api=_FakeMT5()), raising=True)
     client = trade_history_env["make_app"]()
 
     with client as c:
@@ -523,8 +541,8 @@ def test_provider_initialization_failure_maps_to_503_and_is_not_cached(trade_his
         )
 
     assert response.status_code == 503
-    assert deps._trade_history_provider is None  # failed construction not cached; later requests retry
-    deps._trade_history_provider = None
+    assert response.json()["detail"] == "Trade history service temporarily unavailable"
+    assert deps.get_mt5_session_manager().authenticated_account is None  # nothing cached
 
 
 # --- blocking boundary -------------------------------------------------------------------
@@ -543,7 +561,7 @@ def make_thread_checking_provider_class(trades: tuple[TradeHistoryEntry, ...]):
         loop_thread["id"] = threading.get_ident()
 
     class ThreadCheckingTradeHistoryProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_trade_history(self, from_time: datetime, to_time: datetime) -> tuple[TradeHistoryEntry, ...]:
@@ -557,7 +575,6 @@ def make_thread_checking_provider_class(trades: tuple[TradeHistoryEntry, ...]):
 def test_blocking_call_runs_off_the_event_loop_thread(trade_history_env, monkeypatch):
     provider_cls, capture_loop_thread = make_thread_checking_provider_class((BUY_TRADE,))
     monkeypatch.setattr(deps, "MT5TradeHistoryProvider", provider_cls)
-    deps._trade_history_provider = None
     app = FastAPI()
     app.include_router(router, dependencies=[Depends(capture_loop_thread)])
     apply_overrides(trade_history_env, app)
@@ -572,7 +589,6 @@ def test_blocking_call_runs_off_the_event_loop_thread(trade_history_env, monkeyp
     assert response.status_code == 200
     # The provider was invoked, and on a worker thread — not the event loop.
     assert response.json()["trades"][0]["ticket"] == 246802468
-    deps._trade_history_provider = None
 
 
 def apply_overrides(trade_history_env, target_app: FastAPI) -> None:
@@ -585,11 +601,13 @@ def apply_overrides(trade_history_env, target_app: FastAPI) -> None:
     target_app.dependency_overrides[_get_db] = override_get_db
 
 
-# --- composition-root cache identity ------------------------------------------------------
+# --- composition-root tenant binding -----------------------------------------------------
 
 
-def test_composition_root_constructs_provider_once(trade_history_env, patched_trade_history_provider):
-    patched_trade_history_provider((BUY_TRADE,))
+def test_composition_root_binds_the_provider_to_the_authenticated_tenant(
+    trade_history_env, patched_trade_history_provider
+):
+    record = patched_trade_history_provider((BUY_TRADE,))
     client = trade_history_env["make_app"]()
 
     with client as c:
@@ -599,8 +617,9 @@ def test_composition_root_constructs_provider_once(trade_history_env, patched_tr
                 headers=auth_header(create_access_token(str(trade_history_env["user_id"]))),
             )
 
-    # Two requests, one cached provider instance.
-    first = deps.get_trade_history_service()
-    second = deps.get_trade_history_service()
-    assert first._provider is second._provider
-    assert deps._trade_history_provider is first._provider
+    # Providers are cheap per-request objects now (the process-wide state is the
+    # MT5 session), each built with the caller's own resolved MT5 identity.
+    assert len(record["credentials"]) == 2
+    for credentials in record["credentials"]:
+        assert isinstance(credentials, MT5AccountCredentials)
+        assert credentials.login == 10001

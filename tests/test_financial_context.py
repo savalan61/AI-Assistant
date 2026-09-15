@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 import app.core.dependencies as deps
+from app.core.mt5_session import MT5AccountCredentials
 from app.providers.account_info import AccountInfo, AccountInfoProvider
 from app.providers.fake_position import FakePositionProvider
 from app.providers.fake_trade_history import FakeTradeHistoryProvider
@@ -322,24 +323,29 @@ def test_trade_history_provider_failure_propagates() -> None:
 
 @pytest.fixture()
 def composition_root_fakes(monkeypatch: pytest.MonkeyPatch):
-    """Patch the three provider seams with in-memory fakes (no MT5 terminal)."""
+    """Patch the three provider seams with in-memory fakes (no MT5 terminal).
+
+    The composition root builds each provider with the authenticated tenant's
+    credentials and the process-wide session manager, so the fakes accept both
+    (and ignore them: the session boundary has its own tests).
+    """
 
     class FakeMT5AccountInfoProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_account_info(self) -> AccountInfo:
             return ACCOUNT
 
     class FakeMT5PositionProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_positions(self) -> tuple[Position, ...]:
             return POSITIONS
 
     class FakeMT5TradeHistoryProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_trade_history(self, from_time: datetime, to_time: datetime) -> tuple[TradeHistoryEntry, ...]:
@@ -348,22 +354,16 @@ def composition_root_fakes(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(deps, "MT5AccountInfoProvider", FakeMT5AccountInfoProvider)
     monkeypatch.setattr(deps, "MT5PositionProvider", FakeMT5PositionProvider)
     monkeypatch.setattr(deps, "MT5TradeHistoryProvider", FakeMT5TradeHistoryProvider)
-    deps._account_info_provider = None
-    deps._position_provider = None
-    deps._trade_history_provider = None
-    yield
-    # Never leak fakes (or real providers) into other tests.
-    deps._account_info_provider = None
-    deps._position_provider = None
-    deps._trade_history_provider = None
 
 
 def test_service_composes_the_real_composition_root_services(composition_root_fakes) -> None:
-    # The service is assembled from the same getters an API endpoint would use.
+    # The service is assembled from the same getters an API endpoint would use,
+    # bound to one tenant's resolved MT5 credentials.
+    credentials = MT5AccountCredentials(login=10001, server="Test-Broker", password_encrypted="cipher")
     service = FinancialContextService(
-        account_service=deps.get_account_info_service(),
-        position_service=deps.get_position_service(),
-        trade_history_service=deps.get_trade_history_service(),
+        account_service=deps.get_account_info_service(credentials),
+        position_service=deps.get_position_service(credentials),
+        trade_history_service=deps.get_trade_history_service(credentials),
     )
 
     context = service.build(broker_id=5, now=AS_OF, trade_history_days=14)

@@ -5,8 +5,9 @@ LLM. The production LLM seam (deps.get_llm_provider) is now the broker-aware
 LLMRouter: a broker with an active configuration uses its own provider, and a
 broker without one uses the shared free pool. Both are exercised here directly
 with monkeypatched settings and a patched broker resolver, and get_agent_service
-is driven with the MT5 provider classes patched to inert fakes (the established
-lifecycle-test pattern), so no terminal and no HTTP call is ever involved.
+is driven with the MT5 provider classes patched to inert fakes and the tenant
+credential resolution stubbed (the established lifecycle-test pattern), so no
+terminal and no HTTP call is ever involved.
 """
 import asyncio
 
@@ -15,6 +16,7 @@ from fastapi import HTTPException
 
 import app.core.dependencies as deps
 from app.core.config import settings
+from app.core.mt5_session import MT5AccountCredentials
 from app.db.models import User, UserRole
 from app.providers.fake_llm import FakeLLMProvider
 from app.providers.llm import LLMPrompt, LLMProvider
@@ -25,39 +27,42 @@ from app.services.agent import AgentService, OutboundDataPolicy
 from app.services.broker_llm_config import BrokerLLMConfigurationError
 
 
-@pytest.fixture(autouse=True)
-def reset_provider_caches():
-    # Never leak constructed providers (fakes or real) into other tests.
-    yield
-    deps._account_info_provider = None
-    deps._position_provider = None
-    deps._trade_history_provider = None
+# The "cipher" value is a test-only marker; it is never a real secret.
+TENANT_CREDENTIALS = MT5AccountCredentials(login=10001, server="Wiring-Broker", password_encrypted="cipher")
 
 
 @pytest.fixture()
 def inert_mt5_providers(monkeypatch: pytest.MonkeyPatch):
-    """Replace the MT5 provider classes with constructors that do nothing."""
+    """Replace the MT5 provider classes with inert fakes and stub credentials.
 
-    account_constructions: list[object] = []
+    Providers are constructed with the authenticated tenant's credentials and
+    the process-wide session manager; both are recorded so the wiring can be
+    asserted without a terminal.
+    """
+
+    account_constructions: list[dict[str, object]] = []
 
     class InertAccountProvider:
-        def __init__(self) -> None:
-            account_constructions.append(self)
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            account_constructions.append({"session_manager": session_manager, "credentials": credentials})
 
     class InertPositionsProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
     class InertTradeProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
+
+    async def stub_credentials(user: User, session: object) -> MT5AccountCredentials:
+        # Stands in for the DB-backed resolution: get_agent_service receives the
+        # tenant identity from the caller, never from a request.
+        return TENANT_CREDENTIALS
 
     monkeypatch.setattr(deps, "MT5AccountInfoProvider", InertAccountProvider)
     monkeypatch.setattr(deps, "MT5PositionProvider", InertPositionsProvider)
     monkeypatch.setattr(deps, "MT5TradeHistoryProvider", InertTradeProvider)
-    deps._account_info_provider = None
-    deps._position_provider = None
-    deps._trade_history_provider = None
+    monkeypatch.setattr(deps, "get_mt5_credentials", stub_credentials)
     return {"account_constructions": account_constructions}
 
 
@@ -215,11 +220,13 @@ def test_agent_service_reuses_the_single_mt5_composition_paths(
     first = asyncio.run(deps.get_agent_service(make_user(), object()))
     second = asyncio.run(deps.get_agent_service(make_user(), object()))
 
-    # The financial services flow through the existing cached composition-root
-    # paths, so repeated construction reuses the same provider objects (exactly
-    # one account/positions/trade-history architecture, no parallel wiring).
-    assert deps._account_info_provider is not None
-    assert deps.get_account_info_provider() is deps._account_info_provider
+    # The financial services flow through the existing composition-root paths;
+    # repeated construction builds new per-request providers (no parallel wiring)
+    # around the ONE process-wide MT5 session and this tenant's credentials.
+    constructions = inert_mt5_providers["account_constructions"]
+    assert [c["credentials"] for c in constructions] == [TENANT_CREDENTIALS, TENANT_CREDENTIALS]
+    assert constructions[0]["session_manager"] is constructions[1]["session_manager"]
+    assert constructions[0]["session_manager"] is deps.get_mt5_session_manager()
     assert first is not second
 
 

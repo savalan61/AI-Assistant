@@ -1,22 +1,28 @@
 """Tests for MT5TradeHistoryProvider (read-only executed trade history).
 
-All tests patch the module-level MT5 seam (app.providers.mt5_trade_history.mt5_api)
-with a configurable fake, so none of them require a real MT5 terminal,
-credentials, PostgreSQL, network access, or .env.
+Every test injects a fake MT5 into the real MT5SessionManager, so none of them
+require a real MT5 terminal, credentials, PostgreSQL, network access, or .env.
+The provider queries history through the authenticated session, so mapping,
+tenant scoping and error translation all run for real.
 """
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
-import app.providers.mt5_trade_history as mt5_trade_history_module
+from app.core.config import settings as app_settings
+from app.core.encryption import encrypt_secret, generate_encryption_key
+from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.providers.mt5_trade_history import MT5TradeHistoryProvider
 from app.providers.trade_history import TradeCloseReason, TradeHistoryEntry, TradeType
 
-# The only MT5 functions a read-only trade-history provider may ever touch.
-ALLOWED_MT5_FUNCTIONS = {"initialize", "last_error", "history_deals_get", "history_orders_get",
-                         "shutdown", "DEAL_TYPE_BUY", "DEAL_TYPE_SELL", "DEAL_ENTRY_OUT"}
+# The only MT5 functions a read-only trade-history provider may ever touch (the
+# session boundary authenticates; the provider itself only reads history).
+ALLOWED_MT5_FUNCTIONS = {"initialize", "login", "last_error", "history_deals_get", "history_orders_get"}
 TRADING_FUNCTIONS = {"order_send", "order_check", "positions_modify", "orders_modify"}
+
+SERVER = "BrokerA-Live"
+MT5_PASSWORD = "mt5-account-password-under-test"
 
 # Real MT5 numeric encodings.
 DEAL_TYPE_BUY = 0
@@ -51,7 +57,6 @@ class FakeMT5:
         orders_error: Exception | None = None,
         initialize_result: object = True,
         initialize_error: Exception | None = None,
-        shutdown_error: Exception | None = None,
     ):
         self.deals_result = deals_result
         self.deals_error = deals_error
@@ -59,9 +64,7 @@ class FakeMT5:
         self.orders_error = orders_error
         self.initialize_result = initialize_result
         self.initialize_error = initialize_error
-        self.shutdown_error = shutdown_error
-        self.initialize_calls = 0
-        self.shutdown_calls = 0
+        self.authenticate_calls: list[dict[str, object]] = []
         self.deals_calls: list[tuple[object, object]] = []
         self.order_tickets_requested: list[int] = []
         self.accessed: list[str] = []
@@ -69,12 +72,17 @@ class FakeMT5:
     def _record(self, name: str) -> None:
         self.accessed.append(name)
 
-    def initialize(self) -> object:
+    def initialize(self, **kwargs: object) -> object:
         self._record("initialize")
-        self.initialize_calls += 1
+        self.authenticate_calls.append(dict(kwargs))
         if self.initialize_error is not None:
             raise self.initialize_error
         return self.initialize_result
+
+    def login(self, **kwargs: object) -> object:
+        self._record("login")
+        self.authenticate_calls.append(dict(kwargs))
+        return True
 
     def last_error(self) -> tuple[int, str]:
         self._record("last_error")
@@ -93,12 +101,6 @@ class FakeMT5:
         if self.orders_error is not None:
             raise self.orders_error
         return self.orders_result
-
-    def shutdown(self) -> None:
-        self._record("shutdown")
-        self.shutdown_calls += 1
-        if self.shutdown_error is not None:
-            raise self.shutdown_error
 
 
 def mt5_deal(
@@ -127,25 +129,44 @@ def mt5_deal(
     return SimpleNamespace(**values)
 
 
-@pytest.fixture()
-def patch_mt5(monkeypatch):
-    def _patch(fake: FakeMT5) -> FakeMT5:
-        monkeypatch.setattr(mt5_trade_history_module, "mt5_api", fake)
-        return fake
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test a usable, test-only encryption key."""
+    monkeypatch.setattr(app_settings, "SECRET_ENCRYPTION_KEY", generate_encryption_key(), raising=True)
 
-    return _patch
+
+def make_credentials(login: int = 10001, server: str = SERVER) -> MT5AccountCredentials:
+    """Tenant credentials whose stored password is real ciphertext."""
+    return MT5AccountCredentials(login=login, server=server, password_encrypted=encrypt_secret(MT5_PASSWORD))
+
+
+@pytest.fixture()
+def provider():
+    """Build a provider bound to a fake MT5 session for one tenant."""
+
+    def _provider(fake: FakeMT5, credentials: MT5AccountCredentials | None = None) -> MT5TradeHistoryProvider:
+        return MT5TradeHistoryProvider(
+            session_manager=MT5SessionManager(mt5_api=fake),
+            credentials=credentials if credentials is not None else make_credentials(),
+        )
+
+    return _provider
+
+
+def window() -> tuple[datetime, datetime]:
+    return datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC)
 
 
 # --- entry filtering --------------------------------------------------------------------
 
 
-def test_entry_in_deals_are_excluded(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(
+def test_entry_in_deals_are_excluded(provider):
+    fake = FakeMT5(deals_result=(
         mt5_deal(entry=DEAL_ENTRY_IN, order=111, reason=DEAL_REASON_CLIENT),
         mt5_deal(entry=DEAL_ENTRY_OUT),
-    )))
+    ))
 
-    entries = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))
+    entries = provider(fake).get_trade_history(*window())
 
     assert len(entries) == 1
     assert entries[0].ticket == 246802468
@@ -154,10 +175,10 @@ def test_entry_in_deals_are_excluded(patch_mt5):
 # --- mapping -----------------------------------------------------------------------------
 
 
-def test_successful_retrieval_and_mapping(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(),), orders_result=()))
+def test_successful_retrieval_and_mapping(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(),), orders_result=())
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
 
     assert isinstance(entry, TradeHistoryEntry)
     assert not isinstance(entry, SimpleNamespace)  # raw MT5 object must not leak
@@ -181,25 +202,25 @@ def test_successful_retrieval_and_mapping(patch_mt5):
     assert entry.time.tzinfo is not None  # UTC-aware datetime, never naive
 
 
-def test_mt5_buy_maps_to_buy(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(deal_type=DEAL_TYPE_BUY),), orders_result=()))
+def test_mt5_buy_maps_to_buy(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(deal_type=DEAL_TYPE_BUY),), orders_result=())
 
-    assert MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0].type is TradeType.BUY
+    assert provider(fake).get_trade_history(*window())[0].type is TradeType.BUY
 
 
-def test_mt5_sell_maps_to_sell(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(deal_type=DEAL_TYPE_SELL),), orders_result=()))
+def test_mt5_sell_maps_to_sell(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(deal_type=DEAL_TYPE_SELL),), orders_result=())
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
     assert entry.type is TradeType.SELL
     assert entry.type.value == "SELL"  # JSON-facing value is exactly "SELL"
 
 
-def test_unknown_deal_type_fails_loudly(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(deal_type=7),), orders_result=()))
+def test_unknown_deal_type_fails_loudly(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(deal_type=7),), orders_result=())
 
     with pytest.raises(RuntimeError):
-        MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))
+        provider(fake).get_trade_history(*window())
 
 
 # --- close-reason mapping -------------------------------------------------------------------
@@ -216,26 +237,26 @@ def test_unknown_deal_type_fails_loudly(patch_mt5):
     (DEAL_REASON_DEALER, TradeCloseReason.OTHER),
     (DEAL_REASON_SOFTWARE, TradeCloseReason.OTHER),
 ])
-def test_close_reason_mapping_table(patch_mt5, reason, expected):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(reason=reason),), orders_result=()))
+def test_close_reason_mapping_table(provider, reason, expected):
+    fake = FakeMT5(deals_result=(mt5_deal(reason=reason),), orders_result=())
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
 
     assert entry.close_reason is expected
 
 
-def test_unmapped_reason_classified_as_other_not_guessed(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(reason=99),), orders_result=()))
+def test_unmapped_reason_classified_as_other_not_guessed(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(reason=99),), orders_result=())
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
 
     assert entry.close_reason is TradeCloseReason.OTHER
 
 
-def test_missing_reason_field_maps_to_none(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(with_reason=False),), orders_result=()))
+def test_missing_reason_field_maps_to_none(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(with_reason=False),), orders_result=())
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
 
     assert entry.close_reason is None
 
@@ -243,52 +264,52 @@ def test_missing_reason_field_maps_to_none(patch_mt5):
 # --- SL/TP from related closing order ---------------------------------------------------------
 
 
-def test_sl_tp_taken_from_related_closing_order(patch_mt5):
+def test_sl_tp_taken_from_related_closing_order(provider):
     order = SimpleNamespace(price_sl=3635.00, price_tp=3650.00)
-    fake = patch_mt5(FakeMT5(deals_result=(mt5_deal(),), orders_result=(order,)))
+    fake = FakeMT5(deals_result=(mt5_deal(),), orders_result=(order,))
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
 
     assert entry.stop_loss == 3635.00
     assert entry.take_profit == 3650.00
     assert fake.order_tickets_requested == [987654321]
 
 
-def test_sl_tp_none_when_no_related_order_found(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(),), orders_result=()))
+def test_sl_tp_none_when_no_related_order_found(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(),), orders_result=())
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
 
     assert entry.stop_loss is None
     assert entry.take_profit is None
 
 
-def test_sl_tp_none_when_levels_are_zero_sentinels(patch_mt5):
+def test_sl_tp_none_when_levels_are_zero_sentinels(provider):
     order = SimpleNamespace(price_sl=0.0, price_tp=0.0)
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(),), orders_result=(order,)))
+    fake = FakeMT5(deals_result=(mt5_deal(),), orders_result=(order,))
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
 
     assert entry.stop_loss is None
     assert entry.take_profit is None
 
 
-def test_sl_tp_none_when_deal_has_no_order_ticket(patch_mt5):
+def test_sl_tp_none_when_deal_has_no_order_ticket(provider):
     order = SimpleNamespace(price_sl=3635.00, price_tp=3650.00)
-    fake = patch_mt5(FakeMT5(deals_result=(mt5_deal(order=0),), orders_result=(order,)))
+    fake = FakeMT5(deals_result=(mt5_deal(order=0),), orders_result=(order,))
 
-    entry = MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))[0]
+    entry = provider(fake).get_trade_history(*window())[0]
 
     assert entry.stop_loss is None
     assert entry.take_profit is None
     assert fake.order_tickets_requested == []  # no MT5 lookup attempted for order 0
 
 
-def test_related_order_failure_raises_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=(mt5_deal(),), orders_error=OSError("simulated IPC crash")))
+def test_related_order_failure_raises_runtime_error(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(),), orders_error=OSError("simulated IPC crash"))
 
     with pytest.raises(RuntimeError) as exc_info:
-        MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))
+        provider(fake).get_trade_history(*window())
 
     assert "trade history request failed" in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, OSError)
@@ -297,83 +318,83 @@ def test_related_order_failure_raises_runtime_error(patch_mt5):
 # --- empty history and failures -----------------------------------------------------------------
 
 
-def test_empty_tuple_means_no_trades_not_failure(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=()))
-
-    assert MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC)) == ()
+def test_empty_tuple_means_no_trades_not_failure(provider):
+    assert provider(FakeMT5(deals_result=())).get_trade_history(*window()) == ()
 
 
-def test_deals_get_none_raises_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(deals_result=None))
-
+def test_deals_get_none_raises_runtime_error(provider):
     with pytest.raises(RuntimeError) as exc_info:
-        MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))
+        provider(FakeMT5(deals_result=None)).get_trade_history(*window())
 
     assert "trade history unavailable" in str(exc_info.value)
 
 
-def test_deals_get_raising_translated_to_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(deals_error=OSError("simulated terminal disconnect")))
+def test_deals_get_raising_translated_to_runtime_error(provider):
+    fake = FakeMT5(deals_error=OSError("simulated terminal disconnect"))
 
     with pytest.raises(RuntimeError) as exc_info:
-        MT5TradeHistoryProvider().get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))
+        provider(fake).get_trade_history(*window())
 
     assert str(exc_info.value) == "MT5 trade history request failed"
     assert isinstance(exc_info.value.__cause__, OSError)
 
 
-def test_provider_passes_window_to_mt5(patch_mt5):
-    fake = patch_mt5(FakeMT5(deals_result=()))
+def test_provider_passes_window_to_mt5(provider):
+    fake = FakeMT5(deals_result=())
     from_time = datetime(2026, 9, 1, tzinfo=UTC)
     to_time = datetime(2026, 9, 14, tzinfo=UTC)
 
-    MT5TradeHistoryProvider().get_trade_history(from_time, to_time)
+    provider(fake).get_trade_history(from_time, to_time)
 
     assert fake.deals_calls == [(from_time, to_time)]
 
 
-# --- lifecycle -----------------------------------------------------------------------------------
-
-
-def test_initialize_returning_false_raises_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(initialize_result=False))
+def test_initialize_failure_surfaces_as_runtime_error(provider):
+    fake = FakeMT5(initialize_result=False)
 
     with pytest.raises(RuntimeError):
-        MT5TradeHistoryProvider()
+        provider(fake).get_trade_history(*window())
 
 
-def test_initialize_raising_translated_to_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(initialize_error=OSError("simulated IPC crash")))
-
-    with pytest.raises(RuntimeError) as exc_info:
-        MT5TradeHistoryProvider()
-
-    assert str(exc_info.value) == "MT5 terminal initialization failed"
-    assert isinstance(exc_info.value.__cause__, OSError)
+# --- tenant-scoped session ------------------------------------------------------------------
 
 
-def test_shutdown_calls_mt5_shutdown(patch_mt5):
-    fake = patch_mt5(FakeMT5(deals_result=()))
+def test_history_is_authenticated_as_the_tenant(provider):
+    fake = FakeMT5(deals_result=())
 
-    provider = MT5TradeHistoryProvider()
-    provider.shutdown()
+    provider(fake).get_trade_history(*window())
 
-    assert fake.shutdown_calls == 1
-
-
-def test_shutdown_never_raises_when_mt5_shutdown_fails(patch_mt5):
-    patch_mt5(FakeMT5(shutdown_error=OSError("terminal already gone")))
-
-    provider = MT5TradeHistoryProvider()
-    provider.shutdown()  # must not raise
+    # MT5 history is account-scoped, so it must be read on this tenant's own
+    # authenticated session — never a shared/global terminal session.
+    assert fake.authenticate_calls == [{"login": 10001, "password": MT5_PASSWORD, "server": SERVER}]
 
 
-def test_only_read_only_mt5_functions_are_called(patch_mt5):
-    fake = patch_mt5(FakeMT5(deals_result=(mt5_deal(),), orders_result=()))
+def test_two_tenants_read_their_own_history_sessions(provider):
+    fake = FakeMT5(deals_result=())
 
-    provider = MT5TradeHistoryProvider()
-    provider.get_trade_history(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))
-    provider.shutdown()
+    provider(fake, make_credentials(login=10001, server="BrokerA-Live")).get_trade_history(*window())
+    provider(fake, make_credentials(login=20002, server="BrokerB-Live")).get_trade_history(*window())
+
+    assert [call["login"] for call in fake.authenticate_calls] == [10001, 20002]
+
+
+def test_incomplete_credentials_fail_closed_before_reading_history(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(),), orders_result=())
+    incomplete = MT5AccountCredentials(login=10001, server=SERVER, password_encrypted=None)
+
+    with pytest.raises(RuntimeError):
+        provider(fake, incomplete).get_trade_history(*window())
+
+    assert fake.accessed == []  # no history was ever queried
+
+
+# --- read-only guarantee -----------------------------------------------------------------------
+
+
+def test_only_read_only_mt5_functions_are_called(provider):
+    fake = FakeMT5(deals_result=(mt5_deal(),), orders_result=())
+
+    provider(fake).get_trade_history(*window())
 
     accessed = set(fake.accessed)
     assert accessed <= ALLOWED_MT5_FUNCTIONS

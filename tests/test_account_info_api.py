@@ -2,15 +2,16 @@
 
 Require none of: real MT5, PostgreSQL, network, or real credentials. Two seams
 are used, following the established Stage-6 pattern: the provider class is
-patched at the composition root (app.core.dependencies.MT5AccountInfoProvider)
-with the singleton cache reset, and get_db is overridden with a per-test
+patched at the composition root (app.core.dependencies.MT5AccountInfoProvider),
+which now receives the authenticated tenant's MT5 credentials and the
+process-wide session manager, and get_db is overridden with a per-test
 file-based async SQLite database. The real service, router, and authentication
 dependency all run. JWT config uses test-only values. No pytest asyncio
 plugin: async setup is driven with asyncio.run.
 """
 import asyncio
 import threading
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -22,6 +23,7 @@ import app.core.dependencies as deps
 from app.api.account_info_router import router
 from app.core.blocking import run_mt5_call
 from app.core.config import settings as app_settings
+from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
@@ -50,22 +52,39 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_settings, "ALGORITHM", TEST_ALGORITHM, raising=True)
 
 
+class _FakeMT5:
+    """Minimal MT5 seam so a real MT5SessionManager can run without a terminal."""
+
+    def initialize(self, **kwargs: object) -> bool:
+        return True
+
+    def login(self, **kwargs: object) -> bool:
+        return True
+
+    def last_error(self) -> tuple[int, str]:
+        return (-1, "simulated MT5 failure")
+
+    def shutdown(self) -> None:
+        pass
+
+
 def make_fake_provider_class(info: AccountInfo = ACCOUNT_INFO, error: Exception | None = None):
     """Build a fake provider class at the composition-root seam.
 
-    The composition root constructs the class with no arguments, so the
-    configured result/error travel via closure; call counts and the thread ids
-    the provider ran on are recorded (thread offload is asserted in tests).
+    The composition root constructs the class with the tenant's credentials and
+    the process-wide session manager, so the configured result/error travel via
+    closure; call counts and the thread ids the provider ran on are recorded
+    (thread offload is asserted in tests).
     """
-    record: dict[str, object] = {"calls": 0, "call_threads": []}
+    record: dict[str, Any] = {"calls": 0, "call_threads": [], "credentials": []}
 
     class FakeAccountInfoProvider:
-        def __init__(self) -> None:
-            pass
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            record["credentials"].append(credentials)
 
         def get_account_info(self) -> AccountInfo:
-            record["calls"] = int(record["calls"]) + 1  # type: ignore[call-overload]
-            record["call_threads"] = [*record["call_threads"], threading.get_ident()]  # type: ignore[dict-item]
+            record["calls"] = int(record["calls"]) + 1
+            record["call_threads"].append(threading.get_ident())
             if error is not None:
                 raise error
             return info
@@ -80,12 +99,10 @@ def patched_account_provider(monkeypatch):
     def _install(info: AccountInfo = ACCOUNT_INFO, error: Exception | None = None):
         cls, record = make_fake_provider_class(info, error)
         monkeypatch.setattr(deps, "MT5AccountInfoProvider", cls)
-        deps._account_info_provider = None
         return record
 
     yield _install
-    # Never leak a fake (or real) provider into other tests.
-    deps._account_info_provider = None
+    # monkeypatch restores the real provider class after each test.
 
 
 @pytest.fixture()
@@ -292,16 +309,11 @@ def test_provider_runtime_error_maps_to_503(account_env, patched_account_provide
     assert response.json()["detail"] == "Account information service temporarily unavailable"
 
 
-def test_provider_initialization_failure_maps_to_503(account_env, monkeypatch):
-    # Initialization failure happens inside the composition root; simulate it
-    # with a provider class whose constructor raises.
-    def failing_init(self) -> None:
-        raise RuntimeError("MT5 initialization failed: simulated")
-
-    cls, _ = make_fake_provider_class()
-    monkeypatch.setattr(cls, "__init__", failing_init)
-    monkeypatch.setattr(deps, "MT5AccountInfoProvider", cls)
-    deps._account_info_provider = None
+def test_mt5_session_failure_maps_to_503(account_env, monkeypatch):
+    # The real provider runs (no provider-class fake): the seeded user has no
+    # stored MT5 password, so the session boundary refuses and the failure maps
+    # to a service-availability error — with no credentials disclosed.
+    monkeypatch.setattr(deps, "_mt5_session_manager", MT5SessionManager(mt5_api=_FakeMT5()), raising=True)
     client = account_env["make_app"]()
 
     with client as c:
@@ -310,9 +322,24 @@ def test_provider_initialization_failure_maps_to_503(account_env, monkeypatch):
         )
 
     assert response.status_code == 503
-    # The failed construction must not be cached: a later request retries.
-    assert deps._account_info_provider is None
-    deps._account_info_provider = None
+    assert response.json()["detail"] == "Account information service temporarily unavailable"
+    # No partial authentication was cached, so a later request retries.
+    assert deps.get_mt5_session_manager().authenticated_account is None
+
+
+def test_composition_root_binds_the_provider_to_the_authenticated_tenant(
+    account_env, patched_account_provider
+):
+    record = patched_account_provider()
+
+    with account_env["make_app"]() as c:
+        c.get("/account-info", headers=auth_header(create_access_token(str(account_env["ids"]["customer_id"]))))
+
+    # The provider was built with the caller's own resolved MT5 identity: no
+    # login, server or broker_id can come from the request.
+    (credentials,) = record["credentials"]
+    assert isinstance(credentials, MT5AccountCredentials)
+    assert credentials.login == 10001
 
 
 def test_client_cannot_supply_broker_id_to_select_tenant(account_env, patched_account_provider):
@@ -368,7 +395,7 @@ def test_blocking_call_runs_off_the_event_loop_thread(account_env, patched_accou
     assert response.json()["login"] == 10001
     assert record["call_threads"], "provider was never called"
     # The provider must have run on a worker thread, never the event loop.
-    assert all(t != loop_thread["id"] for t in record["call_threads"])  # type: ignore[union-attr]
+    assert all(t != loop_thread["id"] for t in record["call_threads"])
 
 
 def test_consolidated_boundary_is_the_single_mt5_execution_path():

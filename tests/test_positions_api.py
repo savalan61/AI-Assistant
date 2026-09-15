@@ -3,14 +3,15 @@
 Require none of: real MT5, PostgreSQL, network, or real credentials. Provider
 tests use a deterministic fake at the PositionProvider abstraction (the
 FakeMarketDataProvider pattern); API tests patch the composition-root provider
-class seam (app.core.dependencies.MT5PositionProvider) with the singleton cache
-reset, following the established lifecycle-test pattern, and override get_db
-with a per-test file-based async SQLite database. JWT config uses test-only
-values. No pytest asyncio plugin: async setup is driven with asyncio.run.
+class seam (app.core.dependencies.MT5PositionProvider), which now receives the
+authenticated tenant's MT5 credentials and the process-wide session manager,
+and override get_db with a per-test file-based async SQLite database. JWT
+config uses test-only values. No pytest asyncio plugin: async setup is driven
+with asyncio.run.
 """
 import asyncio
 import threading
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import app.core.dependencies as deps
 from app.api.positions_router import router
 from app.core.config import settings as app_settings
+from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
@@ -78,17 +80,36 @@ def test_service_returns_exactly_what_provider_returns():
 # --- API fixtures / helpers ----------------------------------------------------------
 
 
+class _FakeMT5:
+    """Minimal MT5 seam so a real MT5SessionManager can run without a terminal."""
+
+    def initialize(self, **kwargs: object) -> bool:
+        return True
+
+    def login(self, **kwargs: object) -> bool:
+        return True
+
+    def last_error(self) -> tuple[int, str]:
+        return (-1, "simulated MT5 failure")
+
+    def shutdown(self) -> None:
+        pass
+
+
 def make_fake_provider_class(positions: tuple[Position, ...], error: Exception | None = None):
-    """Fake provider class at the composition-root seam; call threads recorded."""
-    record: dict[str, object] = {"calls": 0, "call_threads": []}
+    """Fake provider class at the composition-root seam; construction recorded."""
+    record: dict[str, Any] = {"calls": 0, "call_threads": [], "instances": [], "credentials": []}
 
     class FakePositionProvider:
-        def __init__(self) -> None:
-            pass
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            # The composition root now passes the tenant's credentials and the
+            # process-wide session manager to every provider it builds.
+            record["instances"].append(self)
+            record["credentials"].append(credentials)
 
         def get_positions(self) -> tuple[Position, ...]:
             record["calls"] = int(record["calls"]) + 1
-            record["call_threads"] = [*record["call_threads"], threading.get_ident()]  # type: ignore[dict-item]
+            record["call_threads"].append(threading.get_ident())
             if error is not None:
                 raise error
             return positions
@@ -107,12 +128,10 @@ def patched_position_provider(monkeypatch):
     def _install(positions: tuple[Position, ...] = (), error: Exception | None = None):
         cls, record = make_fake_provider_class(positions, error)
         monkeypatch.setattr(deps, "MT5PositionProvider", cls)
-        deps._position_provider = None
         return record
 
     yield _install
-    # Never leak a fake (or real) provider into other tests.
-    deps._position_provider = None
+    # monkeypatch restores the real provider class after each test.
 
 
 @pytest.fixture()
@@ -305,22 +324,22 @@ def test_provider_runtime_error_maps_to_503(positions_env, patched_position_prov
     assert response.json()["detail"] == "Positions service temporarily unavailable"
 
 
-def test_provider_initialization_failure_maps_to_503_and_is_not_cached(positions_env, monkeypatch):
-    def failing_init(self) -> None:
-        raise RuntimeError("MT5 initialization failed: simulated")
+def test_mt5_session_failure_maps_to_503_and_is_not_cached(positions_env, monkeypatch):
+    """A tenant whose MT5 session cannot be established gets a generic 503.
 
-    cls, _ = make_fake_provider_class(())
-    monkeypatch.setattr(cls, "__init__", failing_init)
-    monkeypatch.setattr(deps, "MT5PositionProvider", cls)
-    deps._position_provider = None
+    The real provider runs here (no provider-class fake): the seeded user has no
+    stored MT5 password, so the session boundary refuses and the failure surfaces
+    as a service-availability error — and no partial authentication is cached.
+    """
+    monkeypatch.setattr(deps, "_mt5_session_manager", MT5SessionManager(mt5_api=_FakeMT5()), raising=True)
     client = positions_env["make_app"]()
 
     with client as c:
         response = c.get("/positions", headers=auth_header(create_access_token(str(positions_env["user_id"]))))
 
     assert response.status_code == 503
-    assert deps._position_provider is None  # failed construction not cached; later requests retry
-    deps._position_provider = None
+    assert response.json()["detail"] == "Positions service temporarily unavailable"
+    assert deps.get_mt5_session_manager().authenticated_account is None  # nothing cached
 
 
 # --- blocking boundary -------------------------------------------------------------------
@@ -357,19 +376,22 @@ def apply_overrides(positions_env, target_app: FastAPI) -> None:
     target_app.dependency_overrides[_get_db] = override_get_db
 
 
-# --- composition-root cache identity ------------------------------------------------------
+# --- composition-root tenant binding -----------------------------------------------------
 
 
-def test_composition_root_constructs_provider_once(positions_env, patched_position_provider):
-    patched_position_provider((BUY_POSITION,))
+def test_each_request_composes_a_provider_for_the_authenticated_tenant(positions_env, patched_position_provider):
+    record = patched_position_provider((BUY_POSITION,))
     client = positions_env["make_app"]()
 
     with client as c:
-        c.get("/positions", headers=auth_header(create_access_token(str(positions_env["user_id"]))))
-        c.get("/positions", headers=auth_header(create_access_token(str(positions_env["user_id"]))))
+        headers = auth_header(create_access_token(str(positions_env["user_id"])))
+        c.get("/positions", headers=headers)
+        c.get("/positions", headers=headers)
 
-    # Two requests, one cached provider instance.
-    first = deps.get_position_service()
-    second = deps.get_position_service()
-    assert first._provider is second._provider
-    assert deps._position_provider is first._provider
+    # Providers are cheap per-request objects now (the process-wide state is the
+    # MT5 session), so nothing about one request's tenant is reused by the next.
+    assert len(record["instances"]) == 2
+    # Each one was built with the authenticated user's own resolved MT5 identity.
+    for credentials in record["credentials"]:
+        assert isinstance(credentials, MT5AccountCredentials)
+        assert credentials.login == 10001

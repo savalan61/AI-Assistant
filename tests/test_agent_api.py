@@ -23,12 +23,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import app.core.dependencies as deps
 from app.api.agent_router import router
 from app.core.config import settings as app_settings
+from app.core.mt5_session import MT5SessionManager
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
 from app.db.models import Broker, User, UserRole
 from app.providers.account_info import AccountInfo
 from app.providers.fake_llm import DEFAULT_FAKE_RESPONSE, FakeLLMProvider
+from app.providers.mt5_account_info import MT5AccountInfoProvider
 from app.providers.position import Position, PositionType
 from app.providers.trade_history import TradeHistoryEntry, TradeType
 
@@ -107,11 +109,27 @@ RISK_KEYS = {"level", "basis"}
 # --- composition-root seams (established pattern) ------------------------------------
 
 
+class _FakeMT5:
+    """Minimal MT5 seam so a real MT5SessionManager can run without a terminal."""
+
+    def initialize(self, **kwargs: object) -> bool:
+        return True
+
+    def login(self, **kwargs: object) -> bool:
+        return True
+
+    def last_error(self) -> tuple[int, str]:
+        return (-1, "simulated MT5 failure")
+
+    def shutdown(self) -> None:
+        pass
+
+
 def make_fake_account_provider_class(account: AccountInfo, error: Exception | None = None):
     call_threads: list[int] = []
 
     class FakeMT5AccountInfoProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_account_info(self) -> AccountInfo:
@@ -127,7 +145,7 @@ def make_fake_position_provider_class(positions: tuple[Position, ...], error: Ex
     call_threads: list[int] = []
 
     class FakeMT5PositionProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_positions(self) -> tuple[Position, ...]:
@@ -146,7 +164,7 @@ def make_fake_trade_provider_class(
     windows: list[tuple[object, object]] = []
 
     class FakeMT5TradeHistoryProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_trade_history(self, from_time: object, to_time: object) -> tuple[TradeHistoryEntry, ...]:
@@ -203,9 +221,6 @@ def patched_providers(monkeypatch):
             return llm
 
         monkeypatch.setattr(deps, "get_llm_provider", fake_llm_provider)
-        deps._account_info_provider = None
-        deps._position_provider = None
-        deps._trade_history_provider = None
         return {
             "account_threads": account_threads,
             "position_threads": position_threads,
@@ -215,10 +230,7 @@ def patched_providers(monkeypatch):
         }
 
     yield _install
-    # Never leak fakes (or real providers) into other tests.
-    deps._account_info_provider = None
-    deps._position_provider = None
-    deps._trade_history_provider = None
+    # monkeypatch restores the real provider classes and LLM seam afterwards.
 
 
 @pytest.fixture()
@@ -530,18 +542,16 @@ def test_llm_provider_failure_returns_generic_503(agent_env, patched_providers) 
     assert body == {"detail": "Agent service temporarily unavailable"}
 
 
-def test_provider_initialization_failure_returns_503_and_is_not_cached(
+def test_mt5_session_failure_returns_503_and_is_not_cached(
     agent_env, patched_providers, monkeypatch
 ) -> None:
+    # The real account/positions/trade providers run (no provider-class fakes):
+    # the seeded user has no stored MT5 password, so the tenant's session cannot
+    # be established and the agent answers a generic 503. No credentials and no
+    # partial session are cached.
     patched_providers()
-
-    def failing_init(self) -> None:
-        raise RuntimeError("MT5 initialization failed: simulated")
-
-    cls, _ = make_fake_account_provider_class(ACCOUNT)
-    monkeypatch.setattr(cls, "__init__", failing_init)
-    monkeypatch.setattr(deps, "MT5AccountInfoProvider", cls)
-    deps._account_info_provider = None
+    monkeypatch.setattr(deps, "MT5AccountInfoProvider", MT5AccountInfoProvider, raising=True)
+    monkeypatch.setattr(deps, "_mt5_session_manager", MT5SessionManager(mt5_api=_FakeMT5()), raising=True)
 
     with agent_env["make_app"]() as client:
         response = client.post(
@@ -549,8 +559,7 @@ def test_provider_initialization_failure_returns_503_and_is_not_cached(
         )
 
     assert response.status_code == 503
-    assert deps._account_info_provider is None  # failed construction not cached
-    deps._account_info_provider = None
+    assert deps.get_mt5_session_manager().authenticated_account is None  # nothing cached
 
 
 # --- read-only / blocking boundary ----------------------------------------------------------

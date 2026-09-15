@@ -75,7 +75,7 @@ def make_fake_position_provider_class(positions: tuple[Position, ...], error: Ex
     call_threads: list[int] = []
 
     class FakeMT5PositionProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_positions(self) -> tuple[Position, ...]:
@@ -110,12 +110,10 @@ def patched_positions(monkeypatch):
     def _install(positions: tuple[Position, ...] = (), error: Exception | None = None):
         cls, record = make_fake_position_provider_class(positions, error)
         monkeypatch.setattr(deps, "MT5PositionProvider", cls)
-        deps._position_provider = None
         return record
 
     yield _install
-    # Never leak a fake (or real) provider into other tests.
-    deps._position_provider = None
+    # monkeypatch restores the real provider class after each test.
 
 
 @pytest.fixture()

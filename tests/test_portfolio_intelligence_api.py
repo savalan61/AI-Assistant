@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import app.core.dependencies as deps
 from app.api.portfolio_intelligence_router import router
 from app.core.config import settings as app_settings
+from app.core.mt5_session import MT5SessionManager
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
@@ -89,12 +90,28 @@ RISK_KEYS = {"level", "basis"}
 # --- composition-root seams (established pattern) ------------------------------------
 
 
+class _FakeMT5:
+    """Minimal MT5 seam so a real MT5SessionManager can run without a terminal."""
+
+    def initialize(self, **kwargs: object) -> bool:
+        return True
+
+    def login(self, **kwargs: object) -> bool:
+        return True
+
+    def last_error(self) -> tuple[int, str]:
+        return (-1, "simulated MT5 failure")
+
+    def shutdown(self) -> None:
+        pass
+
+
 def make_fake_account_provider_class(account: AccountInfo, error: Exception | None = None):
     """Fake MT5AccountInfoProvider installed at the composition-root seam."""
     call_threads: list[int] = []
 
     class FakeMT5AccountInfoProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_account_info(self) -> AccountInfo:
@@ -111,7 +128,7 @@ def make_fake_position_provider_class(positions: tuple[Position, ...], error: Ex
     call_threads: list[int] = []
 
     class FakeMT5PositionProvider:
-        def __init__(self) -> None:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
         def get_positions(self) -> tuple[Position, ...]:
@@ -134,12 +151,10 @@ def patched_account(monkeypatch):
     def _install(account: AccountInfo = ACCOUNT, error: Exception | None = None):
         cls, record = make_fake_account_provider_class(account, error)
         monkeypatch.setattr(deps, "MT5AccountInfoProvider", cls)
-        deps._account_info_provider = None
         return record
 
     yield _install
-    # Never leak a fake (or real) provider into other tests.
-    deps._account_info_provider = None
+    # monkeypatch restores the real provider class after each test.
 
 
 @pytest.fixture()
@@ -147,11 +162,9 @@ def patched_positions(monkeypatch):
     def _install(positions: tuple[Position, ...] = (), error: Exception | None = None):
         cls, record = make_fake_position_provider_class(positions, error)
         monkeypatch.setattr(deps, "MT5PositionProvider", cls)
-        deps._position_provider = None
         return record
 
     yield _install
-    deps._position_provider = None
 
 
 @pytest.fixture()
@@ -384,16 +397,13 @@ def test_position_provider_failure_returns_generic_503(
     assert response.json() == {"detail": "Portfolio intelligence service temporarily unavailable"}
 
 
-def test_provider_initialization_failure_returns_503_and_is_not_cached(
+def test_mt5_session_failure_returns_503_and_is_not_cached(
     portfolio_env, patched_positions, monkeypatch
 ) -> None:
-    def failing_init(self) -> None:
-        raise RuntimeError("MT5 initialization failed: simulated")
-
-    cls, _ = make_fake_account_provider_class(ACCOUNT)
-    monkeypatch.setattr(cls, "__init__", failing_init)
-    monkeypatch.setattr(deps, "MT5AccountInfoProvider", cls)
-    deps._account_info_provider = None
+    # The real account provider runs (no provider-class fake): the seeded user
+    # has no stored MT5 password, so the session boundary refuses and the failure
+    # maps to a service-availability error — with no credentials disclosed.
+    monkeypatch.setattr(deps, "_mt5_session_manager", MT5SessionManager(mt5_api=_FakeMT5()), raising=True)
     patched_positions(())
 
     with portfolio_env["make_app"]() as client:
@@ -402,8 +412,7 @@ def test_provider_initialization_failure_returns_503_and_is_not_cached(
         )
 
     assert response.status_code == 503
-    assert deps._account_info_provider is None  # failed construction not cached; later requests retry
-    deps._account_info_provider = None
+    assert deps.get_mt5_session_manager().authenticated_account is None  # nothing cached
 
 
 # --- credential / secret safety ---------------------------------------------------------

@@ -5,11 +5,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
 from app.db.models import Broker, User, UserRole
 from app.providers import (
-    AccountInfoProvider,
     EconomicCalendarProvider,
     FakeEconomicCalendarProvider,
     LLMProvider,
@@ -19,10 +19,7 @@ from app.providers import (
     MT5MarketDataProvider,
     MT5PositionProvider,
     MT5TradeHistoryProvider,
-    MarketDataProvider,
     OpenAICompatibleLLMProvider,
-    PositionProvider,
-    TradeHistoryProvider,
 )
 from app.services.account import AccountInfoService
 from app.services.agent import AgentService, AgentUsageLimiter, OutboundDataPolicy
@@ -40,155 +37,65 @@ from app.services.portfolio_intelligence import PortfolioIntelligenceService
 from app.services.positions import PositionService
 from app.services.trade_history import TradeHistoryService
 
-# Process-wide provider cache. It stays None until a construction succeeds, so
-# a failed MT5 initialization is never cached and later requests may retry.
-_provider: MarketDataProvider | None = None
-_provider_lock = threading.Lock()
+# Process-wide MT5 session: the terminal connection is process-global by
+# construction (the MT5 Python API authenticates one account per process), so
+# this manager — lock plus authenticated identity — is the single owner of it and
+# the only process-wide MT5 object. It is lazy and lock-guarded, and a failed
+# authentication is never cached (the manager forgets the identity so the next
+# request retries). Providers are no longer cached: they became cheap per-request
+# objects carrying the authenticated tenant's credentials, so no cached provider
+# can ever serve one tenant's data to another.
+_mt5_session_manager: MT5SessionManager | None = None
+_mt5_session_manager_lock = threading.Lock()
 
 
-# Composition root for market-data wiring: this is the only place that knows
-# the concrete provider. The provider is injected through the service, keeping
-# the HTTP layer independent of MT5.
-def get_market_data_provider() -> MarketDataProvider:
-    # Lazy singleton: construct MT5MarketDataProvider once per process. The lock
-    # keeps "constructed once" true because dependencies run in worker threads.
-    global _provider
-    if _provider is None:
-        with _provider_lock:
-            if _provider is None:
-                _provider = MT5MarketDataProvider()
-    return _provider
+def get_mt5_session_manager() -> MT5SessionManager:
+    global _mt5_session_manager
+    if _mt5_session_manager is None:
+        with _mt5_session_manager_lock:
+            if _mt5_session_manager is None:
+                _mt5_session_manager = MT5SessionManager()
+    return _mt5_session_manager
 
 
-def get_market_data_service() -> MarketDataService:
-    # MT5 initialization failure at this boundary is a service availability issue (503).
-    try:
-        provider = get_market_data_provider()
-    except RuntimeError:
-        raise HTTPException(status_code=503, detail="Market data service temporarily unavailable")
-    return MarketDataService(provider)
+def shutdown_mt5_session() -> None:
+    # Release the single terminal session at application shutdown and clear the
+    # cache so a later request (or a test) rebuilds a fresh manager. Safe when
+    # nothing was ever authenticated.
+    global _mt5_session_manager
+    manager, _mt5_session_manager = _mt5_session_manager, None
+    if manager is not None:
+        manager.shutdown()
 
 
-def shutdown_market_data() -> None:
-    # Shut down the cached provider, if any, and clear the cache so the next
-    # request constructs a fresh one. Safe to call when nothing was initialized.
-    global _provider
-    provider, _provider = _provider, None
-    shutdown = getattr(provider, "shutdown", None)
-    if callable(shutdown):
-        shutdown()
+def resolve_mt5_account_credentials(user: User, broker: Broker | None) -> MT5AccountCredentials:
+    """Extract a tenant's MT5 identity from the authenticated database rows.
 
-
-# Process-wide account-info provider cache, mirroring the market-data one:
-# lazy, lock-guarded, and a failed initialization is never cached so later
-# requests may retry. Both providers attach to the same MT5 terminal session.
-_account_info_provider: AccountInfoProvider | None = None
-_account_info_provider_lock = threading.Lock()
-
-
-def get_account_info_provider() -> AccountInfoProvider:
-    global _account_info_provider
-    if _account_info_provider is None:
-        with _account_info_provider_lock:
-            if _account_info_provider is None:
-                _account_info_provider = MT5AccountInfoProvider()
-    return _account_info_provider
-
-
-def get_account_info_service() -> AccountInfoService:
-    # MT5 initialization failure at this boundary is a service availability issue (503).
-    try:
-        provider = get_account_info_provider()
-    except RuntimeError:
-        raise HTTPException(status_code=503, detail="Account information service temporarily unavailable")
-    return AccountInfoService(provider)
-
-
-def shutdown_account_info() -> None:
-    # Shut down the cached account-info provider, if any, and clear the cache
-    # so the next request constructs a fresh one. Safe when nothing was built.
-    global _account_info_provider
-    provider, _account_info_provider = _account_info_provider, None
-    shutdown = getattr(provider, "shutdown", None)
-    if callable(shutdown):
-        shutdown()
-
-
-# Process-wide positions provider cache, mirroring the market-data and
-# account-info ones: lazy, lock-guarded, failed initialization never cached.
-_position_provider: PositionProvider | None = None
-_position_provider_lock = threading.Lock()
-
-
-def get_position_provider() -> PositionProvider:
-    global _position_provider
-    if _position_provider is None:
-        with _position_provider_lock:
-            if _position_provider is None:
-                _position_provider = MT5PositionProvider()
-    return _position_provider
-
-
-def get_position_service() -> PositionService:
-    # MT5 initialization failure at this boundary is a service availability issue (503).
-    try:
-        provider = get_position_provider()
-    except RuntimeError:
-        raise HTTPException(status_code=503, detail="Positions service temporarily unavailable")
-    return PositionService(provider)
-
-
-def shutdown_positions() -> None:
-    # Shut down the cached positions provider, if any, and clear the cache
-    # so the next request constructs a fresh one. Safe when nothing was built.
-    global _position_provider
-    provider, _position_provider = _position_provider, None
-    shutdown = getattr(provider, "shutdown", None)
-    if callable(shutdown):
-        shutdown()
-
-
-# Process-wide trade-history provider cache, mirroring the market-data,
-# account-info, and positions ones: lazy, lock-guarded, failed initialization
-# never cached.
-_trade_history_provider: TradeHistoryProvider | None = None
-_trade_history_provider_lock = threading.Lock()
-
-
-def get_trade_history_provider() -> TradeHistoryProvider:
-    global _trade_history_provider
-    if _trade_history_provider is None:
-        with _trade_history_provider_lock:
-            if _trade_history_provider is None:
-                _trade_history_provider = MT5TradeHistoryProvider()
-    return _trade_history_provider
-
-
-def get_trade_history_service() -> TradeHistoryService:
-    # MT5 initialization failure at this boundary is a service availability issue (503).
-    try:
-        provider = get_trade_history_provider()
-    except RuntimeError:
-        raise HTTPException(status_code=503, detail="Trade history service temporarily unavailable")
-    return TradeHistoryService(provider)
-
-
-def shutdown_trade_history() -> None:
-    # Shut down the cached trade-history provider, if any, and clear the cache
-    # so the next request constructs a fresh one. Safe when nothing was built.
-    global _trade_history_provider
-    provider, _trade_history_provider = _trade_history_provider, None
-    shutdown = getattr(provider, "shutdown", None)
-    if callable(shutdown):
-        shutdown()
+    ``user.username`` is the MT5 account number, ``user.mt5_password_encrypted``
+    the stored ciphertext of its password, and ``broker.mt5_server`` the server
+    that account belongs to. Nothing is decrypted here — the ciphertext travels
+    to the session boundary, which is the only place the plaintext exists — and
+    nothing raises: an incomplete record fails closed there, with a message that
+    never discloses which value was missing. Tenant identity therefore always
+    comes from the database User, never from a request body or a token claim.
+    """
+    username = user.username.strip()
+    # MT5 account numbers are numeric; a non-numeric username is simply not an
+    # MT5 login and fails closed at the session boundary.
+    login = int(username) if username.isdecimal() else None
+    return MT5AccountCredentials(
+        login=login,
+        server=broker.mt5_server if broker is not None else None,
+        password_encrypted=user.mt5_password_encrypted,
+    )
 
 
 # Economic-calendar wiring. No MT5 terminal and no credentials are involved, so
-# there is no process-wide provider cache to guard (unlike the MT5 providers):
-# the provider is stateless and cheap to construct per request. The deterministic
-# fake is wired here as the development placeholder until a real calendar source
-# is selected; its provenance marker is carried through every response so the
-# data can never be mistaken for live financial data.
+# there is no process-wide provider or session to guard: the provider is
+# stateless and cheap to construct per request. The deterministic fake is wired
+# here as the development placeholder until a real calendar source is selected;
+# its provenance marker is carried through every response so the data can never
+# be mistaken for live financial data.
 #
 # Fail-closed guard: the placeholder must never be served to a broker's
 # customers. Outside development there is no production calendar source yet, so
@@ -204,27 +111,6 @@ def get_economic_calendar_service() -> EconomicCalendarService:
         )
     provider: EconomicCalendarProvider = FakeEconomicCalendarProvider()
     return EconomicCalendarService(provider)
-
-
-def get_economic_intelligence_service() -> EconomicIntelligenceService:
-    # Reuses the existing positions composition-root path (get_position_service),
-    # so there is exactly one position architecture; an MT5 initialization
-    # failure surfaces as 503 from there, exactly as for GET /positions.
-    return EconomicIntelligenceService(
-        calendar_service=get_economic_calendar_service(),
-        position_service=get_position_service(),
-    )
-
-
-def get_portfolio_intelligence_service() -> PortfolioIntelligenceService:
-    # Reuses the existing account-info and positions composition-root paths, so
-    # there is exactly one account architecture and one position architecture
-    # (no providers are duplicated here); an MT5 initialization failure surfaces
-    # as 503 from those paths, exactly as for GET /account-info and GET /positions.
-    return PortfolioIntelligenceService(
-        account_service=get_account_info_service(),
-        position_service=get_position_service(),
-    )
 
 
 # Agent LLM wiring. The production seam is the broker-aware router: a broker
@@ -283,8 +169,8 @@ async def get_llm_provider(broker_id: int, session: AsyncSession) -> LLMProvider
 
 # Per-user daily usage limiting is process-wide state by its documented nature
 # (in-process counters, reset on restart): one limiter per process, lazily
-# built from settings behind the same lock-guarded pattern as the MT5 provider
-# caches. The daily limit comes from configuration, never hard-coded.
+# built from settings behind the same lock-guarded pattern as the MT5 session
+# manager. The daily limit comes from configuration, never hard-coded.
 _agent_usage_limiter: AgentUsageLimiter | None = None
 _agent_usage_limiter_lock = threading.Lock()
 
@@ -349,8 +235,6 @@ def reset_login_throttle() -> None:
     global _login_throttle
     with _login_throttle_lock:
         _login_throttle = None
-
-
 
 
 # Bearer scheme for HTTP authentication. auto_error=False lets this dependency
@@ -448,6 +332,83 @@ async def get_current_super_admin(
     return current_user
 
 
+# --- tenant-scoped MT5 composition -----------------------------------------
+#
+# Everything below depends on the authenticated user, so it is declared after
+# the authentication boundary. The tenant's MT5 credentials are resolved once
+# per request (FastAPI caches a dependency's result within a request) and shared
+# by every MT5-backed service, so there is one broker read and no per-provider
+# duplication. Each provider is a cheap per-request object; the process-wide
+# session lives in the manager above and is the only thing that is shared.
+async def get_mt5_credentials(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> MT5AccountCredentials:
+    """Resolve the authenticated tenant's MT5 credentials.
+
+    ``current_user`` and the broker come from the database, never from the
+    request: a caller cannot select another tenant's MT5 account, server or
+    password. The value stays encrypted here; decryption happens only inside the
+    session boundary.
+    """
+    broker = await session.get(Broker, current_user.broker_id)
+    return resolve_mt5_account_credentials(current_user, broker)
+
+
+def get_market_data_service(
+    credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
+) -> MarketDataService:
+    provider = MT5MarketDataProvider(session_manager=get_mt5_session_manager(), credentials=credentials)
+    return MarketDataService(provider)
+
+
+def get_account_info_service(
+    credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
+) -> AccountInfoService:
+    provider = MT5AccountInfoProvider(session_manager=get_mt5_session_manager(), credentials=credentials)
+    return AccountInfoService(provider)
+
+
+def get_position_service(
+    credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
+) -> PositionService:
+    provider = MT5PositionProvider(session_manager=get_mt5_session_manager(), credentials=credentials)
+    return PositionService(provider)
+
+
+def get_trade_history_service(
+    credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
+) -> TradeHistoryService:
+    provider = MT5TradeHistoryProvider(session_manager=get_mt5_session_manager(), credentials=credentials)
+    return TradeHistoryService(provider)
+
+
+def get_economic_intelligence_service(
+    credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
+) -> EconomicIntelligenceService:
+    # Reuses the existing positions composition-root path (get_position_service),
+    # so there is exactly one position architecture; a session/authentication
+    # failure surfaces as 503 from there, exactly as for GET /positions.
+    return EconomicIntelligenceService(
+        calendar_service=get_economic_calendar_service(),
+        position_service=get_position_service(credentials),
+    )
+
+
+def get_portfolio_intelligence_service(
+    credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
+) -> PortfolioIntelligenceService:
+    # Reuses the existing account-info and positions composition-root paths, so
+    # there is exactly one account architecture and one position architecture
+    # (no providers are duplicated here); a session/authentication failure
+    # surfaces as 503 from those paths, exactly as for GET /account-info and
+    # GET /positions.
+    return PortfolioIntelligenceService(
+        account_service=get_account_info_service(credentials),
+        position_service=get_position_service(credentials),
+    )
+
+
 async def get_agent_service(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
@@ -457,16 +418,17 @@ async def get_agent_service(
     Declared after the authentication boundary because it depends on the
     authenticated user: the broker's own LLM configuration is resolved from
     that user's broker (never from the request body), and a broker with no
-    active configuration uses the shared free pool. The financial context keeps
-    flowing through the single existing MT5 composition architecture below, so
-    AgentService depends on LLMProvider alone.
+    active configuration uses the shared free pool. The financial context reads
+    the *same* tenant's MT5 session as every other endpoint, so AgentService
+    depends on LLMProvider alone.
     """
+    credentials = await get_mt5_credentials(current_user, session)
     llm_provider = await get_llm_provider(current_user.broker_id, session)
     return AgentService(
         financial_context_service=FinancialContextService(
-            account_service=get_account_info_service(),
-            position_service=get_position_service(),
-            trade_history_service=get_trade_history_service(),
+            account_service=get_account_info_service(credentials),
+            position_service=get_position_service(credentials),
+            trade_history_service=get_trade_history_service(credentials),
         ),
         llm_provider=llm_provider,
         # The outbound-data policy is applied to the prompt the provider gets,

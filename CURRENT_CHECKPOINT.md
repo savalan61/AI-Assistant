@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 35 — Security & Agent Hardening
+Step 36 — MT5 Tenant-Scoped Sessions
 
 Status:
 
@@ -10,33 +10,42 @@ VERIFIED + COMMITTED + SYNCED
 
 Checkpoint commit:
 
-"feat(security): harden authentication, llm egress and agent input" — the
-Step 35 implementation and this document update are committed together in
-this single checkpoint commit. The prior synced checkpoint was b95eaa1
+"feat(mt5): add tenant-scoped mt5 sessions" — the Step 36 implementation and
+this document update are committed together in this single checkpoint commit.
+The prior synced checkpoint was the Step 35 commit ("feat(security): harden
+authentication, llm egress and agent input"), which itself followed b95eaa1
 ("feat(ai): add broker llm routing and agent controls", Steps 29–33).
 
-Step 35 was driven by a read-only architecture/production-readiness audit and
-hardened the security posture without changing any existing feature contract:
-broker-configurable LLM endpoints are validated against SSRF, JWT access
-tokens must carry exp and sub, a suspended broker is enforced on every
-request, login is brute-force throttled, agent input and prompt size are
-bounded, the outbound LLM data boundary is explicit and configurable, and the
-development economic calendar can no longer be served outside development.
+Step 36 closed the largest remaining product gap (audit known issue 1): MT5
+financial data is now authenticated per tenant instead of being a single
+process-global local-terminal read. The MetaTrader5 Python API authenticates
+ONE account per process, so the tenant boundary is a process-wide session
+manager (app/core/mt5_session.py) that owns the terminal: it authenticates a
+request's own (server, login) identity — resolved from the authenticated
+database user's broker, username and encrypted MT5 password — reuses the
+session when the tenant already matches, switches accounts under a lock held
+for the whole raw-read span, and forgets the identity after any failed
+authentication or failed read. Providers are now cheap per-request objects
+carrying one tenant's credentials; the four process-wide provider caches are
+gone. The unavoidable cost, documented rather than hidden: all MT5 reads in
+the process are serialized by that single terminal.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 699 passed, 3 warnings (pre-existing third-party
+pytest tests/ -q → 735 passed, 3 warnings (pre-existing third-party
 deprecation warnings); verified 2026-09-15 on this exact tree
 
 Static verification: python -m compileall app tests alembic → clean.
 git diff --check → clean.
 Direct Pylance/pyright execution remains unavailable in this environment
 (as recorded for Steps 8–35); a focused manual static/type review was
-performed for Step 35 instead, including an AST unused-import scan over every
-changed module. No type suppressions were used.
+performed for Step 36 instead, including an AST unused-import scan over the
+changed modules. No type suppressions remain in any file this step touched
+(two that the diff encountered were removed rather than carried forward).
 
-No trading functionality was added or changed in Step 35; all MT5 read
-behavior is untouched. The AI remains strictly READ-ONLY.
+No trading functionality was added or changed in Step 36; all reads remain
+strictly read-only and no order/position mutation of any kind exists. The AI
+remains strictly READ-ONLY.
 
 Working tree after this checkpoint:
 
@@ -566,6 +575,62 @@ Includes:
   plus updated integration coverage for JWT claims, broker suspension,
   endpoint rejection, message/prompt limits and the calendar guard)
 
+### Step 36 — MT5 Tenant-Scoped Sessions
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- app/core/mt5_session.py: MT5AccountCredentials (frozen dataclass carrying a
+  tenant's numeric login, MT5 server and the STORED CIPHERTEXT of the MT5
+  password, excluded from repr) and MT5SessionManager, the process-wide owner
+  of the single MT5 terminal session. The manager holds a re-entrant lock, the
+  currently authenticated (server, login) key, and the injectable MT5 API seam.
+  acquire(credentials) validates the identity, decrypts the password ONLY here
+  (the only place plaintext exists, via the existing Fernet decrypt_secret —
+  no duplicated crypto), reuses the session when the tenant already matches,
+  switches accounts under the lock when it does not, and yields the MT5 api
+  for the raw read. A failed authentication or a failed read drops the cached
+  identity, so nothing stale is ever trusted. shutdown() never raises.
+- THE MT5 PYTHON API LIMITATION, BY DESIGN: MetaTrader5 authenticates one
+  account per process; two tenants' sessions cannot coexist. The manager makes
+  the switch safe (lock held for the whole acquire → read span) instead of
+  pretending independent sessions exist. Consequence, documented in the module:
+  every MT5 read in the process is serialized on the one terminal.
+- MT5SessionError extends RuntimeError, so every existing API maps an unusable
+  tenant session to the established generic 503 with no new error mapping.
+- Credentials resolution (app/core/dependencies.py, resolve_mt5_account_credentials
+  and the get_mt5_credentials dependency): User.username (numeric) is the MT5
+  login, user.mt5_password_encrypted the ciphertext, Broker.mt5_server the
+  server — all from the authenticated database user, never from a request body,
+  query parameter or token claim. Resolution never decrypts; an incomplete
+  record (non-numeric username, missing server, missing/undecryptable password,
+  missing broker) fails closed inside the session boundary with a message that
+  never names which value was missing.
+- The four process-wide provider caches (market-data, account-info, positions,
+  trade-history) are REMOVED. Each provider is now a cheap per-request object
+  constructed with the session manager and that request's tenant credentials;
+  the only process-wide MT5 object is the session manager (lazy, lock-guarded,
+  failed authentication never cached).
+- app/providers/mt5_account_info.py, mt5_positions.py, mt5_trade_history.py,
+  mt5_market_data.py: rewritten onto the session boundary — each read runs
+  inside session_manager.acquire for the requesting tenant. All conversion,
+  error-translation and read-only behaviour is unchanged; every response
+  contract is unchanged.
+- app/main.py lifespan: no startup warm-up (no tenant is authenticated at
+  boot, so there is nothing to warm); the single terminal session is released
+  once at shutdown via shutdown_mt5_session().
+- run_mt5_call and the consolidated blocking boundary are unchanged; services,
+  provider abstractions, fake providers and every API contract are unchanged.
+- 36 net new tests (test_mt5_session.py 33: authentication on first connect vs
+  account switch, no re-authentication for the same tenant, per-tenant session
+  observation, concurrent-thread serialization with max-inside==1 asserted,
+  incomplete/undecryptable/wrong-key/empty credentials failing closed without
+  touching MT5, failed-login identity forgetting, shutdown safety, read-only
+  surface, credential/ciphertext absence from every error and repr, DB-row
+  resolution incl. non-numeric usernames and no-decryption-at-resolution;
+  plus rewritten provider/lifecycle/API seam tests, including a tenant
+  binding test per endpoint and a 503 path for an unusable tenant session)
+
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
 
@@ -714,15 +779,17 @@ Authenticated request
     ↓
 get_current_user()
     ↓
+get_mt5_credentials (User.username + mt5_password_encrypted + Broker.mt5_server, from the database)
+    ↓
 run_mt5_call (blocking boundary, app/core/blocking.py)
     ↓
 MarketDataService
     ↓
 MarketDataProvider
     ↓
-MT5MarketDataProvider
+MT5MarketDataProvider — inside MT5SessionManager.acquire(tenant credentials)
     ↓
-MT5
+MT5 (authenticated as the requesting tenant's account)
     ↓
 Candle
 
@@ -732,15 +799,17 @@ Authenticated request
     ↓
 get_current_user()
     ↓
+get_mt5_credentials (from the authenticated database user; never the request)
+    ↓
 run_mt5_call (blocking boundary, app/core/blocking.py)
     ↓
 AccountInfoService
     ↓
 AccountInfoProvider (abstraction)
     ↓
-MT5AccountInfoProvider
+MT5AccountInfoProvider — inside MT5SessionManager.acquire(tenant credentials)
     ↓
-MT5
+MT5 (authenticated as the requesting tenant's account)
     ↓
 AccountInfo
 
@@ -750,15 +819,17 @@ Authenticated request
     ↓
 get_current_user()
     ↓
+get_mt5_credentials (from the authenticated database user; never the request)
+    ↓
 run_mt5_call (blocking boundary, app/core/blocking.py)
     ↓
 PositionService
     ↓
 PositionProvider (abstraction)
     ↓
-MT5PositionProvider
+MT5PositionProvider — inside MT5SessionManager.acquire(tenant credentials)
     ↓
-MT5
+MT5 (authenticated as the requesting tenant's account)
     ↓
 tuple[Position, ...]
 
@@ -1190,10 +1261,10 @@ GET /users (super_admin or admin; role-based visibility):
   OutboundDataPolicy resolved at the composition root; account identity is
   never sent regardless of policy.
 - The development economic calendar fails closed outside APP_ENV=development.
-- Steps 18–35 are committed and pushed to origin/master (this checkpoint
-  commit: "feat(security): harden authentication, llm egress and agent input";
-  the prior synced commit was b95eaa1).
-- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 699 passed, 3 warnings.
+- Steps 18–36 are committed and pushed to origin/master (this checkpoint
+  commit: "feat(mt5): add tenant-scoped mt5 sessions"; the prior synced
+  commit was the Step 35 security hardening checkpoint, before that b95eaa1).
+- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 735 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
@@ -1209,10 +1280,14 @@ must be reported rather than hidden.
 
 ## Known Issues (current)
 
-1. MT5 singleton is process-wide and not tenant-scoped. Every provider cache
-   attaches to the same MT5 terminal session; connection semantics are
-   process-wide, non-tenant-scoped, process-attached. This is intentional for
-   the current stage and remains a known limitation.
+1. MT5 reads are serialized process-wide on the ONE terminal session. This is
+   inherent to the MetaTrader5 Python API (one authenticated account per
+   process) and is now the explicit, documented tenant-safety design (Step 36):
+   the session manager holds a lock for every acquire → read span, so a tenant
+   switch can never land inside another tenant's read. Cross-tenant data
+   leakage is impossible, but MT5 throughput is a process-wide bottleneck; the
+   future production answer (one MT5 worker process per broker, or equivalent)
+   remains future work.
 2. MT5 IPC timeout is not implemented.
 3. /health does not currently represent MT5 readiness.
 4. Multi-worker deployment semantics need future documentation/design.
@@ -1288,13 +1363,18 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–35 are complete, committed, and synced to origin/master (this
-checkpoint commit: "feat(security): harden authentication, llm egress and
-agent input").
+Steps 12–36 are complete, committed, and synced to origin/master (this
+checkpoint commit: "feat(mt5): add tenant-scoped mt5 sessions").
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
 
+- MT5 credential provisioning UX: how a user's encrypted MT5 password and a
+  broker's mt5_server get set in production (the session boundary is ready;
+  today they can only be seeded in the database directly)
+- market-data multi-tenant semantics: market data is now tenant-scoped like
+  every other read; whether a shared read-only market-data feed (no customer
+  account needed) should be carved out is an open product decision
 - real free LLM provider integrations: wire one or more genuine free-tier
   OpenAI-compatible providers into the shared pool (the abstraction is ready;
   the pool is empty today)
@@ -1313,8 +1393,6 @@ none may be started without an explicit instruction:
   before economic intelligence can carry real data
 - prompt safety screening before generation (deterministic refusal of
   trading-instruction requests) — a deliberate decision, not yet started
-- tenant-scoped MT5 design (known issue 1) — the largest remaining product gap:
-  every broker's customers currently read the same terminal account
 - observability foundation: request IDs, structured logging, and a real
   readiness endpoint that reports database / MT5 / LLM availability separately
   from liveness (today /health is an unconditional ok)
@@ -1341,7 +1419,8 @@ When instructed, begin by inspecting the existing provider abstractions
 app/providers/account_info.py, app/providers/economic_calendar.py,
 app/providers/llm.py, app/providers/llm_pool.py, app/providers/llm_router.py,
 app/providers/openai_compatible_llm.py, app/providers/market_data.py), the MT5
-providers, the consolidated blocking boundary (app/core/blocking.py), the
+providers and the tenant session boundary (app/core/mt5_session.py),
+the consolidated blocking boundary (app/core/blocking.py), the
 intelligence services (app/services/economic_intelligence/,
 app/services/portfolio_intelligence/, app/services/financial_context/), the
 agent boundary and its guard chain (app/services/agent/, including egress.py),

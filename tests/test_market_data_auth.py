@@ -41,10 +41,17 @@ def set_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _FakeProvider:
-    """Deterministic provider standing in for MT5 at the composition seam."""
+    """Deterministic provider standing in for MT5 at the composition seam.
 
-    def __init__(self, behavior: str = "ok"):
+    The composition root now constructs providers with the authenticated
+    tenant's credentials and the process-wide session manager; the fake accepts
+    and ignores both, since the tenant-scoped session itself is covered by the
+    MT5 session/provider tests.
+    """
+
+    def __init__(self, behavior: str = "ok", session_manager: object = None, credentials: object = None):
         self.behavior = behavior
+        self.credentials = credentials
 
     def get_market_data(self, symbol: str) -> Candle:
         if self.behavior == "value_error":
@@ -85,8 +92,13 @@ def protected_app(tmp_path, monkeypatch):
     app.dependency_overrides[get_db] = override_get_db
 
     def use_provider(behavior: str) -> None:
-        monkeypatch.setattr(deps, "MT5MarketDataProvider", lambda: _FakeProvider(behavior))
-        deps._provider = None  # force the singleton to build the fake
+        # The composition root builds the provider class with keyword arguments,
+        # so the fake class (not a zero-arg lambda) is installed here.
+        class FakeProvider(_FakeProvider):
+            def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+                super().__init__(behavior, session_manager, credentials)
+
+        monkeypatch.setattr(deps, "MT5MarketDataProvider", FakeProvider)
 
     use_provider("ok")
     yield {
@@ -96,7 +108,6 @@ def protected_app(tmp_path, monkeypatch):
         "set_user_active": lambda active: _set_active(factory, User, user_id, active),
         "factory": factory,
     }
-    deps._provider = None  # never leak the fake into other tests
     asyncio.run(engine.dispose())
 
 

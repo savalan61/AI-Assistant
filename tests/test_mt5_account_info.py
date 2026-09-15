@@ -1,30 +1,31 @@
-"""Tests for MT5AccountInfoProvider (Step 16).
+"""Tests for MT5AccountInfoProvider (read-only account information).
 
-All tests patch the module-level MT5 seam (app.providers.mt5_account_info.mt5_api)
-with a configurable fake, so none of them require a real MT5 terminal, MT5
-credentials, PostgreSQL, network access, or .env. The provider's full boundary
-behavior (initialization, conversion, error translation, shutdown) runs for real.
+Every test injects a fake MT5 into the real MT5SessionManager, so none of them
+require a real MT5 terminal, MT5 credentials, PostgreSQL, network access, or
+.env. The provider reads through the authenticated session, so conversion,
+tenant scoping and error translation all run for real.
 """
 from types import SimpleNamespace
 
 import pytest
 
-import app.providers.mt5_account_info as mt5_account_info_module
+from app.core.config import settings as app_settings
+from app.core.encryption import encrypt_secret, generate_encryption_key
+from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.providers.account_info import AccountInfo
 from app.providers.mt5_account_info import MT5AccountInfoProvider
 
-# The only MT5 functions a read-only account-info provider may ever touch.
-ALLOWED_MT5_FUNCTIONS = {"initialize", "last_error", "account_info", "shutdown"}
-# MT5 trading functions that must never be called by this provider.
+# The only MT5 functions a read-only account-info provider may ever touch (the
+# session boundary authenticates; the provider itself only reads).
+ALLOWED_MT5_FUNCTIONS = {"initialize", "login", "last_error", "account_info"}
 TRADING_FUNCTIONS = {"order_send", "order_check", "positions_modify", "orders_modify"}
+
+SERVER = "MetaQuotes-Demo"
+MT5_PASSWORD = "mt5-account-password-under-test"
 
 
 class FakeMT5:
-    """Configurable fake of the MT5 C-extension surface used by the provider.
-
-    Every attribute access is recorded so tests can prove exactly which MT5
-    functions were touched (no trading calls, nothing unexpected).
-    """
+    """Configurable fake of the MT5 C-extension surface used by the provider."""
 
     def __init__(
         self,
@@ -32,46 +33,38 @@ class FakeMT5:
         initialize_error: Exception | None = None,
         account_info_result: object = None,
         account_info_error: Exception | None = None,
-        shutdown_error: Exception | None = None,
     ):
         self.initialize_result = initialize_result
         self.initialize_error = initialize_error
         self.account_info_result = account_info_result
         self.account_info_error = account_info_error
-        self.shutdown_error = shutdown_error
-        self.initialize_calls = 0
-        self.shutdown_calls = 0
+        self.authenticate_calls: list[dict[str, object]] = []
         self.accessed: list[str] = []
 
     def _record(self, name: str) -> None:
         self.accessed.append(name)
 
-    def __getattr__(self, name: str):  # pragma: no cover - only for unexpected probes
-        self.accessed.append(name)
-        raise AttributeError(f"FakeMT5 has no attribute {name!r}")
-
-    def initialize(self):  # noqa: D102 - fake of mt5.initialize
+    def initialize(self, **kwargs: object) -> object:
         self._record("initialize")
-        self.initialize_calls += 1
+        self.authenticate_calls.append(dict(kwargs))
         if self.initialize_error is not None:
             raise self.initialize_error
         return self.initialize_result
 
-    def last_error(self):  # noqa: D102 - fake of mt5.last_error
+    def login(self, **kwargs: object) -> object:
+        self._record("login")
+        self.authenticate_calls.append(dict(kwargs))
+        return True
+
+    def last_error(self) -> tuple[int, str]:
         self._record("last_error")
         return (-1, "simulated MT5 failure")
 
-    def account_info(self):  # noqa: D102 - fake of mt5.account_info
+    def account_info(self) -> object:
         self._record("account_info")
         if self.account_info_error is not None:
             raise self.account_info_error
         return self.account_info_result
-
-    def shutdown(self):  # noqa: D102 - fake of mt5.shutdown
-        self._record("shutdown")
-        self.shutdown_calls += 1
-        if self.shutdown_error is not None:
-            raise self.shutdown_error
 
 
 # A realistic MT5 account_info() payload (attribute access, not a dict).
@@ -90,36 +83,43 @@ MT5_ACCOUNT = SimpleNamespace(
 )
 
 
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test a usable, test-only encryption key."""
+    monkeypatch.setattr(app_settings, "SECRET_ENCRYPTION_KEY", generate_encryption_key(), raising=True)
+
+
+def make_credentials(login: int = 10001, server: str = SERVER) -> MT5AccountCredentials:
+    """Tenant credentials whose stored password is real ciphertext."""
+    return MT5AccountCredentials(login=login, server=server, password_encrypted=encrypt_secret(MT5_PASSWORD))
+
+
 @pytest.fixture()
-def patch_mt5(monkeypatch):
-    """Patch the provider's MT5 seam and restore it after each test."""
+def provider():
+    """Build a provider bound to a fake MT5 session for one tenant."""
 
-    def _patch(fake: FakeMT5) -> FakeMT5:
-        monkeypatch.setattr(mt5_account_info_module, "mt5_api", fake)
-        return fake
+    def _provider(fake: FakeMT5, credentials: MT5AccountCredentials | None = None) -> MT5AccountInfoProvider:
+        return MT5AccountInfoProvider(
+            session_manager=MT5SessionManager(mt5_api=fake),
+            credentials=credentials if credentials is not None else make_credentials(),
+        )
 
-    return _patch
+    return _provider
 
 
-# --- successful initialization and conversion ----------------------------------
+# --- successful conversion --------------------------------------------------------
 
 
-def test_successful_initialization_and_account_info_conversion(patch_mt5):
-    fake = patch_mt5(FakeMT5(initialize_result=True, account_info_result=MT5_ACCOUNT))
+def test_successful_retrieval_and_conversion(provider):
+    info = provider(FakeMT5(account_info_result=MT5_ACCOUNT)).get_account_info()
 
-    provider = MT5AccountInfoProvider()
-    info = provider.get_account_info()
-
-    assert fake.initialize_calls == 1
     assert isinstance(info, AccountInfo)
     # Raw MT5 object must not leak: the public result is the app contract.
     assert not isinstance(info, SimpleNamespace)
 
 
-def test_all_nine_fields_are_mapped_correctly(patch_mt5):
-    patch_mt5(FakeMT5(initialize_result=True, account_info_result=MT5_ACCOUNT))
-
-    info = MT5AccountInfoProvider().get_account_info()
+def test_all_nine_fields_are_mapped_correctly(provider):
+    info = provider(FakeMT5(account_info_result=MT5_ACCOUNT)).get_account_info()
 
     # Values preserved exactly as returned by MT5.
     assert info == AccountInfo(
@@ -140,82 +140,83 @@ def test_all_nine_fields_are_mapped_correctly(patch_mt5):
     assert isinstance(info.name, str) and isinstance(info.currency, str) and isinstance(info.server, str)
 
 
-# --- initialization failures -----------------------------------------------------
+# --- tenant-scoped session ---------------------------------------------------------
 
 
-def test_initialize_returning_false_raises_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(initialize_result=False))
+def test_reads_are_authenticated_as_the_tenant(provider):
+    fake = FakeMT5(account_info_result=MT5_ACCOUNT)
+
+    provider(fake).get_account_info()
+
+    # The decrypted password is handed to MT5 for this tenant's own login/server.
+    assert fake.authenticate_calls == [{"login": 10001, "password": MT5_PASSWORD, "server": SERVER}]
+
+
+def test_two_tenants_read_their_own_sessions(provider):
+    fake = FakeMT5(account_info_result=MT5_ACCOUNT)
+
+    provider(fake, make_credentials(login=10001, server="BrokerA-Live")).get_account_info()
+    provider(fake, make_credentials(login=20002, server="BrokerB-Live")).get_account_info()
+
+    assert [call["login"] for call in fake.authenticate_calls] == [10001, 20002]
+    assert [call["server"] for call in fake.authenticate_calls] == ["BrokerA-Live", "BrokerB-Live"]
+
+
+def test_incomplete_credentials_fail_closed_before_reading(provider):
+    fake = FakeMT5(account_info_result=MT5_ACCOUNT)
+    incomplete = MT5AccountCredentials(login=10001, server=None, password_encrypted="x")
+
+    with pytest.raises(RuntimeError):
+        provider(fake, incomplete).get_account_info()
+
+    assert fake.accessed == []  # nothing was ever read
+
+
+# --- failures ----------------------------------------------------------------------
+
+
+def test_initialize_failure_surfaces_as_runtime_error(provider):
+    fake = FakeMT5(initialize_result=False)
+
+    with pytest.raises(RuntimeError):
+        provider(fake).get_account_info()
+
+
+def test_initialize_raising_external_exception_translated_to_runtime_error(provider):
+    fake = FakeMT5(initialize_error=OSError("simulated IPC crash"))
 
     with pytest.raises(RuntimeError) as exc_info:
-        MT5AccountInfoProvider()
-
-    # Error information from last_error() is included in the message.
-    assert "simulated MT5 failure" in str(exc_info.value)
-
-
-def test_initialize_raising_external_exception_translated_to_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(initialize_error=OSError("simulated IPC crash")))
-
-    with pytest.raises(RuntimeError) as exc_info:
-        MT5AccountInfoProvider()
+        provider(fake).get_account_info()
 
     # Generic message (no third-party detail) with the cause chained for logs.
-    assert str(exc_info.value) == "MT5 terminal initialization failed"
+    assert "MT5 terminal initialization failed" in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, OSError)
 
 
-# --- account_info failures ---------------------------------------------------------
-
-
-def test_account_info_returning_none_raises_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(initialize_result=True, account_info_result=None))
-
-    provider = MT5AccountInfoProvider()
+def test_account_info_returning_none_raises_runtime_error(provider):
     with pytest.raises(RuntimeError) as exc_info:
-        provider.get_account_info()
+        provider(FakeMT5(account_info_result=None)).get_account_info()
 
     assert "account information unavailable" in str(exc_info.value)
 
 
-def test_account_info_raising_external_exception_translated_to_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(initialize_result=True, account_info_error=OSError("simulated terminal disconnect")))
+def test_account_info_raising_external_exception_translated_to_runtime_error(provider):
+    fake = FakeMT5(account_info_error=OSError("simulated terminal disconnect"))
 
-    provider = MT5AccountInfoProvider()
     with pytest.raises(RuntimeError) as exc_info:
-        provider.get_account_info()
+        provider(fake).get_account_info()
 
     assert str(exc_info.value) == "MT5 account information request failed"
     assert isinstance(exc_info.value.__cause__, OSError)
 
 
-# --- shutdown behavior ----------------------------------------------------------------
-
-
-def test_shutdown_calls_mt5_shutdown(patch_mt5):
-    fake = patch_mt5(FakeMT5(initialize_result=True, account_info_result=MT5_ACCOUNT))
-
-    provider = MT5AccountInfoProvider()
-    provider.shutdown()
-
-    assert fake.shutdown_calls == 1
-
-
-def test_shutdown_never_raises_when_mt5_shutdown_fails(patch_mt5):
-    patch_mt5(FakeMT5(initialize_result=True, shutdown_error=OSError("terminal already gone")))
-
-    provider = MT5AccountInfoProvider()
-    provider.shutdown()  # must not raise
-
-
 # --- read-only guarantee ----------------------------------------------------------------
 
 
-def test_only_read_only_mt5_functions_are_called(patch_mt5):
-    fake = patch_mt5(FakeMT5(initialize_result=True, account_info_result=MT5_ACCOUNT))
+def test_only_read_only_mt5_functions_are_called(provider):
+    fake = FakeMT5(account_info_result=MT5_ACCOUNT)
 
-    provider = MT5AccountInfoProvider()
-    provider.get_account_info()
-    provider.shutdown()
+    provider(fake).get_account_info()
 
     accessed = set(fake.accessed)
     # Nothing outside the read-only surface, and no trading function at all.

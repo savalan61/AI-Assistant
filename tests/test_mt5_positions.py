@@ -1,21 +1,27 @@
 """Tests for MT5PositionProvider (read-only open positions).
 
-All tests patch the module-level MT5 seam (app.providers.mt5_positions.mt5_api)
-with a configurable fake, so none of them require a real MT5 terminal,
-credentials, PostgreSQL, network access, or .env.
+Every test injects a fake MT5 into the real MT5SessionManager, so none of them
+require a real MT5 terminal, credentials, PostgreSQL, network access, or .env.
+The provider reads through the authenticated session, so provider-level mapping
+and tenant scoping are both exercised for real.
 """
 from types import SimpleNamespace
 
 import pytest
 
-import app.providers.mt5_positions as mt5_positions_module
-from app.providers.position import Position, PositionType
+from app.core.config import settings as app_settings
+from app.core.encryption import encrypt_secret, generate_encryption_key
+from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.providers.mt5_positions import MT5PositionProvider
+from app.providers.position import Position, PositionType
 
-# The only MT5 functions a read-only positions provider may ever touch.
-ALLOWED_MT5_FUNCTIONS = {"initialize", "last_error", "positions_get", "shutdown",
-                         "ORDER_TYPE_BUY", "ORDER_TYPE_SELL"}
+# The only MT5 functions a read-only positions provider may ever touch (the
+# session boundary authenticates; the provider itself only reads).
+ALLOWED_MT5_FUNCTIONS = {"initialize", "login", "last_error", "positions_get"}
 TRADING_FUNCTIONS = {"order_send", "order_check", "positions_modify", "orders_modify"}
+
+SERVER = "BrokerA-Live"
+MT5_PASSWORD = "mt5-account-password-under-test"
 
 
 class FakeMT5:
@@ -31,26 +37,28 @@ class FakeMT5:
         initialize_error: Exception | None = None,
         positions_result: object = None,
         positions_error: Exception | None = None,
-        shutdown_error: Exception | None = None,
     ):
         self.initialize_result = initialize_result
         self.initialize_error = initialize_error
         self.positions_result = positions_result
         self.positions_error = positions_error
-        self.shutdown_error = shutdown_error
-        self.initialize_calls = 0
-        self.shutdown_calls = 0
+        self.authenticate_calls: list[dict[str, object]] = []
         self.accessed: list[str] = []
 
     def _record(self, name: str) -> None:
         self.accessed.append(name)
 
-    def initialize(self) -> object:
+    def initialize(self, **kwargs: object) -> object:
         self._record("initialize")
-        self.initialize_calls += 1
+        self.authenticate_calls.append(dict(kwargs))
         if self.initialize_error is not None:
             raise self.initialize_error
         return self.initialize_result
+
+    def login(self, **kwargs: object) -> object:
+        self._record("login")
+        self.authenticate_calls.append(dict(kwargs))
+        return True
 
     def last_error(self) -> tuple[int, str]:
         self._record("last_error")
@@ -62,14 +70,12 @@ class FakeMT5:
             raise self.positions_error
         return self.positions_result
 
-    def shutdown(self) -> None:
-        self._record("shutdown")
-        self.shutdown_calls += 1
-        if self.shutdown_error is not None:
-            raise self.shutdown_error
 
-
-def mt5_position(ticket: int = 123456789, symbol: str = "XAUUSD", direction: int = FakeMT5.ORDER_TYPE_BUY) -> SimpleNamespace:
+def mt5_position(
+    ticket: int = 123456789,
+    symbol: str = "XAUUSD",
+    direction: int = FakeMT5.ORDER_TYPE_BUY,
+) -> SimpleNamespace:
     """A realistic MT5 position row (attribute access, not a dict)."""
     return SimpleNamespace(
         ticket=ticket,
@@ -82,33 +88,43 @@ def mt5_position(ticket: int = 123456789, symbol: str = "XAUUSD", direction: int
     )
 
 
-@pytest.fixture()
-def patch_mt5(monkeypatch):
-    def _patch(fake: FakeMT5) -> FakeMT5:
-        monkeypatch.setattr(mt5_positions_module, "mt5_api", fake)
-        return fake
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test a usable, test-only encryption key."""
+    monkeypatch.setattr(app_settings, "SECRET_ENCRYPTION_KEY", generate_encryption_key(), raising=True)
 
-    return _patch
+
+def make_credentials(login: int = 10001, server: str = SERVER) -> MT5AccountCredentials:
+    """Tenant credentials whose stored password is real ciphertext."""
+    return MT5AccountCredentials(login=login, server=server, password_encrypted=encrypt_secret(MT5_PASSWORD))
+
+
+@pytest.fixture()
+def provider():
+    """Build a provider bound to a fake MT5 session for one tenant."""
+
+    def _provider(fake: FakeMT5, credentials: MT5AccountCredentials | None = None) -> MT5PositionProvider:
+        return MT5PositionProvider(
+            session_manager=MT5SessionManager(mt5_api=fake),
+            credentials=credentials if credentials is not None else make_credentials(),
+        )
+
+    return _provider
 
 
 # --- provider mapping -------------------------------------------------------------
 
 
-def test_successful_retrieval_and_mapping(patch_mt5):
-    patch_mt5(FakeMT5(positions_result=(mt5_position(),)))
-
-    provider = MT5PositionProvider()
-    positions = provider.get_positions()
+def test_successful_retrieval_and_mapping(provider):
+    positions = provider(FakeMT5(positions_result=(mt5_position(),))).get_positions()
 
     assert isinstance(positions, tuple)
     assert isinstance(positions[0], Position)
     assert not isinstance(positions[0], SimpleNamespace)  # raw MT5 object must not leak
 
 
-def test_all_seven_fields_are_mapped_correctly(patch_mt5):
-    patch_mt5(FakeMT5(positions_result=(mt5_position(),)))
-
-    info = MT5PositionProvider().get_positions()[0]
+def test_all_seven_fields_are_mapped_correctly(provider):
+    info = provider(FakeMT5(positions_result=(mt5_position(),))).get_positions()[0]
 
     assert info == Position(
         ticket=123456789,
@@ -125,91 +141,97 @@ def test_all_seven_fields_are_mapped_correctly(patch_mt5):
     assert isinstance(info.symbol, str)
 
 
-def test_mt5_buy_maps_to_buy(patch_mt5):
-    patch_mt5(FakeMT5(positions_result=(mt5_position(direction=FakeMT5.ORDER_TYPE_BUY),)))
+def test_mt5_buy_maps_to_buy(provider):
+    fake = FakeMT5(positions_result=(mt5_position(direction=FakeMT5.ORDER_TYPE_BUY),))
 
-    assert MT5PositionProvider().get_positions()[0].type is PositionType.BUY
+    assert provider(fake).get_positions()[0].type is PositionType.BUY
 
 
-def test_mt5_sell_maps_to_sell(patch_mt5):
-    patch_mt5(FakeMT5(positions_result=(mt5_position(ticket=987654321, direction=FakeMT5.ORDER_TYPE_SELL),)))
+def test_mt5_sell_maps_to_sell(provider):
+    fake = FakeMT5(positions_result=(mt5_position(ticket=987654321, direction=FakeMT5.ORDER_TYPE_SELL),))
 
-    position = MT5PositionProvider().get_positions()[0]
+    position = provider(fake).get_positions()[0]
     assert position.type is PositionType.SELL
     assert position.type.value == "SELL"  # JSON-facing value is exactly "SELL"
 
 
-def test_unknown_direction_fails_loudly(patch_mt5):
-    patch_mt5(FakeMT5(positions_result=(mt5_position(direction=7),)))
+def test_unknown_direction_fails_loudly(provider):
+    fake = FakeMT5(positions_result=(mt5_position(direction=7),))
 
     with pytest.raises(RuntimeError):
-        MT5PositionProvider().get_positions()
+        provider(fake).get_positions()
 
 
-def test_empty_tuple_means_no_positions_not_failure(patch_mt5):
-    patch_mt5(FakeMT5(positions_result=()))
-
-    assert MT5PositionProvider().get_positions() == ()
+def test_empty_tuple_means_no_positions_not_failure(provider):
+    assert provider(FakeMT5(positions_result=())).get_positions() == ()
 
 
-def test_positions_get_none_raises_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(positions_result=None))
+# --- tenant-scoped session ---------------------------------------------------------
 
+
+def test_reads_are_authenticated_as_the_tenant(provider):
+    fake = FakeMT5(positions_result=(mt5_position(),))
+
+    provider(fake).get_positions()
+
+    # The decrypted password is handed to MT5 for this tenant's own login/server.
+    assert fake.authenticate_calls == [{"login": 10001, "password": MT5_PASSWORD, "server": SERVER}]
+
+
+def test_two_tenants_read_their_own_sessions(provider):
+    fake = FakeMT5(positions_result=(mt5_position(),))
+
+    provider(fake, make_credentials(login=10001, server="BrokerA-Live")).get_positions()
+    provider(fake, make_credentials(login=20002, server="BrokerB-Live")).get_positions()
+
+    assert [call["login"] for call in fake.authenticate_calls] == [10001, 20002]
+    assert [call["server"] for call in fake.authenticate_calls] == ["BrokerA-Live", "BrokerB-Live"]
+
+
+def test_incomplete_credentials_fail_closed_before_reading(provider):
+    fake = FakeMT5(positions_result=(mt5_position(),))
+    incomplete = MT5AccountCredentials(login=None, server=SERVER, password_encrypted="x")
+
+    with pytest.raises(RuntimeError):
+        provider(fake, incomplete).get_positions()
+
+    assert fake.accessed == []  # nothing was ever read
+
+
+# --- failure translation -----------------------------------------------------------
+
+
+def test_positions_get_none_raises_runtime_error(provider):
     with pytest.raises(RuntimeError) as exc_info:
-        MT5PositionProvider().get_positions()
+        provider(FakeMT5(positions_result=None)).get_positions()
 
     assert "open positions unavailable" in str(exc_info.value)
 
 
-def test_positions_get_raising_translated_to_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(positions_error=OSError("simulated terminal disconnect")))
+def test_positions_get_raising_translated_to_runtime_error(provider):
+    fake = FakeMT5(positions_error=OSError("simulated terminal disconnect"))
 
     with pytest.raises(RuntimeError) as exc_info:
-        MT5PositionProvider().get_positions()
+        provider(fake).get_positions()
 
     assert str(exc_info.value) == "MT5 open positions request failed"
     assert isinstance(exc_info.value.__cause__, OSError)
 
 
-def test_initialize_returning_false_raises_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(initialize_result=False))
+def test_initialize_failure_surfaces_as_runtime_error(provider):
+    fake = FakeMT5(initialize_result=False)
 
     with pytest.raises(RuntimeError):
-        MT5PositionProvider()
+        provider(fake).get_positions()
 
 
-def test_initialize_raising_translated_to_runtime_error(patch_mt5):
-    patch_mt5(FakeMT5(initialize_error=OSError("simulated IPC crash")))
-
-    with pytest.raises(RuntimeError) as exc_info:
-        MT5PositionProvider()
-
-    assert str(exc_info.value) == "MT5 terminal initialization failed"
-    assert isinstance(exc_info.value.__cause__, OSError)
+# --- read-only guarantee ----------------------------------------------------------------
 
 
-def test_shutdown_calls_mt5_shutdown(patch_mt5):
-    fake = patch_mt5(FakeMT5(positions_result=()))
+def test_only_read_only_mt5_functions_are_called(provider):
+    fake = FakeMT5(positions_result=(mt5_position(),))
 
-    provider = MT5PositionProvider()
-    provider.shutdown()
-
-    assert fake.shutdown_calls == 1
-
-
-def test_shutdown_never_raises_when_mt5_shutdown_fails(patch_mt5):
-    patch_mt5(FakeMT5(shutdown_error=OSError("terminal already gone")))
-
-    provider = MT5PositionProvider()
-    provider.shutdown()  # must not raise
-
-
-def test_only_read_only_mt5_functions_are_called(patch_mt5):
-    fake = patch_mt5(FakeMT5(positions_result=(mt5_position(),)))
-
-    provider = MT5PositionProvider()
-    provider.get_positions()
-    provider.shutdown()
+    provider(fake).get_positions()
 
     accessed = set(fake.accessed)
     assert accessed <= ALLOWED_MT5_FUNCTIONS

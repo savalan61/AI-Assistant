@@ -1,7 +1,9 @@
-"""Stage 6 lifecycle tests: singleton provider, shutdown, lifespan, threadpool boundary.
+"""MT5 session lifecycle tests: process-wide session manager, lifespan, threadpool.
 
-All tests patch the composition-root seam (app.core.dependencies.MT5MarketDataProvider),
-so none of them require MT5, PostgreSQL, network, credentials, or .env.
+The process-wide object is now the MT5 *session* (MT5 authenticates one account
+per process), not a cached provider. All tests patch the composition-root seams
+(app.core.dependencies.MT5SessionManager / MT5MarketDataProvider), so none of
+them require MT5, PostgreSQL, network, credentials, or .env.
 """
 import asyncio
 import threading
@@ -9,7 +11,7 @@ from datetime import datetime
 from typing import AsyncIterator
 
 import pytest
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -17,6 +19,7 @@ import app.core.dependencies as deps
 import app.main
 from app.api.market_data_router import router
 from app.core.config import settings as app_settings
+from app.core.mt5_session import MT5SessionManager
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
@@ -36,22 +39,50 @@ CANDLE = Candle(
 )
 
 
+class FakeMT5:
+    """Minimal MT5 seam for the session manager (no terminal, no account)."""
+
+    def __init__(self, initialize_result: object = True, initialize_error: Exception | None = None):
+        self.initialize_result = initialize_result
+        self.initialize_error = initialize_error
+        self.authenticate_calls: list[dict[str, object]] = []
+        self.shutdown_calls = 0
+
+    def initialize(self, **kwargs: object) -> object:
+        self.authenticate_calls.append(dict(kwargs))
+        if self.initialize_error is not None:
+            raise self.initialize_error
+        return self.initialize_result
+
+    def login(self, **kwargs: object) -> object:
+        self.authenticate_calls.append(dict(kwargs))
+        return True
+
+    def last_error(self) -> tuple[int, str]:
+        return (-6, "simulated authorization failure")
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
 class _Recording:
-    """Shared record of provider construction, calls, and shutdowns."""
+    """Shared record of session-manager construction/shutdown and provider calls."""
 
     def __init__(self):
-        self.instances = []
-        self.shutdown_calls = 0
-        self.call_threads = []
-        self.symbols = []
+        self.session_managers: list[MT5SessionManager] = []
+        self.session_shutdowns = 0
+        self.providers: list[object] = []
+        self.provider_shutdowns = 0
+        self.call_threads: list[int] = []
+        self.symbols: list[str] = []
+        self.credentials: list[object] = []
 
 
-def make_recording_provider_class():
-    record = _Recording()
-
+def make_recording_provider_class(record: _Recording):
     class RecordingProvider(MarketDataProvider):
-        def __init__(self):
-            record.instances.append(self)
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            record.providers.append(self)
+            record.credentials.append(credentials)
 
         def get_market_data(self, symbol: str) -> Candle:
             record.symbols.append(symbol)
@@ -59,25 +90,46 @@ def make_recording_provider_class():
             return CANDLE
 
         def shutdown(self) -> None:
-            record.shutdown_calls += 1
+            record.provider_shutdowns += 1
 
-    return RecordingProvider, record
+    return RecordingProvider
 
 
 @pytest.fixture()
-def patched_provider(monkeypatch):
-    cls, record = make_recording_provider_class()
-    monkeypatch.setattr(deps, "MT5MarketDataProvider", cls)
-    deps._provider = None
-    yield cls, record
-    deps._provider = None  # never leak a recording provider into other tests
+def recording_session(monkeypatch):
+    """Patch the session-manager construction with a fake-MT5 recording class."""
+    record = _Recording()
+    fake_mt5 = FakeMT5()
+
+    class RecordingSessionManager(MT5SessionManager):
+        def __init__(self, mt5_api: object = None) -> None:
+            super().__init__(mt5_api=fake_mt5 if mt5_api is None else mt5_api)
+            record.session_managers.append(self)
+
+        def shutdown(self) -> None:
+            record.session_shutdowns += 1
+            super().shutdown()
+
+    monkeypatch.setattr(deps, "MT5SessionManager", RecordingSessionManager)
+    monkeypatch.setattr(deps, "_mt5_session_manager", None, raising=True)
+    yield {"record": record, "fake_mt5": fake_mt5}
+    monkeypatch.setattr(deps, "_mt5_session_manager", None, raising=True)
+
+
+@pytest.fixture()
+def patched_provider(monkeypatch, recording_session):
+    """Install a recording market-data provider at the composition-root seam."""
+    record: _Recording = recording_session["record"]
+    monkeypatch.setattr(deps, "MT5MarketDataProvider", make_recording_provider_class(record))
+    yield record
 
 
 @pytest.fixture()
 def auth_env(tmp_path, monkeypatch):
     """Test-only JWT config plus a seeded user for authenticated HTTP probes.
 
-    The market-data route requires authentication since Step 11; these probes
+    The market-data route requires authentication, and the composition root now
+    also resolves the tenant's MT5 credentials from the database, so these probes
     override get_db with a per-test SQLite database and mint a real token.
     """
     monkeypatch.setattr(app_settings, "SECRET_KEY", TEST_SECRET, raising=True)
@@ -115,126 +167,107 @@ def auth_env(tmp_path, monkeypatch):
     asyncio.run(engine.dispose())
 
 
-# --- singleton provider identity / construction once -----------------------
+# --- process-wide session manager identity ---------------------------------
 
 
-def test_provider_constructed_once_and_service_reuses_instance(patched_provider):
-    _, record = patched_provider
+def test_session_manager_is_constructed_once_and_reused(recording_session):
+    record: _Recording = recording_session["record"]
 
-    first = deps.get_market_data_service()
-    second = deps.get_market_data_service()
+    first = deps.get_mt5_session_manager()
+    second = deps.get_mt5_session_manager()
 
-    assert len(record.instances) == 1
-    assert first is not second
-    assert first._provider is second._provider
+    assert first is second
+    assert len(record.session_managers) == 1
 
 
-def test_provider_constructed_exactly_once_under_concurrency(patched_provider):
+def test_session_manager_is_constructed_exactly_once_under_concurrency(recording_session):
     from concurrent.futures import ThreadPoolExecutor
 
-    _, record = patched_provider
+    record: _Recording = recording_session["record"]
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        services = list(pool.map(lambda _: deps.get_market_data_service(), range(16)))
+        managers = list(pool.map(lambda _: deps.get_mt5_session_manager(), range(16)))
 
-    assert len(record.instances) == 1
-    assert all(s._provider is record.instances[0] for s in services)
-
-
-# --- failed initialization is not cached -----------------------------------
+    assert len(record.session_managers) == 1
+    assert all(manager is record.session_managers[0] for manager in managers)
 
 
-def test_failed_initialization_is_not_cached(patched_provider, monkeypatch):
-    cls, record = patched_provider
-
-    def failing_init(self):
-        raise RuntimeError("MT5 initialization failed: simulated")
-
-    monkeypatch.setattr(cls, "__init__", failing_init)
-    with pytest.raises(HTTPException) as exc_info:
-        deps.get_market_data_service()
-    assert exc_info.value.status_code == 503
-    assert record.instances == []  # construction aborted, nothing recorded
-    assert deps._provider is None  # failure was not cached
-
-    # Retry with a succeeding init that still records the instance.
-    monkeypatch.setattr(cls, "__init__", lambda self: record.instances.append(self))
-    service = deps.get_market_data_service()
-    assert len(record.instances) == 1  # retried, then cached
-    assert deps._provider is service._provider
+# --- lifespan: no tenant exists at boot ------------------------------------
 
 
-# --- lifespan startup/shutdown ----------------------------------------------
-
-
-def test_lifespan_warms_provider_and_shuts_it_down_once(patched_provider):
-    _, record = patched_provider
+def test_lifespan_never_authenticates_at_startup_and_boots_cleanly(recording_session):
+    record: _Recording = recording_session["record"]
 
     with TestClient(app.main.app) as client:
         assert client.get("/health").status_code == 200
-        assert len(record.instances) == 1  # warmed at startup, not per request
         assert client.get("/health").status_code == 200
-        assert len(record.instances) == 1  # still the same warm instance
+        # No tenant is authenticated at boot: there is no session to warm.
+        assert record.session_managers == []
+        assert recording_session["fake_mt5"].authenticate_calls == []
 
-    assert record.shutdown_calls == 1  # exactly once at shutdown
-    assert deps._provider is None
 
+def test_lifespan_releases_the_process_wide_session_once(recording_session):
+    record: _Recording = recording_session["record"]
+    manager = deps.get_mt5_session_manager()  # as the first authenticated read would
 
-def test_startup_failure_does_not_prevent_boot(patched_provider, monkeypatch):
-    cls, record = patched_provider
-
-    def failing_init(self):
-        raise RuntimeError("MT5 initialization failed: simulated")
-
-    monkeypatch.setattr(cls, "__init__", failing_init)
     with TestClient(app.main.app) as client:
-        assert client.get("/health").status_code == 200  # boot survived
+        assert client.get("/health").status_code == 200
 
-    assert record.instances == []
-    assert record.shutdown_calls == 0  # nothing was cached, shutdown is a no-op
-    assert deps._provider is None
-
-
-# --- post-shutdown behavior --------------------------------------------------
+    assert record.session_shutdowns == 1
+    assert manager.authenticated_account is None
+    assert deps._mt5_session_manager is None
 
 
-def test_shutdown_clears_cache_and_next_request_gets_fresh_provider(patched_provider):
-    _, record = patched_provider
-
-    first = deps.get_market_data_service()
-    deps.shutdown_market_data()
-
-    assert record.shutdown_calls == 1
-    assert deps._provider is None
-
-    second = deps.get_market_data_service()
-    assert second._provider is not first._provider
-    assert len(record.instances) == 2
+# --- shutdown behavior ------------------------------------------------------
 
 
-def test_request_after_shutdown_maps_to_503(patched_provider, monkeypatch, auth_env):
-    cls, record = patched_provider
-    deps.get_market_data_service()
-    deps.shutdown_market_data()
-    fresh = deps.get_market_data_service()  # retry constructs a fresh instance
+def test_shutdown_clears_the_cache_and_the_next_request_rebuilds_it(recording_session):
+    record: _Recording = recording_session["record"]
 
-    def dead(self, symbol):
-        raise RuntimeError("MT5 market data request failed: terminal released")
+    first = deps.get_mt5_session_manager()
+    deps.shutdown_mt5_session()
 
-    monkeypatch.setattr(cls, "get_market_data", dead)
+    assert record.session_shutdowns == 1
+    assert deps._mt5_session_manager is None
+
+    second = deps.get_mt5_session_manager()
+    assert second is not first
+    assert len(record.session_managers) == 2
+
+
+def test_shutdown_is_safe_when_nothing_was_ever_built(recording_session):
+    record: _Recording = recording_session["record"]
+
+    deps.shutdown_mt5_session()  # must not raise
+
+    assert record.session_shutdowns == 0
+    assert record.session_managers == []
+
+
+# --- composition and blocking boundary --------------------------------------
+
+
+def test_market_data_provider_is_built_per_request_for_the_tenant(
+    patched_provider, auth_env, monkeypatch
+):
+    record: _Recording = patched_provider
     client = TestClient(app.main.app)
-    # The route requires authentication: send a valid token so the request
-    # reaches the (dead) provider and still maps to 503.
-    response = client.get("/market-data/EURUSD", headers={"Authorization": f"Bearer {auth_env['token']}"})
 
-    assert response.status_code == 503
+    for _ in range(2):
+        response = client.get(
+            "/market-data/EURUSD", headers={"Authorization": f"Bearer {auth_env['token']}"}
+        )
+        assert response.status_code == 200
 
-
-# --- blocking call is explicitly offloaded to the threadpool -----------------
+    # Two requests, two per-request providers (no cached provider can serve one
+    # tenant's credentials to another), each bound to the caller's own identity.
+    assert len(record.providers) == 2
+    for credentials in record.credentials:
+        assert getattr(credentials, "login", None) == 10001
 
 
 def test_blocking_call_runs_off_the_event_loop_thread(patched_provider, auth_env):
-    _, record = patched_provider
+    record: _Recording = patched_provider
     loop_thread = {}
 
     async def capture_loop_thread():
@@ -252,3 +285,17 @@ def test_blocking_call_runs_off_the_event_loop_thread(patched_provider, auth_env
     assert response.json()["close"] == 105.0
     assert record.call_threads, "provider was never called"
     assert record.call_threads[0] != loop_thread["id"]  # ran on a worker thread
+
+
+def test_unusable_tenant_session_maps_to_503(recording_session, auth_env, monkeypatch):
+    # The real provider runs here: the seeded user has no stored MT5 password, so
+    # the tenant's session cannot be established and the request fails safely.
+    monkeypatch.setattr(deps, "MT5MarketDataProvider", deps.MT5MarketDataProvider, raising=True)
+
+    client = TestClient(app.main.app)
+    response = client.get("/market-data/EURUSD", headers={"Authorization": f"Bearer {auth_env['token']}"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Market data service temporarily unavailable"
+    # Nothing was authenticated and no partial session was cached.
+    assert deps.get_mt5_session_manager().authenticated_account is None

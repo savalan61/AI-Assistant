@@ -1,16 +1,8 @@
-import logging
-
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.core.config import settings
-from app.core.dependencies import (
-    get_market_data_provider,
-    shutdown_account_info,
-    shutdown_market_data,
-    shutdown_positions,
-    shutdown_trade_history,
-)
+from app.core.dependencies import shutdown_mt5_session
 from app.api.account_info_router import router as account_info_router
 from app.api.agent_router import router as agent_router
 from app.api.auth_router import router as auth_router
@@ -22,24 +14,17 @@ from app.api.positions_router import router as positions_router
 from app.api.trade_history_router import router as trade_history_router
 from app.api.users_router import router as users_router
 
-logger = logging.getLogger(__name__)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warm the process-wide MT5 provider once at startup. A missing terminal
-    # must not prevent FastAPI from starting: later requests retry lazily.
-    try:
-        get_market_data_provider()
-    except RuntimeError as exc:
-        logger.warning("MT5 provider warm-up failed (requests will retry): %s", exc)
+    # No startup warm-up: MT5 is now authenticated per tenant, and at boot there
+    # is no authenticated user whose account could be connected. The session is
+    # established lazily by the first authenticated MT5 request (and a failure
+    # there maps to 503 as before, so a missing terminal never blocks boot).
     yield
-    # Release the terminal connection exactly once at shutdown: every provider
-    # cache attaches to the same MT5 terminal session.
-    shutdown_market_data()
-    shutdown_account_info()
-    shutdown_positions()
-    shutdown_trade_history()
+    # Release the single process-wide terminal session once at shutdown; every
+    # tenant's read went through that one session.
+    shutdown_mt5_session()
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
