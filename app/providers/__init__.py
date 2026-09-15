@@ -6,8 +6,10 @@ from app.providers.economic_calendar import (
     impact_meets_minimum,
 )
 from app.providers.fake_economic_calendar import FakeEconomicCalendarProvider
+from app.providers.fake_llm import FakeLLMProvider
 from app.providers.fake_position import FakePositionProvider
 from app.providers.fake_trade_history import FakeTradeHistoryProvider
+from app.providers.llm import LLMPrompt, LLMProvider
 from app.providers.market_data import Candle, MarketDataProvider
 from app.providers.mt5_account_info import MT5AccountInfoProvider
 from app.providers.mt5_market_data import MT5MarketDataProvider
@@ -24,8 +26,11 @@ __all__ = [
     "EconomicEvent",
     "EventImpact",
     "FakeEconomicCalendarProvider",
+    "FakeLLMProvider",
     "FakePositionProvider",
     "FakeTradeHistoryProvider",
+    "LLMPrompt",
+    "LLMProvider",
     "MarketDataProvider",
     "MT5AccountInfoProvider",
     "MT5MarketDataProvider",
