@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_broker_manager
+from app.core.dependencies import get_current_broker_manager, get_current_super_admin
 from app.core.security import hash_password
 from app.db.database import get_db
 from app.db.models import User, UserRole
@@ -183,3 +183,48 @@ async def list_users(
     # credentials (password_hash, mt5_password_encrypted) are structurally
     # absent from the response schema.
     return [UserResponse.model_validate(user) for user in users]
+
+
+@router.post("/admins", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def create_admin(
+    request: CreateUserRequest,
+    current_super_admin: User = Depends(get_current_super_admin),
+    session: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    """Create an Admin User inside the authenticated super_admin's broker.
+
+    super_admin-only authorization (get_current_super_admin); admins and
+    customers are rejected with 403 by the dependency. The role is a
+    server-side constant — never a request field — so no caller can create
+    another super_admin or escalate through this endpoint. Tenant isolation
+    is structural: broker_id is always taken from the database-backed
+    super_admin record, never from the request.
+    """
+    admin = User(
+        # The super_admin's own broker is the tenant boundary for the new admin.
+        broker_id=current_super_admin.broker_id,
+        username=request.username,
+        # Hashed immediately; the plaintext never touches persistence or logs.
+        password_hash=hash_password(request.password),
+        email=request.email,
+        phone=request.phone,
+        # Server-side constant role: this endpoint only ever creates admins.
+        role=UserRole.ADMIN,
+        is_active=True,
+        # mt5_password_encrypted stays NULL: MT5 credentials are managed
+        # separately and never through user creation.
+    )
+    session.add(admin)
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Expected failure at the commit boundary: the tenant-scoped unique
+        # constraints (username/email/phone per broker) rejected the insert.
+        # The one-super-admin partial index cannot fire here — this endpoint
+        # only ever writes role='admin' rows.
+        await session.rollback()
+        raise _duplicate_conflict()
+
+    await session.refresh(admin)
+    # UserResponse is the non-sensitive projection: no credential fields.
+    return UserResponse.model_validate(admin)
