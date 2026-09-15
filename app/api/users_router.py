@@ -1,15 +1,16 @@
 """Users API: tenant-scoped user management.
 
 Covers creating Customer/Admin users inside the caller's own broker, listing
-those users, and provisioning a user's MT5 INVESTOR (read-only) credential.
-The tenant is always the authenticated database user's broker — no endpoint
-accepts a broker_id — and no response ever carries a password hash, an MT5
-credential, or any other secret.
+those users, super-admin user management (get one, update, delete) and
+provisioning a user's MT5 INVESTOR (read-only) credential. The tenant is
+always the authenticated database user's broker — no endpoint accepts a
+broker_id — and no response ever carries a password hash, an MT5 credential,
+or any other secret.
 """
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +38,7 @@ _PHONE_PATTERN = re.compile(r"^\+?[0-9]{7,15}$")
 
 
 # Only the fields a Broker Admin may choose. Deliberately excluded: id,
-# broker_id, role, password_hash, is_active, mt5_password_encrypted. extra=
+# broker_id, password_hash, is_active, mt5_password_encrypted. extra=
 # "forbid" turns any supplied field outside this list into a 422 validation
 # error instead of a silently ignored value, so tenant/role/credential
 # forging attempts fail loudly rather than disappearing.
@@ -48,54 +49,176 @@ class CreateUserRequest(BaseModel):
     password: str
     email: str | None = None
     phone: str | None = None
+    # Optional explicit role. Omitted (or null) means customer — the
+    # least-privilege default, never a silent admin. "admin" requires a
+    # super_admin caller (enforced in the endpoint from the database role).
+    # "super_admin" is refused outright for every caller: a second
+    # super_admin can never be created through the API (the database partial
+    # unique index remains the final backstop).
+    role: UserRole | None = None
 
     @field_validator("username")
     @classmethod
     def _validate_username(cls, value: str) -> str:
-        if not _USERNAME_PATTERN.fullmatch(value):
-            raise ValueError("username must be 4-12 digits")
-        return value
+        return _validated_username(value)
 
     @field_validator("password")
     @classmethod
     def _validate_password(cls, value: str) -> str:
-        # Minimum length only for now (no complexity rules yet). The upper
-        # bound matches bcrypt's 72-byte input limit so an oversized secret is
-        # rejected as 422 here instead of surfacing as a hashing error (500).
-        if len(value) < 8:
-            raise ValueError("password must be at least 8 characters")
-        if len(value.encode("utf-8")) > 72:
-            raise ValueError("password must be at most 72 bytes")
-        return value
+        return _validated_password(value)
 
     @field_validator("email")
     @classmethod
     def _validate_email(cls, value: str | None) -> str | None:
-        # Basic structural check: Pydantic's EmailStr would require the
-        # external email-validator package, deliberately not added here. The
-        # length cap matches the database column so oversized input cannot
-        # become a database error.
-        if value is None:
-            return value
-        local, sep, domain = value.partition("@")
-        if (
-            value.count("@") != 1
-            or not local
-            or "." not in domain
-            or domain.startswith(".")
-            or domain.endswith(".")
-            or " " in value
-            or len(value) > 255
-        ):
-            raise ValueError("invalid email address")
-        return value
+        return _validated_email(value)
 
     @field_validator("phone")
     @classmethod
     def _validate_phone(cls, value: str | None) -> str | None:
-        if value is not None and not _PHONE_PATTERN.fullmatch(value):
-            raise ValueError("phone must be an optional '+' followed by 7-15 digits")
+        return _validated_phone(value)
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, value: UserRole | None) -> UserRole | None:
+        if value is UserRole.SUPER_ADMIN:
+            raise ValueError("a super_admin user cannot be created through the API")
         return value
+
+
+def _validated_username(value: str) -> str:
+    if not _USERNAME_PATTERN.fullmatch(value):
+        raise ValueError("username must be 4-12 digits")
+    return value
+
+
+def _validated_password(value: str) -> str:
+    # Minimum length only for now (no complexity rules yet). The upper
+    # bound matches bcrypt's 72-byte input limit so an oversized secret is
+    # rejected as 422 here instead of surfacing as a hashing error (500).
+    if len(value) < 8:
+        raise ValueError("password must be at least 8 characters")
+    if len(value.encode("utf-8")) > 72:
+        raise ValueError("password must be at most 72 bytes")
+    return value
+
+
+def _validated_email(value: str | None) -> str | None:
+    # Basic structural check: Pydantic's EmailStr would require the
+    # external email-validator package, deliberately not added here. The
+    # length cap matches the database column so oversized input cannot
+    # become a database error.
+    if value is None:
+        return value
+    local, sep, domain = value.partition("@")
+    if (
+        value.count("@") != 1
+        or not local
+        or "." not in domain
+        or domain.startswith(".")
+        or domain.endswith(".")
+        or " " in value
+        or len(value) > 255
+    ):
+        raise ValueError("invalid email address")
+    return value
+
+
+def _validated_phone(value: str | None) -> str | None:
+    if value is not None and not _PHONE_PATTERN.fullmatch(value):
+        raise ValueError("phone must be an optional '+' followed by 7-15 digits")
+    return value
+
+
+# Role-less create payload for POST /users/admins: role is a server-side
+# constant there (always admin), so any supplied role — even the customer
+# value — is a 422 validation error. Deliberately NOT the model used by
+# POST /users, which accepts an optional explicit role.
+class CreateAdminRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str
+    password: str
+    email: str | None = None
+    phone: str | None = None
+
+    @field_validator("username")
+    @classmethod
+    def _validate_username(cls, value: str) -> str:
+        return _validated_username(value)
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password(cls, value: str) -> str:
+        return _validated_password(value)
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str | None) -> str | None:
+        return _validated_email(value)
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, value: str | None) -> str | None:
+        return _validated_phone(value)
+
+
+class UpdateUserRequest(BaseModel):
+    """Partial update of the fields user management supports.
+
+    Every field is optional; an omitted field is left unchanged, and an
+    explicitly supplied ``null`` clears the nullable contact fields (email,
+    phone) only — username, password, role and is_active may never be set to
+    null. Deliberately excluded: id, broker_id, password_hash,
+    mt5_password_encrypted, and every MT5 credential field (those are
+    managed exclusively by the dedicated provisioning endpoints). extra=
+    "forbid" rejects anything else with 422.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str | None = None
+    password: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    role: UserRole | None = None
+    is_active: bool | None = None
+
+    @field_validator("username")
+    @classmethod
+    def _validate_username(cls, value: str | None) -> str | None:
+        return value if value is None else _validated_username(value)
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password(cls, value: str | None) -> str | None:
+        return value if value is None else _validated_password(value)
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str | None) -> str | None:
+        return _validated_email(value)
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, value: str | None) -> str | None:
+        return _validated_phone(value)
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, value: UserRole | None) -> UserRole | None:
+        if value is UserRole.SUPER_ADMIN:
+            raise ValueError("a user cannot be promoted to super_admin through the API")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> "UpdateUserRequest":
+        provided = self.model_fields_set
+        if not provided:
+            raise ValueError("at least one field must be provided")
+        for name in ("username", "password", "role", "is_active"):
+            if name in provided and getattr(self, name) is None:
+                raise ValueError(f"{name} must not be null")
+        return self
 
 
 class UserResponse(BaseModel):
@@ -211,14 +334,26 @@ async def create_user(
     current_admin: User = Depends(get_current_broker_manager),
     session: AsyncSession = Depends(get_db),
 ) -> UserResponse:
-    """Create a Customer User inside the authenticated manager's broker.
+    """Create a User inside the authenticated manager's broker.
 
-    Both super_admin and admin may create customers (get_current_broker_manager).
+    Both super_admin and admin may reach this endpoint
+    (get_current_broker_manager). The optional explicit role decides what is
+    created: omitted/null means customer (the least-privilege default, never
+    a silent admin); "customer" is the same; "admin" requires a super_admin
+    caller (403 otherwise); "super_admin" is refused outright (422).
 
     Tenant isolation is structural: broker_id is always taken from the
-    database-backed admin record, never from the request, so a Broker Admin
+    database-backed manager record, never from the request, so a Broker Admin
     cannot create a user in another tenant.
     """
+    requested_role = request.role if request.role is not None else UserRole.CUSTOMER
+    if requested_role is UserRole.ADMIN and current_admin.role is not UserRole.SUPER_ADMIN:
+        # A deliberate authorization refusal (Step 22's matrix), raised before
+        # any validation-uniqueness or database work.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a super_admin can create an admin user",
+        )
     user = User(
         # The admin's own broker is the tenant boundary for the new user.
         broker_id=current_admin.broker_id,
@@ -227,8 +362,10 @@ async def create_user(
         password_hash=hash_password(request.password),
         email=request.email,
         phone=request.phone,
-        # New users created through this endpoint are always customers.
-        role=UserRole.CUSTOMER,
+        # Explicit request role (customer when omitted); the schema validator
+        # already refused super_admin, and the database partial unique index
+        # remains the final backstop.
+        role=requested_role,
         is_active=True,
         # mt5_password_encrypted stays NULL: MT5 credentials are managed
         # separately and never through user creation.
@@ -286,7 +423,7 @@ async def list_users(
 
 @router.post("/admins", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_admin(
-    request: CreateUserRequest,
+    request: CreateAdminRequest,
     current_super_admin: User = Depends(get_current_super_admin),
     session: AsyncSession = Depends(get_db),
 ) -> UserResponse:
@@ -329,6 +466,104 @@ async def create_admin(
     return UserResponse.model_validate(admin)
 
 
+@router.get("/{user_id}", response_model=UserResponse)
+async def get_user(
+    user_id: int,
+    current_super_admin: User = Depends(get_current_super_admin),
+    session: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    """Get one user of the authenticated super_admin's broker.
+
+    super_admin-only (admins and customers are rejected with 403 by the
+    dependency). Tenant isolation is structural: a user id from another
+    broker is reported exactly like a non-existent one (404). The response is
+    the same non-sensitive projection as the list endpoint.
+    """
+    target = await _manageable_target(session, current_super_admin, user_id)
+    return UserResponse.model_validate(target)
+
+
+@router.patch("/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: int,
+    request: UpdateUserRequest,
+    current_super_admin: User = Depends(get_current_super_admin),
+    session: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    """Update the supported fields of one user of the super_admin's broker.
+
+    super_admin-only. Partial semantics: an omitted field is unchanged; an
+    explicit ``null`` clears email/phone only. Role changes follow the
+    invariants: a promotion to super_admin is refused outright (422, schema
+    validator), and the broker's only super_admin cannot be demoted (409).
+    Username/email/phone changes go through the same tenant-scoped uniqueness
+    as creation, so a duplicate is a generic 409. A supplied password is
+    hashed immediately; the plaintext never touches persistence or logs.
+    """
+    target = await _manageable_target(session, current_super_admin, user_id)
+    if (
+        target.role is UserRole.SUPER_ADMIN
+        and request.role is not None
+        and request.role is not UserRole.SUPER_ADMIN
+    ):
+        # The schema validator already refuses promotions to super_admin, so
+        # any explicit role here would demote the broker's only super_admin.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot demote the broker's only super_admin",
+        )
+
+    provided = request.model_fields_set
+    if "username" in provided:
+        target.username = request.username
+    if "password" in provided:
+        target.password_hash = hash_password(request.password)
+    if "email" in provided:
+        target.email = request.email
+    if "phone" in provided:
+        target.phone = request.phone
+    if "role" in provided:
+        target.role = request.role
+    if "is_active" in provided:
+        target.is_active = request.is_active
+
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Expected failure at the commit boundary: a changed username, email
+        # or phone collided with the tenant-scoped unique constraints.
+        await session.rollback()
+        raise _duplicate_conflict()
+
+    await session.refresh(target)
+    return UserResponse.model_validate(target)
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: int,
+    current_super_admin: User = Depends(get_current_super_admin),
+    session: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete one user of the authenticated super_admin's broker.
+
+    super_admin-only. The broker's only super_admin cannot be deleted — that
+    is necessarily the caller itself, since the database partial unique index
+    guarantees at most one super_admin per broker (409). Every other
+    in-tenant user is deletable; other tenants are unreachable (404).
+    """
+    target = await _manageable_target(session, current_super_admin, user_id)
+    if target.role is UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete the broker's only super_admin",
+        )
+    await session.delete(target)
+    await session.commit()
+    # 204 No Content: nothing sensitive to return, by construction.
+    return None
+
+
 # --- MT5 credential provisioning ---------------------------------------------
 #
 # A broker administrator provisions the MT5 INVESTOR (read-only) credential of
@@ -347,13 +582,14 @@ def _credentials_unavailable() -> HTTPException:
 
 
 async def _manageable_target(session: AsyncSession, caller: User, user_id: int) -> User:
-    """Load the user whose MT5 credential ``caller`` may manage.
+    """Load the in-tenant user ``caller`` may manage, or 404.
 
     Tenant isolation is structural: a target outside the caller's broker is
     reported exactly like a non-existent one, so a caller can never learn which
     user ids exist in another tenant. Role hierarchy: an admin manages customer
-    credentials only; a super_admin holds broker-level privileges and may also
-    provision itself or an admin.
+    records only; a super_admin holds broker-level privileges and may manage
+    admins, customers and itself — every super_admin-only endpoint relies on
+    that last property, because the admin branch below never fires for it.
     """
     target = await session.get(User, user_id)
     if target is None or target.broker_id != caller.broker_id:

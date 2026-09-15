@@ -2,7 +2,9 @@
 
 ## Current Status
 
-Step 39 — Live MT5 Investor-Password Verification
+Step 40 — Super Admin User CRUD (this checkpoint)
++ Fix — MT5 trade-history SL/TP field names (this checkpoint)
++ Step 39 — Live MT5 Investor-Password Verification
 + Step 39A/39B — configuration startup hardening & Pylance `_env_file` fix
 + Step 38 — MT5 Investor / Read-Only Credential Provisioning
 + Step 37 — Decimal Money & Financial Numeric Representation
@@ -10,21 +12,39 @@ Step 39 — Live MT5 Investor-Password Verification
 
 Status:
 
-VERIFIED + COMMITTED + SYNCED
+VERIFIED + COMMITTED (local — not pushed in this step)
 
 Checkpoint commit:
 
-The latest commit is "fix(config): harden environment settings loading"
-(Steps 39A/39B and this document update), which carries the tolerant,
-secret-safe settings loading and the statically visible env-file selection.
-The prior synced commit was "feat(mt5): add investor credential provisioning"
-(Step 38), which carried the per-user MT5 account fields, the provisioning
-endpoints and the new migration; before that "fix(db): correct user role
-migration ordering" (3a63af9), which carriedthe reordered role migration and the development user seed script; before that
-the
-Step 37 checkpoint ("feat(financial): harden numeric representation"), the Step
-36 MT5 tenant-session commit, the Step 35 security hardening commit and b95eaa1
-("feat(ai): add broker llm routing and agent controls", Steps 29–33).
+This checkpoint carries Step 40 (the completed super-admin user CRUD) together
+with the trade-history MT5 compatibility fix and this document update, and it
+leaves the working tree clean. Pushing is deliberately NOT part of this step,
+so the commit stays local until a push is explicitly requested. The prior
+synced commit was "fix(config): harden environment settings loading"
+(Steps 39A/39B), which carries the tolerant, secret-safe settings loading and
+the statically visible env-file selection; before that "feat(mt5): add investor
+credential provisioning" (Step 38, the per-user MT5 account fields, the
+provisioning endpoints and the new migration), then "fix(db): correct user role
+migration ordering" (3a63af9, the reordered role migration and the development
+user seed script), the Step 37 checkpoint ("feat(financial): harden numeric
+representation"), the Step 36 MT5 tenant-session commit, the Step 35 security
+hardening commit and b95eaa1 ("feat(ai): add broker llm routing and agent
+controls", Steps 29–33).
+
+Step 40 completes tenant-scoped user management for the broker's super_admin:
+read one user, partially update one user (including role) and delete one user,
+all inside the authenticated broker, with the broker's only super_admin
+protected from demotion and deletion and no path to creating a second one. User
+creation gained an optional explicit role — omitted means customer (never a
+silent admin), "admin" requires a super_admin caller, and "super_admin" is
+refused for every caller. Admin and customer behaviour is unchanged.
+
+The trade-history fix corrects a real defect found by live verification: the
+protective levels of a historical MT5 order are exposed as `sl` and `tp`, not
+`price_sl`/`price_tp`, so the previous attribute access raised AttributeError
+inside the provider and the endpoint failed. The application contract is
+unchanged — stop_loss / take_profit, nullable, Decimal, JSON numbers on the
+wire — and the read-only boundary is untouched.
 
 Step 39 closed the one open verification from Step 38: with a real MT5 investor
 credential available locally, a one-time live READ-ONLY session was performed —
@@ -66,10 +86,14 @@ No database migration was needed — these values are not persisted.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 735 passed, 3 warnings (pre-existing third-party
-deprecation warnings); verified 2026-09-15 on this exact tree. The count is
-unchanged from Step 36: Step 37 re-expressed existing expectations in Decimal
-and added no new cases.
+pytest tests/ -q → 799 passed, 2 warnings (both pre-existing third-party
+deprecation warnings: the anyio BlockingPortal alias and the starlette
+testclient httpx notice); verified 2026-09-15 on this exact tree, after the
+Step 40 and trade-history work. Step 40 added 25 focused cases (its
+admin-caller/role="admin" branch moved from the 422 parametrization to an
+authorization 403, so the net count is +25 overall), and Step 39A removed the
+former Pydantic class-config deprecation, which is why the warning count is 2
+rather than 3.
 
 Additional Step 37 verification: a live serialization probe confirmed Decimal
 fields render as JSON numbers (not strings), and a float/Decimal mixing scan
@@ -94,7 +118,10 @@ Working tree after this checkpoint:
 
 CLEAN
 
-Local HEAD and origin/master both point at this checkpoint commit.
+The two bodies of verified work that were sitting uncommitted before it —
+Step 40 and the trade-history field fix — are included in this commit, so the
+working tree is clean again. Until this checkpoint is pushed, local HEAD is one
+commit ahead of origin/master.
 
 ## Completed Stages
 
@@ -917,6 +944,83 @@ Status: VERIFIED + COMMITTED
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
 
+
+### Step 40 — Super Admin User CRUD
+Status: VERIFIED + COMMITTED (this checkpoint)
+
+Completes user management for the broker's super_admin, entirely inside the
+authenticated tenant. broker_id is always taken from the database User, never
+from a request body or path, and every response keeps the same non-sensitive
+projection (id, broker_id, username, email, phone, role, is_active) —
+password_hash and mt5_password_encrypted are structurally absent.
+
+- GET /users/{user_id} (super_admin): one user of the caller's broker; a user
+  id belonging to another broker is reported exactly like a non-existent one
+  (404), so ids cannot be enumerated across tenants.
+- PATCH /users/{user_id} (super_admin): partial update of the fields user
+  management supports — username, password, email, phone, role, is_active. An
+  omitted field is unchanged; an explicit null clears email/phone only
+  (username, password, role and is_active may not be nulled). Duplicate
+  username/email/phone inside the tenant → generic 409, verified at the commit
+  boundary.
+- DELETE /users/{user_id} (super_admin): 204 No Content. The broker's only
+  super_admin cannot be deleted (409).
+- POST /users now accepts an OPTIONAL explicit role: omitted or null means
+  customer (the least-privilege default — never a silent admin), "admin"
+  requires a super_admin caller (403 for an admin caller), and "super_admin"
+  is refused outright by the schema validator (422) for every caller. The
+  database partial unique index (uq_users_broker_super_admin) remains the final
+  backstop, so a second super_admin cannot be created through the API at all.
+- POST /users/admins keeps a dedicated role-less request model
+  (CreateAdminRequest), so its role-is-not-a-field behaviour is byte-identical
+  to before; only POST /users gained the optional role.
+- Demotion protection: the broker's only super_admin cannot be demoted (409),
+  checked before any write; promotions are impossible because the schema
+  refuses the super_admin value.
+- Authorization is unchanged for everyone else: admin still manages customers
+  only, customer still cannot manage users, and cross-broker targets remain
+  unreachable (404). The MT5 credential provisioning endpoints and their rules
+  are untouched by this step.
+- Verification: focused suite tests/test_users_crud.py (25 cases) plus the
+  re-run user surface (121 cases); full suite 799 passed. The only contract
+  change to an existing test is deliberate and documented in
+  tests/test_users_create.py: the admin-caller/role="admin" case is now an
+  authorization 403 rather than a 422, matching Step 22's matrix, and that
+  branch is covered by test_users_crud.py with a real admin caller.
+
+### Fix — MT5 Trade-History Protective-Level Fields (`sl` / `tp`)
+Status: VERIFIED + COMMITTED (this checkpoint)
+
+- Defect: MT5TradeHistoryProvider._protective_levels() read order.price_sl and
+  order.price_tp. Those attributes do not exist on MT5's historical order
+  object, so any closing deal with a related order raised AttributeError inside
+  the provider and GET /trade-history failed.
+- Verified against the installed package (MetaTrader5==5.0.6180): the object
+  returned by history_orders_get() is a TradeOrder with 24 fields — ticket,
+  time_setup, time_setup_msc, time_done, time_done_msc, time_expiration, type,
+  type_time, type_filling, state, magic, position_id, position_by_id, reason,
+  volume_initial, volume_current, price_open, sl, tp, price_current,
+  price_stoplimit, symbol, comment, external_id. hasattr(price_sl) and
+  hasattr(price_tp) are both False; the protective levels are sl and tp.
+- Fix: read order.sl / order.tp. Both mappings were wrong; both are corrected.
+  Nothing else changed — the zero-sentinel rule (level <= 0 → None, compared
+  Decimal-to-Decimal with no float entering the comparison), the Decimal(str())
+  conversion at the MT5 boundary, and the application contract (stop_loss /
+  take_profit as nullable DecimalAsNumber JSON numbers) are all preserved.
+- Test doubles in tests/test_mt5_trade_history.py were mirroring the fictional
+  field names, which is why the suite had passed; they now use the real
+  attributes (SimpleNamespace(sl=..., tp=...)). The API leak assertion in
+  tests/test_trade_history_api.py that pinned "price_sl" was replaced with the
+  real raw MT5 order attribute names, so it is no longer vacuous.
+- Live verification against the demo MT5 account: GET /account-info,
+  GET /positions and GET /trade-history all return 200 with real data (the
+  trade history returned 4 executed trades). The nonzero path was proven
+  separately by running the real provider method through the real tenant
+  session boundary over a real order carrying levels: it returned
+  Decimal('29640.0') / Decimal('29440.0'), matching the raw ordinate values,
+  while an order ticket of 0 still short-circuits to (None, None).
+
+
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
 
@@ -1464,8 +1568,11 @@ POST /users (super_admin or admin; creation of customer users only):
       "is_active": true
     }
 
-- role is always forced to customer server-side; extra="forbid" rejects any
-  supplied role/broker_id with 422; tenant-scoped duplicates → 409.
+- role is OPTIONAL and explicit (Step 40): omitted/null → customer; "admin"
+  requires a super_admin caller (403 otherwise); "super_admin" is refused by
+  the schema validator for every caller (422), so no second super_admin can be
+  created through the API. extra="forbid" still rejects broker_id with 422;
+  tenant-scoped duplicates → 409.
 
 POST /users/admins (super_admin only; creation of Admin users):
 
@@ -1488,6 +1595,32 @@ GET /users (super_admin or admin; role-based visibility):
   every response; UserResponse exposes exactly: id, broker_id, username,
   email, phone, role, is_active
 
+GET /users/{user_id} (super_admin only):
+
+- the same non-sensitive projection for one user of the caller's broker
+- another broker's user id → 404, indistinguishable from a non-existent id
+- admin/customer callers → 403; unauthenticated → 401
+
+PATCH /users/{user_id} (super_admin only):
+
+    { "username": ..., "password": ..., "email": ..., "phone": ...,
+      "role": "admin" | "customer", "is_active": true }
+
+- partial semantics: an omitted field is unchanged; an explicit null clears
+  email/phone ONLY (username, password, role and is_active may not be null) →
+  422; an empty body → 422
+- "super_admin" as a role value → 422 for every caller (promotion impossible);
+  demoting the broker's only super_admin → 409
+- a supplied password is hashed immediately and never returned or logged
+- duplicate username/email/phone inside the tenant → generic 409
+- cross-broker target → 404; admin/customer → 403
+
+DELETE /users/{user_id} (super_admin only):
+
+- 204 No Content on success (no body, nothing sensitive to return)
+- deleting the broker's only super_admin → 409
+- cross-broker target → 404; admin/customer → 403
+
 ## Current Verified Facts
 
 - Application authentication exists.
@@ -1507,11 +1640,24 @@ GET /users (super_admin or admin; role-based visibility):
 - super_admin / admin / customer roles exist; exactly one super_admin per
   Broker is enforced by the database partial unique index
   (uq_users_broker_super_admin).
-- POST /users lets a super_admin or admin create Customer Users in their own
-  tenant (created role forced to customer); POST /users/admins lets a
-  super_admin create Admin Users (server-side role, same tenant); GET /users
-  provides role-based, tenant-scoped listing (super_admin: admins+customers;
-  admin: customers).
+- POST /users lets a super_admin or admin create users in their own tenant
+  with an OPTIONAL explicit role: omitted/null → customer (never a silent
+  admin), "admin" requires a super_admin caller (403 otherwise), "super_admin"
+  refused for every caller (422). POST /users/admins lets a super_admin create
+  Admin Users (role-less request model, server-side role, same tenant).
+  GET /users provides role-based, tenant-scoped listing (super_admin:
+  admins+customers; admin: customers). PUT/GET /users/{user_id}/
+  mt5-credentials provision and read the MT5 investor credential.
+- Full super-admin user CRUD exists (Step 40): GET /users/{user_id} (404 for
+  another tenant, indistinguishable from non-existent), PATCH /users/{user_id}
+  (partial update including role; duplicates → generic 409), DELETE
+  /users/{user_id} (204). The broker's only super_admin cannot be demoted or
+  deleted (409), and a second super_admin cannot be created through the API.
+  password_hash and mt5_password_encrypted never appear in any response.
+- The MT5 trade-history provider reads the real historical-order protective
+  level fields (sl / tp — not price_sl / price_tp), so GET /trade-history works
+  against the real terminal; the contract still exposes nullable stop_loss /
+  take_profit as JSON numbers.
 - Account information (AccountInfo contract, MT5AccountInfoProvider, AccountInfoService, GET /account-info) exists and is read-only.
 - Open positions (Position contract, MT5PositionProvider, FakePositionProvider, PositionService, GET /positions) exist and are read-only.
 - Trade history (TradeHistoryEntry contract, MT5TradeHistoryProvider,
@@ -1578,13 +1724,14 @@ GET /users (super_admin or admin; role-based visibility):
   with Decimal(str(...)); account margin_level and candle tick volume
   intentionally remain float. API JSON still exposes numbers, not strings, via
   the shared DecimalAsNumber serializer.
-- Steps 18–39B plus the role-migration ordering fix and the development user
-  seed are committed and pushed to origin/master (latest commit: "fix(config):
-  harden environment settings loading"; the prior synced commit was "feat(mt5):
-  add investor credential provisioning" (Step 38), before that "fix(db):
-  correct user role migration ordering" (3a63af9), the Step 37 checkpoint
-  "feat(financial): harden numeric representation", the Step 36 MT5
-  tenant-session commit, the Step 35 security hardening commit and b95eaa1).
+- Steps 18–40, the role-migration ordering fix, the development user seed and
+  the trade-history field fix are committed (latest
+  commit: this Step 40/41 checkpoint; the prior synced commit was "fix(config):
+  harden environment settings loading" (Steps 39A/39B), before that "feat(mt5):
+  add investor credential provisioning" (Step 38), then "fix(db): correct user
+  role migration ordering" (3a63af9), the Step 37 checkpoint "feat(financial):
+  harden numeric representation", the Step 36 MT5 tenant-session commit, the
+  Step 35 security hardening commit and b95eaa1).
 - A user carries its own MT5 identity: mt5_login and mt5_server (nullable,
   explicit) plus mt5_password_encrypted holding the ciphertext of the MT5
   INVESTOR (read-only) password. An admin may provision these for a customer and
@@ -1594,15 +1741,15 @@ GET /users (super_admin or admin; role-based visibility):
   are NULL, so pre-Step-38 rows behave exactly as before. No master/trading
   password is accepted or stored anywhere.
 - The development database (local PostgreSQL, APP_ENV=development) is at
-  migration head and holds exactly three development accounts on the existing
-  developer Broker: one per role (super_admin / admin / customer), created by
-  scripts/create_dev_users.py with documented development-only credentials.
-  These usernames are non-numeric and the broker has no mt5_server, so the
-  MT5-backed endpoints answer 503 for them by design (the tenant session fails
-  closed); they exercise authentication, roles and the agent surface. Their MT5
-  credentials are unprovisioned, and provisioning them there currently returns
-  503 as well because SECRET_ENCRYPTION_KEY is not set in the local environment
-  — the fail-closed path, verified end to end.
+  migration head and holds the developer Broker's accounts: the three seeded
+  role accounts (super_admin / admin / customer) created by
+  scripts/create_dev_users.py with documented development-only credentials,
+  plus an additional customer account with a real provisioned MT5 INVESTOR
+  credential. The three seeded usernames are non-numeric, so the MT5-backed
+  endpoints fail closed (503) for them by design; they exercise authentication,
+  roles and the agent surface. SECRET_ENCRYPTION_KEY is now configured in the
+  local environment, so credential provisioning succeeds there — the earlier
+  "provisioning returns 503" observation (Step 38) no longer applies locally.
 - The MT5 INVESTOR (read-only) password was verified LIVE (Step 39) against a
   real account on the locally installed terminal: explicit login succeeded,
   AccountInfo.trade_allowed is False, and account-info, positions, deal-history
@@ -1613,14 +1760,17 @@ GET /users (super_admin or admin; role-based visibility):
   setting and never renders its value (in str and full traceback), the dotenv
   file is selected through model_config (the Pylance _env_file diagnostic is
   structurally impossible), and the deprecated class-based Config is gone.
-- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 775 passed, 2 warnings.
+- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 799 passed, 2 warnings.
+- Live end-to-end verification on the demo MT5 account: GET /account-info,
+  GET /positions and GET /trade-history all answer 200 with real data (no
+  credential, server or symbol detail is recorded anywhere).
 - The 2 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and starlette testclient). The former Pydantic class-based
   Config warning was eliminated by Step 39A.
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean; this checkpoint commit has been pushed/synced to
-  origin/master (local HEAD == origin/master).
+- Working tree is clean. This checkpoint commit is local: it has NOT been
+  pushed, so local HEAD is one commit ahead of origin/master until it is.
 
 Static/type verification:
 
@@ -1728,9 +1878,17 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–39B plus the role-migration ordering fix and the development user seed
-are complete, committed, and synced to origin/master (latest commit:
-"fix(config): harden environment settings loading").
+Steps 12–40, the role-migration ordering fix, the development user seed and the
+trade-history field fix are complete and committed (latest commit: this
+checkpoint, which is local until pushed). Step 41 stabilized the tree: the
+previously uncommitted Step 40 work and the trade-history fix are now one
+commit, so the working tree is clean again — local HEAD is one commit ahead of
+origin/master until this checkpoint is pushed.
+
+The immediate next action is deliberately NOT fixed here: the previously open
+work is now landed, so the next stage should be chosen explicitly (candidates
+are the open items below — the economic-calendar source, the real free LLM
+providers, and the observability foundation are the three largest).
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:

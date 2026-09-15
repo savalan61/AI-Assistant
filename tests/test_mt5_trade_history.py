@@ -266,7 +266,8 @@ def test_missing_reason_field_maps_to_none(provider):
 
 
 def test_sl_tp_taken_from_related_closing_order(provider):
-    order = SimpleNamespace(price_sl=3635.00, price_tp=3650.00)
+    # Field names mirror the real MT5 historical order object (sl/tp).
+    order = SimpleNamespace(sl=3635.00, tp=3650.00)
     fake = FakeMT5(deals_result=(mt5_deal(),), orders_result=(order,))
 
     entry = provider(fake).get_trade_history(*window())[0]
@@ -286,7 +287,7 @@ def test_sl_tp_none_when_no_related_order_found(provider):
 
 
 def test_sl_tp_none_when_levels_are_zero_sentinels(provider):
-    order = SimpleNamespace(price_sl=0.0, price_tp=0.0)
+    order = SimpleNamespace(sl=0.0, tp=0.0)
     fake = FakeMT5(deals_result=(mt5_deal(),), orders_result=(order,))
 
     entry = provider(fake).get_trade_history(*window())[0]
@@ -296,7 +297,7 @@ def test_sl_tp_none_when_levels_are_zero_sentinels(provider):
 
 
 def test_sl_tp_none_when_deal_has_no_order_ticket(provider):
-    order = SimpleNamespace(price_sl=3635.00, price_tp=3650.00)
+    order = SimpleNamespace(sl=3635.00, tp=3650.00)
     fake = FakeMT5(deals_result=(mt5_deal(order=0),), orders_result=(order,))
 
     entry = provider(fake).get_trade_history(*window())[0]

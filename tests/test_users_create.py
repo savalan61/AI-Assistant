@@ -290,8 +290,15 @@ def test_broker_id_cannot_be_supplied(users_db) -> None:
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize("escalation_role", ["super_admin", "admin", "broker_admin"])
+@pytest.mark.parametrize("escalation_role", ["super_admin", "broker_admin"])
 def test_role_cannot_be_supplied(users_db, escalation_role: str) -> None:
+    """Escalation attempts are refused.
+
+    Since Step 40, POST /users accepts an OPTIONAL explicit role: "admin"
+    requires a super_admin caller (403 for an admin), while "super_admin" and
+    the legacy value are refused outright by the request model (422) for every
+    caller — no second super_admin can ever be created through the API.
+    """
     factory, admin_a_id, _, _ = users_db
 
     with make_client(factory) as client:
@@ -308,7 +315,10 @@ def test_role_cannot_be_supplied(users_db, escalation_role: str) -> None:
     assert response.status_code == 422
 
 
-# --- duplicate / uniqueness handling -------------------------------------------------
+# The admin-caller / role="admin" → 403 case of the Step 40 matrix lives in
+# tests/test_users_crud.py::test_admin_cannot_create_admin, whose fixture
+# seeds a real admin row (this module's fixture seeds one super_admin per
+# broker plus a customer, so it cannot exercise that branch).
 
 
 def test_duplicate_username_in_same_broker_returns_409(users_db) -> None:

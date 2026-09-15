@@ -141,11 +141,16 @@ class MT5TradeHistoryProvider(TradeHistoryProvider):
             return None, None
 
         order = related_orders[0]
+        # Field names verified against the installed MetaTrader5 package: the
+        # historical order object (TradeOrder, 24 fields) exposes the protective
+        # levels as ``sl`` and ``tp``. There is no ``price_sl``/``price_tp`` field
+        # on it (``price_open``, ``sl``, ``tp``, ``price_current``,
+        # ``price_stoplimit`` are the price fields).
         # MT5 reports unset protective levels as 0: they become None, never a
         # fabricated value. The sentinel check is Decimal-vs-Decimal — no float
         # enters the comparison.
-        sl_price = Decimal(str(order.price_sl))
-        tp_price = Decimal(str(order.price_tp))
+        sl_price = Decimal(str(order.sl))
+        tp_price = Decimal(str(order.tp))
         sl = sl_price if sl_price > 0 else None
         tp = tp_price if tp_price > 0 else None
         return sl, tp

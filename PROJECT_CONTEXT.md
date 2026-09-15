@@ -31,9 +31,12 @@ Application credentials and MT5 credentials are separate.
 
 Current model:
 
-- username = MT5 login/account number
+- username = application/Agent login (a numeric value still acts as the
+  legacy MT5 login fallback)
+- mt5_login = the user's MT5 account number (administrator-provisioned)
+- mt5_server = the user's MT5 server (administrator-provisioned)
 - password_hash = Agent/application password
-- mt5_password_encrypted = encrypted MT5 password
+- mt5_password_encrypted = encrypted MT5 INVESTOR (read-only) password
 
 Broker initially supplies the credentials.
 
@@ -44,13 +47,15 @@ A Broker may reset an application password but should not see the user's current
 Current implemented core entities (database models):
 
 - Broker
-- User (with broker_admin/customer role)
+- User (super_admin / admin / customer)
 
 Current implemented provider contracts (not database models):
 
 - AccountInfo
 - Position
 - Candle
+- TradeHistoryEntry
+- the vendor-neutral LLM provider contract (app/providers/llm.py)
 
 Future/domain entities planned:
 
@@ -154,18 +159,24 @@ No microservices unless there is a future explicit architectural decision.
 
 ## Provider Architecture
 
-The provider pattern is established for three MT5 data flows:
+The provider pattern is established for four MT5 data flows:
 
 - MarketDataProvider: get_market_data(symbol) -> Candle
 - AccountInfoProvider: get_account_info() -> AccountInfo (nine fields)
 - PositionProvider: get_positions() -> tuple[Position, ...] (READ-ONLY)
+- TradeHistoryProvider: get_trade_history(from, to) -> tuple[TradeHistoryEntry, ...] (READ-ONLY)
 
-Each contract is a typed NamedTuple (Candle, AccountInfo, Position) so raw
-MT5 objects never cross the provider boundary.
+Each contract is a typed NamedTuple (Candle, AccountInfo, Position,
+TradeHistoryEntry) so raw MT5 objects never cross the provider boundary.
 
-MT5MarketDataProvider, MT5AccountInfoProvider, and MT5PositionProvider
-implement the providers; FakeMarketDataProvider and FakePositionProvider
-back the tests.
+MT5MarketDataProvider, MT5AccountInfoProvider, MT5PositionProvider and
+MT5TradeHistoryProvider implement the providers; FakeMarketDataProvider,
+FakePositionProvider and FakeTradeHistoryProvider back the tests.
+
+The same inversion is used for the AI layer: LLMProvider (app/providers/llm.py)
+is a vendor-neutral contract whose implementations are FakeLLMProvider,
+FakeFreeLLMProvider and OpenAICompatibleLLMProvider, behind the LLMRouter /
+provider-pool boundary.
 
 Services delegate to the provider abstractions.
 
@@ -230,9 +241,17 @@ Current JWT-protected, read-only endpoints:
 - GET /account-info → AccountInfo response (nine fields)
 - GET /positions → wrapped positions response; empty result is 200 with
   {"positions": []}, never 404
-- POST /users → manager-protected customer creation (role forced to customer)
+- GET /trade-history?from=<UTC ISO>&to=<UTC ISO> → wrapped trade response;
+  empty result is 200 with {"trades": []}, never 404
+- POST /users → manager-protected creation with an OPTIONAL explicit role
+  (omitted/null → customer; "admin" requires a super_admin caller; "super_admin"
+  is refused for every caller)
 - POST /users/admins → super_admin-protected admin creation
 - GET /users → role-based, tenant-scoped user listing
+- GET/PATCH/DELETE /users/{user_id} → super_admin-only single-user read, partial
+  update and delete inside the caller's broker
+- POST /agent, GET /economic-intelligence/today, GET /portfolio-intelligence,
+  GET/PUT /broker-llm-config → the read-only AI surface and broker LLM settings
 - PUT /users/{user_id}/mt5-credentials → provision a user's MT5 investor
   (read-only) credential; admin: customers only, super_admin: any user in its
   broker. Write-only password, encrypted at rest, never returned.
@@ -282,20 +301,24 @@ Already implemented today:
 - market data
 - account information (balance, equity, margin, free margin)
 - open positions
-- JWT authentication and user management
+- trade history
+- portfolio intelligence (symbol exposure, directional balance, deterministic
+  risk classification)
+- financial context (one read-only context for future AI consumption)
+- JWT authentication, three roles and tenant-scoped user management
+  (super_admin CRUD, admin manages customers)
+- read-only AI agent (POST /agent) with a deterministic scope guard, a
+  per-user daily limit, broker-scoped encrypted LLM configuration and an LLM
+  router with a free-pool fallback boundary
 
 Eventually the system may support:
 
-- trade history
-- P&L
-- risk
-- exposure
+- P&L analysis
 - technical analysis
 - fundamental analysis
 - news
 - economic calendar
 - daily reports
-- AI assistant
-- natural-language interaction
+- natural-language interaction over additional channels (web/mobile/Telegram/WhatsApp)
 
 These are future capabilities and must not be implemented ahead of the current checkpoint.

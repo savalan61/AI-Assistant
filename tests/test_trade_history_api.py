@@ -336,7 +336,10 @@ def test_raw_mt5_structures_do_not_leak(trade_history_env, patched_trade_history
     body = str(response.json())
     assert "TradeHistoryEntry(" not in body  # NamedTuple repr must not leak
     assert "entry=" not in body  # raw MT5 attribute spelling must not leak
-    assert "price_sl" not in body
+    # Raw MT5 historical-order attribute names must never reach the API: the
+    # contract exposes stop_loss/take_profit, never the MT5 order fields.
+    for raw_field in ("price_open", "price_stoplimit", "volume_initial", "position_id"):
+        assert raw_field not in body
     assert "password" not in body and "token" not in body
 
 
