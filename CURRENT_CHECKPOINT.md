@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 21A — User Role Model Evolution (super_admin / admin / customer)
+Step 22 — Super Admin Creates Admin User (POST /users/admins)
 
 Status:
 
@@ -10,20 +10,21 @@ VERIFIED + COMMITTED + SYNCED
 
 Implementation commit:
 
-935f2a2 ("feat(auth): evolve broker roles to super admin and admin")
-(full hash: 935f2a21480f9285e08cfc21db8d35b4ecdde6e9)
+cde617e ("feat(auth): add super admin admin creation")
+(full hash: cde617e8325fe6ec87eeeb544d83d37edf2663d8)
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 224 passed, 3 warnings (pre-existing third-party
+pytest tests/ -q → 242 passed, 3 warnings (pre-existing third-party
 deprecation warnings); verified 2026-09-15 on the exact committed tree
 
 Static verification: python -m compileall app scripts tests → clean.
+git diff --check → clean.
 Direct Pylance/pyright execution remains unavailable in this environment
-(as recorded for Steps 8–20); a careful manual static/type review was
+(as recorded for Steps 8–21A); a focused manual static/type review was
 performed instead. No type suppressions were used.
 
-No trading functionality was changed in Step 21A; all MT5 behavior is
+No trading functionality was changed in Step 22; all MT5 behavior is
 untouched.
 
 Working tree at this checkpoint:
@@ -161,6 +162,32 @@ Includes:
 - test coverage: role matrix, cross-tenant isolation, super-admin
   uniqueness (ORM-level and raw-SQL), creation paths, credential-exposure
   guards; full suite 224 passed
+
+### Step 22 — Super Admin Creates Admin User
+Status: VERIFIED + COMMITTED (cde617e)
+
+Includes:
+
+- POST /users/admins: super_admin-only admin creation, authorized by
+  get_current_super_admin() (the dependency introduced in Step 21A)
+- authorization matrix: unauthenticated → 401 (WWW-Authenticate: Bearer);
+  customer → 403; admin → 403
+- the created role is a server-side constant (UserRole.ADMIN), never a
+  request field — no caller can create another super_admin or escalate
+  through this endpoint
+- broker_id is always derived from the authenticated database-backed
+  super_admin record; a supplied broker_id field is rejected with 422;
+  tenant isolation stays structural
+- reuses CreateUserRequest validation (username/password/email/phone),
+  bcrypt hashing, the credential-free UserResponse projection, and the
+  generic tenant-scoped IntegrityError → 409 duplicate behavior
+  (username/email/phone per broker; the one-super-admin partial index
+  cannot fire here — only role='admin' rows are written)
+- existing POST /users customer creation is unchanged (manager guard,
+  customer-forced role, 422 on any role field)
+- no delete/update/reset-password endpoints and no broker-management
+  functionality were added
+- 18 focused tests; full suite 242 passed
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
@@ -462,6 +489,15 @@ POST /users (super_admin or admin; creation of customer users only):
 - role is always forced to customer server-side; extra="forbid" rejects any
   supplied role/broker_id with 422; tenant-scoped duplicates → 409.
 
+POST /users/admins (super_admin only; creation of Admin users):
+
+- same request/response shape as POST /users; the created role is the
+  server-side constant "admin"
+- customer/admin callers → 403; unauthenticated → 401; supplied
+  broker_id/role fields → 422; tenant-scoped duplicates → 409
+- broker_id comes only from the authenticated super_admin's database
+  record, preserving tenant isolation
+
 GET /users (super_admin or admin; role-based visibility):
 
     [ { ...UserResponse... }, ... ]
@@ -494,19 +530,21 @@ GET /users (super_admin or admin; role-based visibility):
   Broker is enforced by the database partial unique index
   (uq_users_broker_super_admin).
 - POST /users lets a super_admin or admin create Customer Users in their own
-  tenant (created role forced to customer); GET /users provides role-based,
-  tenant-scoped listing (super_admin: admins+customers; admin: customers).
+  tenant (created role forced to customer); POST /users/admins lets a
+  super_admin create Admin Users (server-side role, same tenant); GET /users
+  provides role-based, tenant-scoped listing (super_admin: admins+customers;
+  admin: customers).
 - Account information (AccountInfo contract, MT5AccountInfoProvider, AccountInfoService, GET /account-info) exists and is read-only.
 - Open positions (Position contract, MT5PositionProvider, FakePositionProvider, PositionService, GET /positions) exist and are read-only.
 - Trade history (TradeHistoryEntry contract, MT5TradeHistoryProvider,
   FakeTradeHistoryProvider, TradeHistoryService, GET /trade-history) exists and is read-only.
-- Steps 18/19/20/21A are committed and pushed to origin/master (latest: 935f2a2).
-- Test suite verified 2026-09-15 on the exact committed tree: pytest tests/ -q → 224 passed, 3 warnings.
+- Steps 18/19/20/21A/22 are committed and pushed to origin/master (latest: cde617e).
+- Test suite verified 2026-09-15 on the exact committed tree: pytest tests/ -q → 242 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean; the latest implementation commit (935f2a2) has been pushed/synced to origin/master.
+- Working tree is clean; the latest implementation commit (cde617e) has been pushed/synced to origin/master.
 
 Static/type verification:
 
@@ -543,13 +581,14 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–21A are complete, committed (935f2a2), and synced to origin/master.
+Steps 12–22 are complete, committed (cde617e), and synced to origin/master.
 
 The next logical areas, in no committed order, are:
 
-- super_admin-only admin-creation endpoint (get_current_super_admin already
-  exists as the authorization seam)
 - tenant-scoped MT5 design (known issue 1)
+- remaining known issues (IPC timeout, /health MT5 readiness, multi-worker
+  semantics, candle UTC review, last_error robustness, Windows dependency,
+  hygiene)
 
 Do NOT implement any next step until explicitly instructed.
 
