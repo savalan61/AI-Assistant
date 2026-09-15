@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 25 — Financial Context
+Step 27 — LLM Provider Abstraction (with Step 26 — AI Agent Boundary)
 
 Status:
 
@@ -10,31 +10,32 @@ VERIFIED + COMMITTED + SYNCED
 
 Implementation commit:
 
-67e8f76 ("feat(financial): add financial context")
-(full hash: 67e8f76a5144a53d2db8d7d8c2f2175184fa57ae)
+ecfc800 ("feat(ai): add agent and llm provider boundary")
+(full hash: ecfc8004796fc789e26f2cfea1cd80944c5375f0)
 
-Steps 23 (Economic Intelligence), 24 (Portfolio Intelligence) and 25
-(Financial Context) are all verified, committed and synced.
+Steps 23 (Economic Intelligence), 24 (Portfolio Intelligence), 25 (Financial
+Context), 26 (AI Agent Boundary) and 27 (LLM Provider Abstraction) are all
+verified, committed and synced.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 359 passed, 3 warnings (pre-existing third-party
+pytest tests/ -q → 394 passed, 3 warnings (pre-existing third-party
 deprecation warnings); verified 2026-09-15 on the exact committed tree
 
 Static verification: python -m compileall app scripts tests → clean.
 git diff --check → clean.
 Direct Pylance/pyright execution remains unavailable in this environment
 (as recorded for Steps 8–25); a focused manual static/type review was
-performed for each of Steps 23–25 instead. No type suppressions were used.
+performed for Steps 23–27 instead. No type suppressions were used.
 
-No trading functionality was added or changed in Steps 23–25; all MT5 read
+No trading functionality was added or changed in Steps 23–27; all MT5 read
 behavior is untouched.
 
-Working tree at the Step 25 commit:
+Working tree at the Step 27 commit:
 
 CLEAN
 
-Local HEAD and origin/master both point at 67e8f76. (This checkpoint
+Local HEAD and origin/master both point at ecfc800. (This checkpoint
 document update is the only change pending after that commit.)
 
 ## Completed Stages
@@ -276,6 +277,54 @@ Includes:
 - internal service/domain capability: no HTTP endpoint was added, and no LLM
   or agent logic exists
 - 19 focused tests; full suite 359 passed
+
+### Step 26 — AI Agent Boundary (READ-ONLY)
+Status: VERIFIED + COMMITTED (ecfc800)
+
+Includes:
+
+- AgentService in app/services/agent/: a minimal internal agent boundary that
+  orchestrates FinancialContextService and an injected LLMProvider — it
+  touches no MT5, no database and no provider directly, and duplicates no
+  financial-context logic
+- handle(request, broker_id, trade_history_days=30, now=None): broker_id is a
+  caller-supplied parameter from the authenticated database user (never
+  derived from the request text); the trade-history window stays configurable
+  with the existing 30-day default; the context read must be offloaded by an
+  API caller through the existing run_mt5_call boundary
+- AgentResponse NamedTuple: request (echoed verbatim), broker_id, context
+  (the read-only FinancialContext the answer was resolved against) and
+  answer (the provider's text, unchanged)
+- prompt preparation lives in the agent layer (app/services/agent/prompt.py):
+  build_prompt(request, context) renders a deterministic, provider-neutral
+  LLMPrompt — only facts already present in the context, account identity
+  (login/holder/server) deliberately omitted — so the provider never depends
+  on FinancialContext and the agent never depends on a vendor format
+- failures from the context service or the LLM provider propagate unchanged;
+  the model is asked only after the context exists, so a failed read never
+  reaches the provider
+- read-only by construction: the class's only public capability is handle;
+  there is no trading tool and no mutation
+- internal service/domain capability: no HTTP endpoint was added
+- 25 focused tests
+
+### Step 27 — LLM Provider Abstraction (READ-ONLY)
+Status: VERIFIED + COMMITTED (ecfc800)
+
+Includes:
+
+- LLMPrompt (instructions + content) and the LLMProvider ABC in
+  app/providers/llm.py: one synchronous complete(prompt) -> str method —
+  deliberately vendor-neutral and dependent on nothing from the app's
+  financial, persistence, transport or MT5 layers (enforced by a test)
+- FakeLLMProvider in app/providers/fake_llm.py: the current and only
+  implementation — deterministic, offline, explicitly labelled a placeholder,
+  records every prompt; no vendor SDK, HTTP client, API key or agent
+  framework (LangChain/LangGraph or similar) was introduced
+- provider failure is signalled by raising RuntimeError; providers never
+  return partial or fabricated text on failure
+- no real LLM is connected and no HTTP agent endpoint exists yet
+- 10 focused tests; combined Steps 26+27 suite 394 passed
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
@@ -542,6 +591,22 @@ build_portfolio_intelligence (same snapshot)
 FinancialContext (account + positions + trade_history +
                    portfolio_intelligence + broker_id + as_of)
 
+## Current Agent Flow
+
+caller (no HTTP endpoint yet)
+    ↓
+AgentService (app/services/agent/)
+    ↓
+FinancialContextService → FinancialContext (existing flows above)
+    ↓
+build_prompt(request, context) → LLMPrompt (agent layer; identity omitted)
+    ↓
+LLMProvider.complete(prompt) → answer text
+    ↓
+FakeLLMProvider (current implementation — no real model connected)
+    ↓
+AgentResponse (request + broker_id + context + answer)
+
 ## Positions API Contract
 
 GET /positions returns the wrapped response:
@@ -667,11 +732,24 @@ GET /portfolio-intelligence returns the combined account + exposure summary:
 ## Financial Context (internal capability — no HTTP endpoint)
 
 FinancialContextService composes the account snapshot, open positions, trade
-history and portfolio intelligence into one typed FinancialContext for future
-AI consumption. It is intentionally an internal service/domain capability:
-no endpoint, no LLM and no agent logic exists yet. The trade-history window is
-configurable and defaults to 30 days. Tenant identity (broker_id) is supplied
-by the caller from the authenticated database user.
+history and portfolio intelligence into one typed FinancialContext for AI
+consumption. It is intentionally an internal service/domain capability:
+no endpoint exists. The trade-history window is configurable and defaults to
+30 days. Tenant identity (broker_id) is supplied by the caller from the
+authenticated database user. It remains the single source of financial data
+for the agent layer.
+
+## Agent / LLM Boundary (internal capability — no HTTP endpoint)
+
+AgentService orchestrates FinancialContextService and an injected LLMProvider;
+it computes no finance of its own. The LLMProvider contract is vendor-neutral
+(one synchronous complete(prompt) -> str over a provider-neutral LLMPrompt),
+and FakeLLMProvider is its current and only implementation: a deterministic,
+offline development/test placeholder whose output must never be presented as a
+real model answer. No real LLM, no HTTP agent endpoint, no agent framework
+(LangChain/LangGraph or similar), and no trading tool exists in the agent
+layer. Failures from the context service or the provider propagate unchanged
+to the caller's boundary.
 
 ## Users API Contract
 
@@ -759,22 +837,28 @@ GET /users (super_admin or admin; role-based visibility):
 - Financial context (FinancialContext contract, FinancialContextService with a
   configurable trade-history window defaulting to 30 days) exists as an
   internal read-only capability with no HTTP endpoint.
-- No LLM/agent layer exists yet; the intelligence outputs are structured so a
-  future Agent can consume them.
+- Agent boundary (AgentService + AgentResponse in app/services/agent/) exists
+  and is read-only: it orchestrates FinancialContextService and an injected
+  LLMProvider, and adds no HTTP endpoint.
+- LLM provider boundary (LLMPrompt/LLMProvider in app/providers/llm.py) exists
+  and is vendor-neutral; FakeLLMProvider is its current and only
+  implementation (deterministic offline placeholder — not a real model).
+- No real LLM is connected; no HTTP agent endpoint exists; no agent framework
+  is used; no trading tool exists in the agent layer.
 - No price prediction, BUY/SELL recommendation or trading action is produced
-  by any intelligence endpoint.
-- Steps 18–25 are committed and pushed to origin/master (latest: 67e8f76).
-- Test suite verified 2026-09-15 on the exact committed tree: pytest tests/ -q → 359 passed, 3 warnings.
+  by any intelligence endpoint or the agent boundary.
+- Steps 18–27 are committed and pushed to origin/master (latest: ecfc800).
+- Test suite verified 2026-09-15 on the exact committed tree: pytest tests/ -q → 394 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean; the latest implementation commit (67e8f76) has been pushed/synced to origin/master (local HEAD == origin/master).
+- Working tree is clean; the latest implementation commit (ecfc800) has been pushed/synced to origin/master (local HEAD == origin/master).
 
 Static/type verification:
 
 Direct Pylance/pyright execution was not available in the environment for any of
-Steps 8–25. Manual static/type reviews were performed instead. This limitation
+Steps 8–27. Manual static/type reviews were performed instead. This limitation
 must be reported rather than hidden.
 
 ## Known Issues (current)
@@ -818,16 +902,19 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–25 are complete, committed (67e8f76), and synced to origin/master.
+Steps 12–27 are complete, committed (ecfc800), and synced to origin/master.
 
 The next logical areas, in no committed order, are:
 
+- an HTTP surface for the agent/financial context, if a consumer is defined
+  (deliberately kept internal through Step 27)
+- a real LLM vendor adapter behind LLMProvider (configuration injected from
+  settings; keys never in the repository; FakeLLMProvider stays the test
+  default) — the model output must remain read-only and non-advisory
+- prompt safety screening before generation (deterministic refusal of
+  trading-instruction requests) — a deliberate decision, not yet started
 - the economic calendar production data source (known issue 9) — required
   before economic intelligence can carry real data
-- an HTTP surface for the financial context, if a consumer is defined
-  (deliberately kept internal in Step 25)
-- an LLM/agent layer that consumes the existing AI-ready contexts (not
-  started)
 - tenant-scoped MT5 design (known issue 1)
 - remaining known issues (IPC timeout, /health MT5 readiness, multi-worker
   semantics, candle UTC review, last_error robustness, Windows dependency,
@@ -838,10 +925,12 @@ Do NOT implement any next step until explicitly instructed.
 When instructed, begin by inspecting the existing provider abstractions
 (app/providers/position.py, app/providers/trade_history.py,
 app/providers/account_info.py, app/providers/economic_calendar.py,
-app/providers/market_data.py), the MT5 providers, the consolidated blocking
+app/providers/llm.py, app/providers/market_data.py), the MT5
+providers, the consolidated blocking
 boundary (app/core/blocking.py), the intelligence services
 (app/services/economic_intelligence/, app/services/portfolio_intelligence/,
-app/services/financial_context/), and the composition root
+app/services/financial_context/), the agent boundary
+(app/services/agent/), and the composition root
 (app/core/dependencies.py).
 
 ## Architectural Guardrails

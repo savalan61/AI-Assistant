@@ -12,6 +12,7 @@ from app.core.dependencies import (
     shutdown_trade_history,
 )
 from app.api.account_info_router import router as account_info_router
+from app.api.agent_router import router as agent_router
 from app.api.auth_router import router as auth_router
 from app.api.economic_intelligence_router import router as economic_intelligence_router
 from app.api.market_data_router import router as market_data_router
@@ -49,6 +50,7 @@ app.include_router(positions_router)
 app.include_router(trade_history_router)
 app.include_router(economic_intelligence_router)
 app.include_router(portfolio_intelligence_router)
+app.include_router(agent_router)
 
 
 @app.get("/health")

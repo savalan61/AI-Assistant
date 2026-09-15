@@ -1,0 +1,580 @@
+"""Tests for POST /agent (auth, tenant scope, contract, errors).
+
+Require none of: real MT5, PostgreSQL, network, credentials, or an external
+LLM. The get_db dependency is overridden with a per-test file-based async
+SQLite database; the REAL authentication dependency runs (real JWT decode +
+real database lookup). The account-info, positions and trade-history
+composition-root seams are patched with deterministic fakes (the established
+lifecycle-test pattern), so no MT5 terminal is needed. The wired LLM provider
+is the real FakeLLMProvider (deterministic, offline). JWT config uses
+test-only values; async setup is driven with asyncio.run.
+"""
+import asyncio
+import threading
+from datetime import UTC, datetime
+from typing import AsyncIterator
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+import app.core.dependencies as deps
+from app.api.agent_router import router
+from app.core.config import settings as app_settings
+from app.core.security import create_access_token
+from app.db.base import Base
+from app.db.database import get_db
+from app.db.models import Broker, User, UserRole
+from app.providers.account_info import AccountInfo
+from app.providers.fake_llm import DEFAULT_FAKE_RESPONSE, FakeLLMProvider
+from app.providers.position import Position, PositionType
+from app.providers.trade_history import TradeHistoryEntry, TradeType
+
+TEST_SECRET = "unit-test-secret-not-a-real-credential"
+TEST_ALGORITHM = "HS256"
+
+ACCOUNT = AccountInfo(
+    login=10001,
+    name="Test Trader",
+    balance=10000.0,
+    equity=10050.0,
+    margin=250.0,
+    free_margin=9800.0,
+    margin_level=4020.0,
+    currency="USD",
+    server="Test-Server",
+)
+
+XAUUSD_BUY = Position(
+    ticket=123456789,
+    symbol="XAUUSD",
+    type=PositionType.BUY,
+    volume=0.10,
+    open_price=3642.50,
+    current_price=3648.20,
+    profit=57.00,
+)
+
+TRADE = TradeHistoryEntry(
+    ticket=246802468,
+    order_ticket=987654321,
+    symbol="XAUUSD",
+    type=TradeType.BUY,
+    volume=0.10,
+    price=3648.20,
+    profit=57.00,
+    time=datetime(2026, 9, 14, 12, 30, 0, tzinfo=UTC),
+    close_reason=None,
+    stop_loss=3635.00,
+    take_profit=3650.00,
+)
+
+TOP_LEVEL_KEYS = {"request", "broker_id", "answer", "context"}
+CONTEXT_KEYS = {"as_of", "account", "positions", "trade_history", "portfolio_intelligence"}
+ACCOUNT_KEYS = {"currency", "balance", "equity", "margin", "free_margin", "margin_level"}
+PORTFOLIO_KEYS = {
+    "open_positions",
+    "buy_positions",
+    "sell_positions",
+    "symbols",
+    "total_volume",
+    "buy_volume",
+    "sell_volume",
+    "directional_balance",
+    "exposure",
+    "risk",
+}
+POSITION_KEYS = {"ticket", "symbol", "type", "volume", "open_price", "current_price", "profit"}
+TRADE_KEYS = {
+    "ticket",
+    "order_ticket",
+    "symbol",
+    "type",
+    "volume",
+    "price",
+    "profit",
+    "time",
+    "close_reason",
+    "stop_loss",
+    "take_profit",
+}
+EXPOSURE_KEYS = {"symbol", "buy_volume", "sell_volume", "net_volume", "position_count"}
+RISK_KEYS = {"level", "basis"}
+
+
+# --- composition-root seams (established pattern) ------------------------------------
+
+
+def make_fake_account_provider_class(account: AccountInfo, error: Exception | None = None):
+    call_threads: list[int] = []
+
+    class FakeMT5AccountInfoProvider:
+        def __init__(self) -> None:
+            pass
+
+        def get_account_info(self) -> AccountInfo:
+            call_threads.append(threading.get_ident())
+            if error is not None:
+                raise error
+            return account
+
+    return FakeMT5AccountInfoProvider, call_threads
+
+
+def make_fake_position_provider_class(positions: tuple[Position, ...], error: Exception | None = None):
+    call_threads: list[int] = []
+
+    class FakeMT5PositionProvider:
+        def __init__(self) -> None:
+            pass
+
+        def get_positions(self) -> tuple[Position, ...]:
+            call_threads.append(threading.get_ident())
+            if error is not None:
+                raise error
+            return positions
+
+    return FakeMT5PositionProvider, call_threads
+
+
+def make_fake_trade_provider_class(
+    trades: tuple[TradeHistoryEntry, ...], error: Exception | None = None
+):
+    call_threads: list[int] = []
+    windows: list[tuple[object, object]] = []
+
+    class FakeMT5TradeHistoryProvider:
+        def __init__(self) -> None:
+            pass
+
+        def get_trade_history(self, from_time: object, to_time: object) -> tuple[TradeHistoryEntry, ...]:
+            call_threads.append(threading.get_ident())
+            windows.append((from_time, to_time))
+            if error is not None:
+                raise error
+            return trades
+
+    return FakeMT5TradeHistoryProvider, call_threads, windows
+
+
+@pytest.fixture(autouse=True)
+def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_settings, "SECRET_KEY", TEST_SECRET, raising=True)
+    monkeypatch.setattr(app_settings, "ALGORITHM", TEST_ALGORITHM, raising=True)
+
+
+@pytest.fixture()
+def patched_providers(monkeypatch):
+    """Patch the three MT5 provider seams; returns mutable records per seam."""
+
+    def _install(
+        *,
+        account_error: Exception | None = None,
+        position_error: Exception | None = None,
+        trade_error: Exception | None = None,
+    ) -> dict[str, object]:
+        account_cls, account_threads = make_fake_account_provider_class(ACCOUNT, account_error)
+        position_cls, position_threads = make_fake_position_provider_class((XAUUSD_BUY,), position_error)
+        trade_cls, trade_threads, trade_windows = make_fake_trade_provider_class((TRADE,), trade_error)
+        monkeypatch.setattr(deps, "MT5AccountInfoProvider", account_cls)
+        monkeypatch.setattr(deps, "MT5PositionProvider", position_cls)
+        monkeypatch.setattr(deps, "MT5TradeHistoryProvider", trade_cls)
+        deps._account_info_provider = None
+        deps._position_provider = None
+        deps._trade_history_provider = None
+        return {
+            "account_threads": account_threads,
+            "position_threads": position_threads,
+            "trade_threads": trade_threads,
+            "trade_windows": trade_windows,
+        }
+
+    yield _install
+    # Never leak fakes (or real providers) into other tests.
+    deps._account_info_provider = None
+    deps._position_provider = None
+    deps._trade_history_provider = None
+
+
+@pytest.fixture()
+def agent_env(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/agent.db")
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def seed() -> dict[str, int]:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with factory() as session:
+            broker_a = Broker(name="Broker A", code="AG-A")
+            broker_b = Broker(name="Broker B", code="AG-B")
+            session.add_all([broker_a, broker_b])
+            await session.commit()
+            customer_a = User(
+                broker_id=broker_a.id,
+                username="10001",
+                password_hash="x" * 60,
+                is_active=True,
+                role=UserRole.CUSTOMER,
+            )
+            customer_b = User(
+                broker_id=broker_b.id,
+                username="10002",
+                password_hash="x" * 60,
+                is_active=True,
+                role=UserRole.CUSTOMER,
+            )
+            session.add_all([customer_a, customer_b])
+            await session.commit()
+            return {
+                "broker_a_id": broker_a.id,
+                "broker_b_id": broker_b.id,
+                "customer_a_id": customer_a.id,
+                "customer_b_id": customer_b.id,
+            }
+
+    ids = asyncio.run(seed())
+
+    def make_app() -> TestClient:
+        async def override_get_db() -> AsyncIterator[AsyncSession]:
+            async with factory() as session:
+                yield session
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[get_db] = override_get_db
+        return TestClient(app)
+
+    yield {"make_app": make_app, "factory": factory, **ids}
+    asyncio.run(engine.dispose())
+
+
+def auth_header(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def token_for(user_id: int) -> str:
+    return create_access_token(str(user_id))
+
+
+def post_agent(env, user_id: int, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+    client = env["make_app"]()
+    with client as c:
+        response = c.post("/agent", json=payload, headers=auth_header(token_for(user_id)))
+    return response.status_code, response.json()
+
+
+def is_utc_iso(value: object) -> bool:
+    """True for a timezone-aware UTC ISO 8601 value ("...Z" or "...+00:00")."""
+    return str(value).endswith(("Z", "+00:00"))
+
+
+# --- authenticated success ---------------------------------------------------------------
+
+
+def test_authenticated_request_returns_agent_answer(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "What is my exposure?"})
+
+    assert status == 200
+    assert set(body.keys()) == TOP_LEVEL_KEYS
+    assert body["request"] == "What is my exposure?"
+    assert body["answer"] == DEFAULT_FAKE_RESPONSE
+
+
+def test_response_contract_is_complete_and_stable(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hello"})
+
+    context = body["context"]
+    assert set(context.keys()) == CONTEXT_KEYS
+    assert is_utc_iso(context["as_of"])
+
+    account = context["account"]
+    assert set(account.keys()) == ACCOUNT_KEYS
+    assert account["balance"] == 10000.0
+    assert account["margin_level"] == 4020.0
+    # Account identity fields are deliberately absent from the whole response.
+    assert "login" not in account
+    assert "name" not in account
+    assert "server" not in account
+
+    assert set(context["portfolio_intelligence"].keys()) == PORTFOLIO_KEYS
+    assert context["portfolio_intelligence"]["open_positions"] == 1
+
+    positions = context["positions"]
+    assert len(positions) == 1
+    assert set(positions[0].keys()) == POSITION_KEYS
+    assert positions[0]["symbol"] == "XAUUSD"
+
+    trades = context["trade_history"]
+    assert len(trades) == 1
+    assert set(trades[0].keys()) == TRADE_KEYS
+    assert trades[0]["close_reason"] is None  # nullable, never invented
+
+    exposure = context["portfolio_intelligence"]["exposure"]
+    assert set(exposure[0].keys()) == EXPOSURE_KEYS
+    assert set(context["portfolio_intelligence"]["risk"].keys()) == RISK_KEYS
+    assert context["portfolio_intelligence"]["risk"]["level"] == "LOW"
+
+
+def test_response_exposes_no_secrets(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hello"})
+
+    text = str(body)
+    assert "password_hash" not in text
+    assert "mt5_password_encrypted" not in text
+    assert "$2b$" not in text
+    assert "token" not in text
+    # Account identity (login/name/server) is absent everywhere, not just in
+    # the LLM prompt.
+    assert "Test-Server" not in text
+    assert "Test Trader" not in text
+    assert str(ACCOUNT.login) not in text
+
+
+def test_message_is_echoed_verbatim(agent_env, patched_providers) -> None:
+    patched_providers()
+    message = "  Am I exposed to USD?  "
+
+    _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": message})
+
+    assert body["request"] == message
+
+
+# --- authentication ---------------------------------------------------------------------
+
+
+def test_unauthenticated_request_returns_401(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    with agent_env["make_app"]() as client:
+        response = client.post("/agent", json={"message": "hello"})
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_invalid_token_returns_401(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    with agent_env["make_app"]() as client:
+        response = client.post("/agent", json={"message": "hello"}, headers=auth_header("not-a-jwt"))
+
+    assert response.status_code == 401
+
+
+# --- request validation -----------------------------------------------------------------
+
+
+def test_missing_message_is_rejected_with_422(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {})
+
+    assert status == 422
+
+
+def test_blank_message_is_rejected_with_422(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": ""})
+
+    assert status == 422
+
+
+def test_zero_and_negative_trade_history_days_are_rejected_with_422(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    status_zero, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi", "trade_history_days": 0})
+    status_negative, _ = post_agent(
+        agent_env, agent_env["customer_a_id"], {"message": "hi", "trade_history_days": -5}
+    )
+
+    assert status_zero == 422
+    assert status_negative == 422
+
+
+def test_extra_fields_are_rejected_with_422(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    status_broker, _ = post_agent(
+        agent_env, agent_env["customer_a_id"], {"message": "hi", "broker_id": 2}
+    )
+    status_user, _ = post_agent(
+        agent_env, agent_env["customer_a_id"], {"message": "hi", "user_id": 999}
+    )
+
+    # No such parameters exist: tenant scope cannot be widened or redirected.
+    assert status_broker == 422
+    assert status_user == 422
+
+
+# --- trade-history window ----------------------------------------------------------------
+
+
+def test_default_window_is_thirty_days(agent_env, patched_providers) -> None:
+    record = patched_providers()
+
+    _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
+
+    as_of = datetime.fromisoformat(str(body["context"]["as_of"]).replace("Z", "+00:00"))
+    window_from, window_to = record["trade_windows"][0]
+    assert (window_to - window_from).days == 30
+    assert window_to == as_of
+
+
+def test_custom_window_is_applied(agent_env, patched_providers) -> None:
+    record = patched_providers()
+
+    _, body = post_agent(
+        agent_env, agent_env["customer_a_id"], {"message": "hi", "trade_history_days": 7}
+    )
+
+    as_of = datetime.fromisoformat(str(body["context"]["as_of"]).replace("Z", "+00:00"))
+    window_from, window_to = record["trade_windows"][0]
+    assert (window_to - window_from).days == 7
+    assert window_to == as_of
+
+
+# --- tenant scope ------------------------------------------------------------------------
+
+
+def test_broker_id_comes_from_the_authenticated_user(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
+
+    assert body["broker_id"] == agent_env["broker_a_id"]
+    assert body["context"]["portfolio_intelligence"]["open_positions"] == 1
+
+
+def test_each_user_gets_their_own_tenant_identity(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    _, body_a = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
+    _, body_b = post_agent(agent_env, agent_env["customer_b_id"], {"message": "hi"})
+
+    assert body_a["broker_id"] == agent_env["broker_a_id"]
+    assert body_b["broker_id"] == agent_env["broker_b_id"]
+    assert body_a["broker_id"] != body_b["broker_id"]
+
+
+# --- failure handling ---------------------------------------------------------------------
+
+
+def test_account_provider_failure_returns_generic_503(agent_env, patched_providers) -> None:
+    patched_providers(account_error=RuntimeError("terminal unavailable"))
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
+
+    assert status == 503
+    assert body == {"detail": "Agent service temporarily unavailable"}
+
+
+def test_position_provider_failure_returns_generic_503(agent_env, patched_providers) -> None:
+    patched_providers(position_error=RuntimeError("open positions unavailable"))
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
+
+    assert status == 503
+    assert body == {"detail": "Agent service temporarily unavailable"}
+
+
+def test_trade_history_provider_failure_returns_generic_503(agent_env, patched_providers) -> None:
+    patched_providers(trade_error=RuntimeError("trade history unavailable"))
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
+
+    assert status == 503
+    assert body == {"detail": "Agent service temporarily unavailable"}
+
+
+def test_llm_provider_failure_returns_generic_503(agent_env, patched_providers, monkeypatch) -> None:
+    class FailingLLMProvider(FakeLLMProvider):
+        def complete(self, prompt: object) -> str:
+            raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(deps, "FakeLLMProvider", FailingLLMProvider)
+    patched_providers()
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
+
+    assert status == 503
+    assert body == {"detail": "Agent service temporarily unavailable"}
+
+
+def test_provider_initialization_failure_returns_503_and_is_not_cached(
+    agent_env, patched_providers, monkeypatch
+) -> None:
+    patched_providers()
+
+    def failing_init(self) -> None:
+        raise RuntimeError("MT5 initialization failed: simulated")
+
+    cls, _ = make_fake_account_provider_class(ACCOUNT)
+    monkeypatch.setattr(cls, "__init__", failing_init)
+    monkeypatch.setattr(deps, "MT5AccountInfoProvider", cls)
+    deps._account_info_provider = None
+
+    with agent_env["make_app"]() as client:
+        response = client.post(
+            "/agent", json={"message": "hi"}, headers=auth_header(token_for(agent_env["customer_a_id"]))
+        )
+
+    assert response.status_code == 503
+    assert deps._account_info_provider is None  # failed construction not cached
+    deps._account_info_provider = None
+
+
+# --- read-only / blocking boundary ----------------------------------------------------------
+
+
+def test_blocking_reads_run_off_the_event_loop(agent_env, patched_providers) -> None:
+    record = patched_providers()
+    main_thread = threading.get_ident()
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
+
+    assert status == 200
+    for key in ("account_threads", "position_threads", "trade_threads"):
+        threads = record[key]
+        assert threads
+        assert all(thread_id != main_thread for thread_id in threads)
+
+
+def test_no_trading_operation_is_available_behind_the_endpoint() -> None:
+    # The router module must not import or reference any MT5 trading function;
+    # the endpoint can only resolve an answer from the read-only context.
+    import app.api.agent_router as router_module
+
+    forbidden = ("order_send", "order_check", "positions_modify", "order_calc", "order_delete")
+    for name in forbidden:
+        assert not hasattr(router_module, name)
+        assert name not in router_module.__doc__
+
+
+# --- existing wiring stays intact -------------------------------------------------------------
+
+
+def test_existing_endpoints_remain_registered() -> None:
+    from app.main import app
+
+    # The generated OpenAPI schema is the authoritative list of mounted routes.
+    paths = set(app.openapi()["paths"])
+
+    assert "/agent" in paths
+    # Regression guard: the pre-existing feature endpoints are still mounted.
+    assert {
+        "/positions",
+        "/account-info",
+        "/trade-history",
+        "/market-data/{symbol}",
+        "/users",
+        "/economic-intelligence/today",
+        "/portfolio-intelligence",
+    } <= paths

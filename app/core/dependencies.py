@@ -11,6 +11,7 @@ from app.providers import (
     AccountInfoProvider,
     EconomicCalendarProvider,
     FakeEconomicCalendarProvider,
+    FakeLLMProvider,
     MT5AccountInfoProvider,
     MT5MarketDataProvider,
     MT5PositionProvider,
@@ -20,8 +21,10 @@ from app.providers import (
     TradeHistoryProvider,
 )
 from app.services.account import AccountInfoService
+from app.services.agent import AgentService
 from app.services.economic_calendar import EconomicCalendarService
 from app.services.economic_intelligence import EconomicIntelligenceService
+from app.services.financial_context import FinancialContextService
 from app.services.market import MarketDataService
 from app.services.portfolio_intelligence import PortfolioIntelligenceService
 from app.services.positions import PositionService
@@ -199,6 +202,21 @@ def get_portfolio_intelligence_service() -> PortfolioIntelligenceService:
     return PortfolioIntelligenceService(
         account_service=get_account_info_service(),
         position_service=get_position_service(),
+    )
+
+
+# Agent wiring. The LLM provider is the deterministic FakeLLMProvider: the
+# placeholder implementation until a real model adapter is selected, so no API
+# key or vendor configuration exists and tests stay offline. The financial
+# context flows through the single existing architecture below.
+def get_agent_service() -> AgentService:
+    return AgentService(
+        financial_context_service=FinancialContextService(
+            account_service=get_account_info_service(),
+            position_service=get_position_service(),
+            trade_history_service=get_trade_history_service(),
+        ),
+        llm_provider=FakeLLMProvider(),
     )
 
 
