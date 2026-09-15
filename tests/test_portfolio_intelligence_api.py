@@ -11,6 +11,7 @@ asyncio.run.
 import asyncio
 import threading
 from datetime import datetime
+from decimal import Decimal
 from typing import AsyncIterator
 
 import pytest
@@ -35,10 +36,10 @@ TEST_ALGORITHM = "HS256"
 ACCOUNT = AccountInfo(
     login=10001,
     name="Test Trader",
-    balance=10000.0,
-    equity=10050.0,
-    margin=250.0,
-    free_margin=9800.0,
+    balance=Decimal("10000.00"),
+    equity=Decimal("10050.00"),
+    margin=Decimal("250.00"),
+    free_margin=Decimal("9800.00"),
     margin_level=4020.0,
     currency="USD",
     server="Test-Server",
@@ -48,19 +49,19 @@ XAUUSD_BUY = Position(
     ticket=123456789,
     symbol="XAUUSD",
     type=PositionType.BUY,
-    volume=0.10,
-    open_price=3642.50,
-    current_price=3648.20,
-    profit=57.00,
+    volume=Decimal("0.10"),
+    open_price=Decimal("3642.50"),
+    current_price=Decimal("3648.20"),
+    profit=Decimal("57.00"),
 )
 EURUSD_SELL = Position(
     ticket=987654321,
     symbol="EURUSD",
     type=PositionType.SELL,
-    volume=1.00,
-    open_price=1.0850,
-    current_price=1.0820,
-    profit=-30.00,
+    volume=Decimal("1.00"),
+    open_price=Decimal("1.0850"),
+    current_price=Decimal("1.0820"),
+    profit=Decimal("-30.00"),
 )
 
 PORTFOLIO_KEYS = {

@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.providers.position import Position, PositionProvider, PositionType
 
@@ -50,15 +52,18 @@ class MT5PositionProvider(PositionProvider):
                     position_type = PositionType.SELL
                 else:
                     raise RuntimeError(f"MT5 returned an unknown position type: {raw.type}")
+                # Money/quantity conversion is Decimal(str()) — never
+                # Decimal(raw_float), which would bake in the binary-float
+                # artifact the Decimal conversion exists to remove.
                 positions.append(
                     Position(
                         ticket=int(raw.ticket),
                         symbol=str(raw.symbol),
                         type=position_type,
-                        volume=float(raw.volume),
-                        open_price=float(raw.price_open),
-                        current_price=float(raw.price_current),
-                        profit=float(raw.profit),
+                        volume=Decimal(str(raw.volume)),
+                        open_price=Decimal(str(raw.price_open)),
+                        current_price=Decimal(str(raw.price_current)),
+                        profit=Decimal(str(raw.profit)),
                     )
                 )
             return tuple(positions)

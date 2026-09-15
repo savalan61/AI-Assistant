@@ -13,6 +13,7 @@ JWT config uses test-only values; async setup is driven with asyncio.run.
 import asyncio
 import threading
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import AsyncIterator
 
 import pytest
@@ -40,10 +41,10 @@ TEST_ALGORITHM = "HS256"
 ACCOUNT = AccountInfo(
     login=10001,
     name="Test Trader",
-    balance=10000.0,
-    equity=10050.0,
-    margin=250.0,
-    free_margin=9800.0,
+    balance=Decimal("10000.00"),
+    equity=Decimal("10050.00"),
+    margin=Decimal("250.00"),
+    free_margin=Decimal("9800.00"),
     margin_level=4020.0,
     currency="USD",
     server="Test-Server",
@@ -53,10 +54,10 @@ XAUUSD_BUY = Position(
     ticket=123456789,
     symbol="XAUUSD",
     type=PositionType.BUY,
-    volume=0.10,
-    open_price=3642.50,
-    current_price=3648.20,
-    profit=57.00,
+    volume=Decimal("0.10"),
+    open_price=Decimal("3642.50"),
+    current_price=Decimal("3648.20"),
+    profit=Decimal("57.00"),
 )
 
 TRADE = TradeHistoryEntry(
@@ -64,13 +65,13 @@ TRADE = TradeHistoryEntry(
     order_ticket=987654321,
     symbol="XAUUSD",
     type=TradeType.BUY,
-    volume=0.10,
-    price=3648.20,
-    profit=57.00,
+    volume=Decimal("0.10"),
+    price=Decimal("3648.20"),
+    profit=Decimal("57.00"),
     time=datetime(2026, 9, 14, 12, 30, 0, tzinfo=UTC),
     close_reason=None,
-    stop_loss=3635.00,
-    take_profit=3650.00,
+    stop_loss=Decimal("3635.00"),
+    take_profit=Decimal("3650.00"),
 )
 
 TOP_LEVEL_KEYS = {"request", "broker_id", "answer", "context"}

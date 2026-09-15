@@ -27,6 +27,7 @@ from app.db.database import get_db
 from app.db.models import Broker, User, UserRole
 from app.providers.economic_calendar import EconomicEvent
 from app.providers.position import Position, PositionType
+from decimal import Decimal
 
 TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
@@ -35,19 +36,19 @@ XAUUSD = Position(
     ticket=123456789,
     symbol="XAUUSD",
     type=PositionType.BUY,
-    volume=0.10,
-    open_price=3642.50,
-    current_price=3648.20,
-    profit=57.00,
+    volume=Decimal("0.10"),
+    open_price=Decimal("3642.50"),
+    current_price=Decimal("3648.20"),
+    profit=Decimal("57.00"),
 )
 EURUSD = Position(
     ticket=987654321,
     symbol="EURUSD",
     type=PositionType.SELL,
-    volume=1.00,
-    open_price=1.0850,
-    current_price=1.0820,
-    profit=-30.00,
+    volume=Decimal("1.00"),
+    open_price=Decimal("1.0850"),
+    current_price=Decimal("1.0820"),
+    profit=Decimal("-30.00"),
 )
 
 TOP_LEVEL_KEYS = {

@@ -5,6 +5,7 @@ require a real MT5 terminal, credentials, PostgreSQL, network access, or .env.
 The provider reads through the authenticated session, so provider-level mapping
 and tenant scoping are both exercised for real.
 """
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -130,14 +131,14 @@ def test_all_seven_fields_are_mapped_correctly(provider):
         ticket=123456789,
         symbol="XAUUSD",
         type=PositionType.BUY,
-        volume=0.10,
-        open_price=3642.50,
-        current_price=3648.20,
-        profit=57.00,
+        volume=Decimal("0.10"),
+        open_price=Decimal("3642.50"),
+        current_price=Decimal("3648.20"),
+        profit=Decimal("57.00"),
     )
     assert isinstance(info.ticket, int)
-    for float_field in ("volume", "open_price", "current_price", "profit"):
-        assert isinstance(getattr(info, float_field), float)
+    for money_field in ("volume", "open_price", "current_price", "profit"):
+        assert isinstance(getattr(info, money_field), Decimal)
     assert isinstance(info.symbol, str)
 
 

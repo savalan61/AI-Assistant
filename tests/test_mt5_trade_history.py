@@ -6,6 +6,7 @@ The provider queries history through the authenticated session, so mapping,
 tenant scoping and error translation all run for real.
 """
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -187,9 +188,9 @@ def test_successful_retrieval_and_mapping(provider):
         order_ticket=987654321,
         symbol="XAUUSD",
         type=TradeType.BUY,
-        volume=0.10,
-        price=3648.20,
-        profit=57.00,
+        volume=Decimal("0.10"),
+        price=Decimal("3648.20"),
+        profit=Decimal("57.00"),
         time=datetime.fromtimestamp(DEAL_TIME, tz=UTC),
         close_reason=TradeCloseReason.TP,
         stop_loss=None,
@@ -197,8 +198,8 @@ def test_successful_retrieval_and_mapping(provider):
     )
     assert isinstance(entry.ticket, int)
     assert isinstance(entry.order_ticket, int)
-    for float_field in ("volume", "price", "profit"):
-        assert isinstance(getattr(entry, float_field), float)
+    for money_field in ("volume", "price", "profit"):
+        assert isinstance(getattr(entry, money_field), Decimal)
     assert entry.time.tzinfo is not None  # UTC-aware datetime, never naive
 
 

@@ -5,6 +5,7 @@ require a real MT5 terminal, MT5 credentials, PostgreSQL, network access, or
 .env. The provider reads through the authenticated session, so conversion,
 tenant scoping and error translation all run for real.
 """
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -82,6 +83,20 @@ MT5_ACCOUNT = SimpleNamespace(
     server="MetaQuotes-Demo",
 )
 
+# The contract's money fields are Decimal(str(raw_float)) conversions of the
+# same MT5 payload — exactness through str(), never Decimal(raw_float).
+MT5_ACCOUNT_EXPECTED = AccountInfo(
+    login=10001,
+    name="Demo Account",
+    balance=Decimal("10000.0"),
+    equity=Decimal("10150.25"),
+    margin=Decimal("250.0"),
+    free_margin=Decimal("9900.25"),
+    margin_level=40601.0,
+    currency="USD",
+    server="MetaQuotes-Demo",
+)
+
 
 @pytest.fixture(autouse=True)
 def encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,22 +136,13 @@ def test_successful_retrieval_and_conversion(provider):
 def test_all_nine_fields_are_mapped_correctly(provider):
     info = provider(FakeMT5(account_info_result=MT5_ACCOUNT)).get_account_info()
 
-    # Values preserved exactly as returned by MT5.
-    assert info == AccountInfo(
-        login=10001,
-        name="Demo Account",
-        balance=10000.0,
-        equity=10150.25,
-        margin=250.0,
-        free_margin=9900.25,
-        margin_level=40601.0,
-        currency="USD",
-        server="MetaQuotes-Demo",
-    )
+    # Values preserved exactly as returned by MT5 (money fields via Decimal(str(...))).
+    assert info == MT5_ACCOUNT_EXPECTED
     # Contract types hold (explicit coercions in the provider).
     assert isinstance(info.login, int)
-    for float_field in ("balance", "equity", "margin", "free_margin", "margin_level"):
-        assert isinstance(getattr(info, float_field), float)
+    for money_field in ("balance", "equity", "margin", "free_margin"):
+        assert isinstance(getattr(info, money_field), Decimal)
+    assert isinstance(info.margin_level, float)
     assert isinstance(info.name, str) and isinstance(info.currency, str) and isinstance(info.server, str)
 
 

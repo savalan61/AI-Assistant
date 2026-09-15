@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
@@ -106,21 +107,22 @@ class MT5TradeHistoryProvider(TradeHistoryProvider):
         # explicitly — a naive datetime must never leak into the contract.
         deal_time = datetime.fromtimestamp(int(raw.time), tz=UTC)
 
+        # Money/quantity conversion is Decimal(str()) — never Decimal(raw_float).
         return TradeHistoryEntry(
             ticket=int(raw.ticket),
             order_ticket=int(raw.order),
             symbol=str(raw.symbol),
             type=trade_type,
-            volume=float(raw.volume),
-            price=float(raw.price),
-            profit=float(raw.profit),
+            volume=Decimal(str(raw.volume)),
+            price=Decimal(str(raw.price)),
+            profit=Decimal(str(raw.profit)),
             time=deal_time,
             close_reason=close_reason,
             stop_loss=sl,
             take_profit=tp,
         )
 
-    def _protective_levels(self, mt5_api: Any, raw: Any) -> tuple[float | None, float | None]:
+    def _protective_levels(self, mt5_api: Any, raw: Any) -> tuple[Decimal | None, Decimal | None]:
         # The historical deal object does not reliably carry the SL/TP levels
         # of the closing order, so they are taken from the related order when
         # it can actually be retrieved; otherwise they are None — never
@@ -139,6 +141,11 @@ class MT5TradeHistoryProvider(TradeHistoryProvider):
             return None, None
 
         order = related_orders[0]
-        sl = float(order.price_sl) if float(order.price_sl) > 0.0 else None
-        tp = float(order.price_tp) if float(order.price_tp) > 0.0 else None
+        # MT5 reports unset protective levels as 0: they become None, never a
+        # fabricated value. The sentinel check is Decimal-vs-Decimal — no float
+        # enters the comparison.
+        sl_price = Decimal(str(order.price_sl))
+        tp_price = Decimal(str(order.price_tp))
+        sl = sl_price if sl_price > 0 else None
+        tp = tp_price if tp_price > 0 else None
         return sl, tp

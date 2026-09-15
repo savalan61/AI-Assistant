@@ -29,6 +29,7 @@ from app.db.base import Base
 from app.db.database import get_db
 from app.db.models import Broker, User, UserRole
 from app.providers.account_info import AccountInfo
+from decimal import Decimal
 
 TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
@@ -36,10 +37,10 @@ TEST_ALGORITHM = "HS256"
 ACCOUNT_INFO = AccountInfo(
     login=10001,
     name="Demo Account",
-    balance=10000.0,
-    equity=10150.25,
-    margin=250.0,
-    free_margin=9900.25,
+    balance=Decimal("10000.0"),
+    equity=Decimal("10150.25"),
+    margin=Decimal("250.0"),
+    free_margin=Decimal("9900.25"),
     margin_level=40601.0,
     currency="USD",
     server="MetaQuotes-Demo",

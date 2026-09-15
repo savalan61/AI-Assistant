@@ -25,16 +25,17 @@ from app.db.base import Base
 from app.db.database import get_db
 from app.db.models import Broker, User
 from app.providers.market_data import Candle, MarketDataProvider
+from decimal import Decimal
 
 TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
 
 CANDLE = Candle(
     timestamp=datetime(2024, 1, 15, 12, 0, 0),
-    open=100.0,
-    high=110.0,
-    low=95.0,
-    close=105.0,
+    open=Decimal("100.0"),
+    high=Decimal("110.0"),
+    low=Decimal("95.0"),
+    close=Decimal("105.0"),
     volume=1234.0,
 )
 

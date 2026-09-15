@@ -31,6 +31,7 @@ from app.db.models import Broker, User
 from app.providers.fake_trade_history import FakeTradeHistoryProvider
 from app.providers.trade_history import TradeHistoryEntry, TradeHistoryProvider, TradeType
 from app.services.trade_history import TradeHistoryService
+from decimal import Decimal
 
 TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
@@ -43,22 +44,22 @@ BUY_TRADE = TradeHistoryEntry(
     order_ticket=987654321,
     symbol="XAUUSD",
     type=TradeType.BUY,
-    volume=0.10,
-    price=3648.20,
-    profit=57.00,
+    volume=Decimal("0.10"),
+    price=Decimal("3648.20"),
+    profit=Decimal("57.00"),
     time=datetime(2026, 9, 14, 12, 30, 0, tzinfo=UTC),
     close_reason="TP",
-    stop_loss=3635.00,
-    take_profit=3650.00,
+    stop_loss=Decimal("3635.00"),
+    take_profit=Decimal("3650.00"),
 )
 SELL_TRADE = TradeHistoryEntry(
     ticket=135791357,
     order_ticket=246813578,
     symbol="EURUSD",
     type=TradeType.SELL,
-    volume=1.00,
-    price=1.0820,
-    profit=-30.00,
+    volume=Decimal("1.00"),
+    price=Decimal("1.0820"),
+    profit=Decimal("-30.00"),
     time=datetime(2026, 9, 10, 8, 0, 0, tzinfo=UTC),
     close_reason=None,
     stop_loss=None,

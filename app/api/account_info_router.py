@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api.numeric import DecimalAsNumber
 from app.core.blocking import run_mt5_call
 from app.core.dependencies import get_account_info_service, get_current_user
 from app.db.models import User
@@ -13,13 +14,16 @@ router = APIRouter()
 
 # Maps the AccountInfo contract to a JSON-safe response schema; the raw MT5
 # object never reaches this layer because the provider already converts it.
+# Money fields are Decimal in the contract and serialize as JSON numbers via
+# DecimalAsNumber (the wire format is unchanged from the float era).
 class AccountInfoResponse(BaseModel):
     login: int
     name: str
-    balance: float
-    equity: float
-    margin: float
-    free_margin: float
+    balance: DecimalAsNumber
+    equity: DecimalAsNumber
+    margin: DecimalAsNumber
+    free_margin: DecimalAsNumber
+    # A ratio, not money: float in the contract and float on the wire.
     margin_level: float
     currency: str
     server: str

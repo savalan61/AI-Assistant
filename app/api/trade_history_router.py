@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 
+from app.api.numeric import DecimalAsNumber
+
 from app.core.blocking import run_mt5_call
 from app.core.dependencies import get_current_user, get_trade_history_service
 from app.db.models import User
@@ -23,13 +25,16 @@ class TradeResponse(BaseModel):
     order_ticket: int
     symbol: str
     type: str
-    volume: float
-    price: float
-    profit: float
+    # Decimal in the contract, JSON numbers on the wire (unchanged format);
+    # SL/TP stay nullable exactly as in the contract (None = MT5 supplied no
+    # protective level — never a fabricated 0).
+    volume: DecimalAsNumber
+    price: DecimalAsNumber
+    profit: DecimalAsNumber
     time: datetime
     close_reason: str | None
-    stop_loss: float | None
-    take_profit: float | None
+    stop_loss: DecimalAsNumber | None
+    take_profit: DecimalAsNumber | None
 
 
 class TradeHistoryResponse(BaseModel):

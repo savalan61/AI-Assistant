@@ -19,6 +19,7 @@ Two deliberate constraints:
    forecast, and no BUY/SELL/OPEN/CLOSE/MODIFY action is produced anywhere.
 """
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import NamedTuple
 
@@ -62,30 +63,34 @@ class SymbolExposure(NamedTuple):
     """Aggregated open volume for one symbol, split by direction."""
 
     symbol: str
-    buy_volume: float
-    sell_volume: float
-    net_volume: float
+    buy_volume: Decimal
+    sell_volume: Decimal
+    net_volume: Decimal
     position_count: int
 
 
 class PortfolioIntelligence(NamedTuple):
-    """The combined account + exposure snapshot handed to the API/AI layer."""
+    """The combined account + exposure snapshot handed to the API/AI layer.
+
+    Money and volume fields are Decimal (Step 37); margin_level stays float
+    (a ratio, not money) exactly as in the AccountInfo contract.
+    """
 
     as_of: datetime
     account_currency: str
-    balance: float
-    equity: float
-    margin: float
-    free_margin: float
+    balance: Decimal
+    equity: Decimal
+    margin: Decimal
+    free_margin: Decimal
     margin_level: float
     open_positions: int
     buy_positions: int
     sell_positions: int
     symbols: tuple[str, ...]
-    total_volume: float
-    buy_volume: float
-    sell_volume: float
-    directional_balance: float
+    total_volume: Decimal
+    buy_volume: Decimal
+    sell_volume: Decimal
+    directional_balance: Decimal
     exposure: tuple[SymbolExposure, ...]
     risk: RiskAssessment
 
@@ -97,23 +102,25 @@ def aggregate_exposure(positions: tuple[Position, ...]) -> tuple[SymbolExposure,
     volume for that symbol. Ordering is by symbol (ascending) so the result is
     deterministic and independent of provider row order.
     """
-    buy: dict[str, float] = {}
-    sell: dict[str, float] = {}
+    # All aggregation is Decimal over Decimal: the zero start value is a
+    # Decimal, so no float ever enters the arithmetic.
+    buy: dict[str, Decimal] = {}
+    sell: dict[str, Decimal] = {}
     counts: dict[str, int] = {}
     for position in positions:
         symbol = position.symbol
         counts[symbol] = counts.get(symbol, 0) + 1
         if position.type is PositionType.BUY:
-            buy[symbol] = buy.get(symbol, 0.0) + position.volume
+            buy[symbol] = buy.get(symbol, Decimal(0)) + position.volume
         else:
-            sell[symbol] = sell.get(symbol, 0.0) + position.volume
+            sell[symbol] = sell.get(symbol, Decimal(0)) + position.volume
 
     return tuple(
         SymbolExposure(
             symbol=symbol,
-            buy_volume=buy.get(symbol, 0.0),
-            sell_volume=sell.get(symbol, 0.0),
-            net_volume=buy.get(symbol, 0.0) - sell.get(symbol, 0.0),
+            buy_volume=buy.get(symbol, Decimal(0)),
+            sell_volume=sell.get(symbol, Decimal(0)),
+            net_volume=buy.get(symbol, Decimal(0)) - sell.get(symbol, Decimal(0)),
             position_count=counts[symbol],
         )
         for symbol in sorted(counts)
@@ -167,8 +174,10 @@ def build_portfolio_intelligence(
     """
     ordered = tuple(sorted(positions, key=lambda position: (position.symbol, position.ticket)))
 
-    buy_volume = sum(position.volume for position in ordered if position.type is PositionType.BUY)
-    sell_volume = sum(position.volume for position in ordered if position.type is PositionType.SELL)
+    # Decimal sums over Decimal volumes: sum() starts from int 0, which Decimal
+    # accepts without losing exactness — no float is ever involved.
+    buy_volume = sum((position.volume for position in ordered if position.type is PositionType.BUY), Decimal(0))
+    sell_volume = sum((position.volume for position in ordered if position.type is PositionType.SELL), Decimal(0))
     buy_positions = sum(1 for position in ordered if position.type is PositionType.BUY)
 
     return PortfolioIntelligence(

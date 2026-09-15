@@ -1,14 +1,17 @@
 from datetime import datetime
+from decimal import Decimal
 
 from app.providers.market_data import Candle, MarketDataProvider
 
-# Deterministic candle returned for every symbol; fixed values keep tests repeatable.
+# Deterministic candle returned for every symbol; fixed values keep tests
+# repeatable. OHLC are Decimal market prices; tick volume stays float — exactly
+# as the real MT5 provider produces them.
 _FAKE_CANDLE = Candle(
     timestamp=datetime(2024, 1, 15, 12, 0, 0),
-    open=100.0,
-    high=110.0,
-    low=95.0,
-    close=105.0,
+    open=Decimal("100.00"),
+    high=Decimal("110.00"),
+    low=Decimal("95.00"),
+    close=Decimal("105.00"),
     volume=1234.0,
 )
 

@@ -1,15 +1,20 @@
 import abc
 from datetime import datetime
+from decimal import Decimal
 from typing import NamedTuple
 
 
 # Typed OHLCV candle contract shared by all providers.
+#
+# OHLC are Decimal (Step 37): they are market prices, converted at the provider
+# boundary with Decimal(str(raw_value)). ``volume`` is MT5 tick volume — a
+# counting measure, not money or a price — and stays float.
 class Candle(NamedTuple):
     timestamp: datetime
-    open: float
-    high: float
-    low: float
-    close: float
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
     volume: float
 
 

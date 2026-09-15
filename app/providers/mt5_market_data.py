@@ -1,4 +1,5 @@
 import datetime
+from decimal import Decimal
 
 from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.providers.market_data import Candle, MarketDataProvider
@@ -44,11 +45,13 @@ class MT5MarketDataProvider(MarketDataProvider):
 
             rate = rates[0]
 
+            # OHLC are market prices: Decimal(str()) — never Decimal(raw_float).
+            # volume is MT5 tick volume (a count), so it stays float.
             return Candle(
                 timestamp=datetime.datetime.fromtimestamp(int(rate[0])),
-                open=float(rate[1]),
-                high=float(rate[2]),
-                low=float(rate[3]),
-                close=float(rate[4]),
+                open=Decimal(str(rate[1])),
+                high=Decimal(str(rate[2])),
+                low=Decimal(str(rate[3])),
+                close=Decimal(str(rate[4])),
                 volume=float(rate[5]),
             )

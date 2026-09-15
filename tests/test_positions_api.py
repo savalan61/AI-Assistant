@@ -29,6 +29,7 @@ from app.db.models import Broker, User
 from app.providers.fake_position import FakePositionProvider
 from app.providers.position import Position, PositionProvider, PositionType
 from app.services.positions import PositionService
+from decimal import Decimal
 
 TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
@@ -37,19 +38,19 @@ BUY_POSITION = Position(
     ticket=123456789,
     symbol="XAUUSD",
     type=PositionType.BUY,
-    volume=0.10,
-    open_price=3642.50,
-    current_price=3648.20,
-    profit=57.00,
+    volume=Decimal("0.10"),
+    open_price=Decimal("3642.50"),
+    current_price=Decimal("3648.20"),
+    profit=Decimal("57.00"),
 )
 SELL_POSITION = Position(
     ticket=987654321,
     symbol="EURUSD",
     type=PositionType.SELL,
-    volume=1.00,
-    open_price=1.0850,
-    current_price=1.0820,
-    profit=-30.00,
+    volume=Decimal("1.00"),
+    open_price=Decimal("1.0850"),
+    current_price=Decimal("1.0820"),
+    profit=Decimal("-30.00"),
 )
 
 

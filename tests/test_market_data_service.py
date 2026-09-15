@@ -7,13 +7,14 @@ from datetime import datetime
 from app.providers.fake_market_data import FakeMarketDataProvider
 from app.providers.market_data import Candle, MarketDataProvider
 from app.services.market.market_data_service import MarketDataService
+from decimal import Decimal
 
 EXPECTED_CANDLE = Candle(
     timestamp=datetime(2024, 1, 15, 12, 0, 0),
-    open=100.0,
-    high=110.0,
-    low=95.0,
-    close=105.0,
+    open=Decimal("100.0"),
+    high=Decimal("110.0"),
+    low=Decimal("95.0"),
+    close=Decimal("105.0"),
     volume=1234.0,
 )
 

@@ -23,6 +23,7 @@ from app.services.economic_intelligence import (
 )
 from app.services.economic_intelligence.relevance import PositionRelevance
 from app.services.positions import PositionService
+from decimal import Decimal
 
 DAY_FROM = datetime(2026, 9, 15, 0, 0, tzinfo=UTC)
 DAY_TO = datetime(2026, 9, 16, 0, 0, tzinfo=UTC)
@@ -31,19 +32,19 @@ XAUUSD = Position(
     ticket=123456789,
     symbol="XAUUSD",
     type=PositionType.BUY,
-    volume=0.10,
-    open_price=3642.50,
-    current_price=3648.20,
-    profit=57.00,
+    volume=Decimal("0.10"),
+    open_price=Decimal("3642.50"),
+    current_price=Decimal("3648.20"),
+    profit=Decimal("57.00"),
 )
 EURUSD = Position(
     ticket=987654321,
     symbol="EURUSD",
     type=PositionType.SELL,
-    volume=1.00,
-    open_price=1.0850,
-    current_price=1.0820,
-    profit=-30.00,
+    volume=Decimal("1.00"),
+    open_price=Decimal("1.0850"),
+    current_price=Decimal("1.0820"),
+    profit=Decimal("-30.00"),
 )
 
 
@@ -70,10 +71,10 @@ def make_position(symbol: str, ticket: int = 1, position_type: PositionType = Po
         ticket=ticket,
         symbol=symbol,
         type=position_type,
-        volume=0.10,
-        open_price=1.0,
-        current_price=1.0,
-        profit=0.0,
+        volume=Decimal("0.10"),
+        open_price=Decimal("1.0"),
+        current_price=Decimal("1.0"),
+        profit=Decimal("0.0"),
     )
 
 

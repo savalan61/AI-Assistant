@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from app.api.numeric import DecimalAsNumber
 from app.core.blocking import run_mt5_call
 from app.core.dependencies import get_current_user, get_position_service
 from app.db.models import User
@@ -21,10 +22,11 @@ class PositionResponse(BaseModel):
     ticket: int
     symbol: str
     type: str
-    volume: float
-    open_price: float
-    current_price: float
-    profit: float
+    # Decimal in the contract, JSON numbers on the wire (unchanged format).
+    volume: DecimalAsNumber
+    open_price: DecimalAsNumber
+    current_price: DecimalAsNumber
+    profit: DecimalAsNumber
 
 
 class PositionsResponse(BaseModel):

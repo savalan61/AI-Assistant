@@ -6,6 +6,7 @@ prompt-size guard — plus the separation of untrusted user text from system
 framing. Require none of: MT5, database, network, credentials, an external LLM.
 """
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -27,10 +28,10 @@ AS_OF = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 ACCOUNT = AccountInfo(
     login=10001,
     name="Test Trader",
-    balance=12345.67,
-    equity=12400.89,
-    margin=250.0,
-    free_margin=12150.89,
+    balance=Decimal("12345.67"),
+    equity=Decimal("12400.89"),
+    margin=Decimal("250.00"),
+    free_margin=Decimal("12150.89"),
     margin_level=4960.36,
     currency="USD",
     server="Test-Server",
@@ -41,10 +42,10 @@ POSITIONS: tuple[Position, ...] = (
         ticket=123456789,
         symbol="XAUUSD",
         type=PositionType.BUY,
-        volume=0.10,
-        open_price=3642.50,
-        current_price=3648.20,
-        profit=57.00,
+        volume=Decimal("0.10"),
+        open_price=Decimal("3642.50"),
+        current_price=Decimal("3648.20"),
+        profit=Decimal("57.00"),
     ),
 )
 
@@ -63,14 +64,14 @@ def make_trade(index: int, minutes: int) -> TradeHistoryEntry:
         order_ticket=2000 + index,
         symbol="XAUUSD",
         type=TradeType.BUY,
-        volume=0.10,
-        price=3600.0 + index,
-        profit=float(index),
+        volume=Decimal("0.10"),
+        price=Decimal(str(3600.0 + index)),
+        profit=Decimal(index),
         # index 0 is the oldest.
         time=AS_OF - timedelta(minutes=minutes),
         close_reason=TradeCloseReason.TP,
-        stop_loss=3600.0,
-        take_profit=3650.0,
+        stop_loss=Decimal("3600.0"),
+        take_profit=Decimal("3650.0"),
     )
 
 

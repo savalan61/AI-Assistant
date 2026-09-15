@@ -3,6 +3,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api.numeric import DecimalAsNumber
 from app.core.blocking import run_mt5_call
 from app.core.dependencies import get_current_user, get_market_data_service
 from app.db.models import User
@@ -11,13 +12,14 @@ from app.services.market import MarketDataService
 router = APIRouter()
 
 
-# Maps the Candle contract to a JSON-safe response schema.
+# Maps the Candle contract to a JSON-safe response schema. OHLC are Decimal in
+# the contract and JSON numbers on the wire; tick volume stays float.
 class CandleResponse(BaseModel):
     timestamp: datetime
-    open: float
-    high: float
-    low: float
-    close: float
+    open: DecimalAsNumber
+    high: DecimalAsNumber
+    low: DecimalAsNumber
+    close: DecimalAsNumber
     volume: float
 
 

@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.providers.account_info import AccountInfo, AccountInfoProvider
 
@@ -35,17 +37,19 @@ class MT5AccountInfoProvider(AccountInfoProvider):
                 raise RuntimeError(f"MT5 account information unavailable: {error}")
 
             # Explicit construction into the application contract: the raw MT5
-            # object never leaves the provider, and each field is coerced to the
-            # contract type without any business calculation.
+            # object never leaves the provider. Money goes through Decimal(str())
+            # — never Decimal(raw_float), which would bake in the binary-float
+            # artifact the Decimal conversion exists to remove. margin_level is a
+            # ratio, not money, and stays float.
             return AccountInfo(
                 login=int(info.login),
                 name=str(info.name),
-                balance=float(info.balance),
-                equity=float(info.equity),
-                margin=float(info.margin),
+                balance=Decimal(str(info.balance)),
+                equity=Decimal(str(info.equity)),
+                margin=Decimal(str(info.margin)),
                 # MT5 names this field margin_free; the application contract calls
                 # it free_margin (verified against a real terminal).
-                free_margin=float(info.margin_free),
+                free_margin=Decimal(str(info.margin_free)),
                 margin_level=float(info.margin_level),
                 currency=str(info.currency),
                 server=str(info.server),

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.api.numeric import DecimalAsNumber
 from app.core.blocking import run_mt5_call
 from app.core.config import settings
 from app.core.dependencies import get_agent_service, get_agent_usage_limiter, get_current_user
@@ -54,15 +55,16 @@ class AgentRequest(BaseModel):
 
 # Numbers only: login, holder name and server are deliberately omitted — the
 # same identity fields the LLM prompt excludes — so no account identity is
-# exposed through the API.
+# exposed through the API. Money is Decimal in the contract, JSON numbers here.
 class AccountSnapshotResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     currency: str
-    balance: float
-    equity: float
-    margin: float
-    free_margin: float
+    balance: DecimalAsNumber
+    equity: DecimalAsNumber
+    margin: DecimalAsNumber
+    free_margin: DecimalAsNumber
+    # A ratio, not money: float in the contract and float on the wire.
     margin_level: float
 
 
@@ -74,10 +76,10 @@ class PositionSnapshotResponse(BaseModel):
     ticket: int
     symbol: str
     type: str
-    volume: float
-    open_price: float
-    current_price: float
-    profit: float
+    volume: DecimalAsNumber
+    open_price: DecimalAsNumber
+    current_price: DecimalAsNumber
+    profit: DecimalAsNumber
 
 
 # Maps the TradeHistoryEntry contract (the same projection as
@@ -90,22 +92,22 @@ class TradeSnapshotResponse(BaseModel):
     order_ticket: int
     symbol: str
     type: str
-    volume: float
-    price: float
-    profit: float
+    volume: DecimalAsNumber
+    price: DecimalAsNumber
+    profit: DecimalAsNumber
     time: datetime
     close_reason: str | None
-    stop_loss: float | None
-    take_profit: float | None
+    stop_loss: DecimalAsNumber | None
+    take_profit: DecimalAsNumber | None
 
 
 class SymbolExposureResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     symbol: str
-    buy_volume: float
-    sell_volume: float
-    net_volume: float
+    buy_volume: DecimalAsNumber
+    sell_volume: DecimalAsNumber
+    net_volume: DecimalAsNumber
     position_count: int
 
 
@@ -127,10 +129,10 @@ class PortfolioSnapshotResponse(BaseModel):
     buy_positions: int
     sell_positions: int
     symbols: list[str]
-    total_volume: float
-    buy_volume: float
-    sell_volume: float
-    directional_balance: float
+    total_volume: DecimalAsNumber
+    buy_volume: DecimalAsNumber
+    sell_volume: DecimalAsNumber
+    directional_balance: DecimalAsNumber
     exposure: list[SymbolExposureResponse]
     risk: RiskAssessmentResponse
 

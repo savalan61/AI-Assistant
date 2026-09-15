@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 36 — MT5 Tenant-Scoped Sessions
+Step 37 — Decimal Money & Financial Numeric Representation
 
 Status:
 
@@ -10,42 +10,48 @@ VERIFIED + COMMITTED + SYNCED
 
 Checkpoint commit:
 
-"feat(mt5): add tenant-scoped mt5 sessions" — the Step 36 implementation and
-this document update are committed together in this single checkpoint commit.
-The prior synced checkpoint was the Step 35 commit ("feat(security): harden
-authentication, llm egress and agent input"), which itself followed b95eaa1
-("feat(ai): add broker llm routing and agent controls", Steps 29–33).
+"feat(financial): harden numeric representation" — the Step 37 implementation
+and this document update are committed together in this single checkpoint
+commit. The prior synced checkpoint was the Step 36 commit ("feat(mt5): add
+tenant-scoped mt5 sessions"), which itself followed the Step 35 security
+hardening commit and b95eaa1 ("feat(ai): add broker llm routing and agent
+controls", Steps 29–33).
 
-Step 36 closed the largest remaining product gap (audit known issue 1): MT5
-financial data is now authenticated per tenant instead of being a single
-process-global local-terminal read. The MetaTrader5 Python API authenticates
-ONE account per process, so the tenant boundary is a process-wide session
-manager (app/core/mt5_session.py) that owns the terminal: it authenticates a
-request's own (server, login) identity — resolved from the authenticated
-database user's broker, username and encrypted MT5 password — reuses the
-session when the tenant already matches, switches accounts under a lock held
-for the whole raw-read span, and forgets the identity after any failed
-authentication or failed read. Providers are now cheap per-request objects
-carrying one tenant's credentials; the four process-wide provider caches are
-gone. The unavoidable cost, documented rather than hidden: all MT5 reads in
-the process are serialized by that single terminal.
+Step 37 replaced float money with exact Decimal arithmetic at the domain
+boundary (the deferred "money representation" item). Balances, equity, margin,
+prices, profit and volume are Decimal in every provider/domain contract and in
+portfolio-intelligence aggregation, converted from MT5 floats with
+Decimal(str(raw_value)) so no binary-float artifact enters the domain. Ratios
+and non-money numbers deliberately stay float (account margin_level; candle
+tick volume). The API wire format is unchanged: one shared serializer renders
+Decimal as JSON numbers, so no existing client sees a different response shape.
+No database migration was needed — these values are not persisted.
 
 Test result at this checkpoint:
 
 pytest tests/ -q → 735 passed, 3 warnings (pre-existing third-party
-deprecation warnings); verified 2026-09-15 on this exact tree
+deprecation warnings); verified 2026-09-15 on this exact tree. The count is
+unchanged from Step 36: Step 37 re-expressed existing expectations in Decimal
+and added no new cases.
+
+Additional Step 37 verification: a live serialization probe confirmed Decimal
+fields render as JSON numbers (not strings), and a float/Decimal mixing scan
+over app/ found no mixed arithmetic — the only remaining float() call is the
+candle tick-volume conversion, by design.
 
 Static verification: python -m compileall app tests alembic → clean.
 git diff --check → clean.
 Direct Pylance/pyright execution remains unavailable in this environment
-(as recorded for Steps 8–35); a focused manual static/type review was
-performed for Step 36 instead, including an AST unused-import scan over the
-changed modules. No type suppressions remain in any file this step touched
-(two that the diff encountered were removed rather than carried forward).
+(as recorded for Steps 8–36); a focused manual static/type review was
+performed for Step 37 instead — every changed app file was read, an AST
+unused-import scan ran over the changed modules, and one real typing defect
+was found and fixed (MT5TradeHistoryProvider._protective_levels declared
+tuple[float | None, float | None] while returning Decimals). No type
+suppressions and no # type: ignore were added.
 
-No trading functionality was added or changed in Step 36; all reads remain
+No trading functionality was added or changed in Step 37; all reads remain
 strictly read-only and no order/position mutation of any kind exists. The AI
-remains strictly READ-ONLY.
+remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
@@ -630,6 +636,46 @@ Includes:
   resolution incl. non-numeric usernames and no-decryption-at-resolution;
   plus rewritten provider/lifecycle/API seam tests, including a tenant
   binding test per endpoint and a 503 path for an unusable tenant session)
+
+### Step 37 — Decimal Money & Financial Numeric Representation
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- Provider/domain contracts now carry exact financial values as Decimal:
+  AccountInfo (balance, equity, margin, free_margin), Position (volume,
+  open_price, current_price, profit), TradeHistoryEntry (volume, price, profit,
+  stop_loss, take_profit — nullable semantics unchanged), Candle (open, high,
+  low, close), and PortfolioIntelligence / SymbolExposure (total/buy/sell
+  volume, net_volume, directional_balance).
+- Intentionally retained float fields: AccountInfo.margin_level (a ratio that
+  feeds the risk bands — not money) and Candle.volume (MT5 tick volume, a
+  count). Candle.timestamp, ids, counts and strings are unchanged.
+- MT5 → Decimal conversion happens only at the provider boundary, via
+  Decimal(str(raw_value)) — never Decimal(raw_float), which would preserve the
+  binary-float artifact the conversion exists to remove. The trade-history
+  SL/TP zero-sentinel check is now Decimal-vs-Decimal; unset levels still
+  become None rather than a fabricated 0.
+- Portfolio intelligence arithmetic is entirely Decimal over Decimal — sums
+  seed from Decimal(0), so no float enters an aggregate, a comparison or the
+  directional balance. Aggregation and ordering behaviour is otherwise
+  unchanged, including the UNKNOWN risk band when margin level cannot support
+  a classification.
+- API serialization is unchanged on the wire: app/api/numeric.py defines the
+  single DecimalAsNumber = Annotated[Decimal, PlainSerializer(...float...)]
+  used by every affected response model (account-info, positions,
+  trade-history, market-data, portfolio-intelligence and the agent's embedded
+  financial context), so Decimal renders as a JSON number rather than
+  Pydantic's default string. The JSON transport remains approximate by nature
+  (no JSON number represents 0.1 exactly); what Step 37 removes is inexactness
+  INSIDE the application, leaving only the final display edge.
+- No database migration (these values are not persisted), no new dependency,
+  and no change to the MT5 session/tenant architecture, LLM/agent behaviour,
+  authentication, roles, or any endpoint contract.
+- Tests were updated to construct contracts with Decimal("...") literals. Raw
+  MT5 payload fakes in the MT5 provider tests deliberately stay float — that is
+  what MT5 returns — and are converted by the provider under test. Test count
+  is unchanged at 735.
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
@@ -1261,9 +1307,15 @@ GET /users (super_admin or admin; role-based visibility):
   OutboundDataPolicy resolved at the composition root; account identity is
   never sent regardless of policy.
 - The development economic calendar fails closed outside APP_ENV=development.
-- Steps 18–36 are committed and pushed to origin/master (this checkpoint
-  commit: "feat(mt5): add tenant-scoped mt5 sessions"; the prior synced
-  commit was the Step 35 security hardening checkpoint, before that b95eaa1).
+- Money, price and volume fields are Decimal in every provider/domain contract
+  and in portfolio aggregation (exact arithmetic), converted at the MT5 boundary
+  with Decimal(str(...)); account margin_level and candle tick volume
+  intentionally remain float. API JSON still exposes numbers, not strings, via
+  the shared DecimalAsNumber serializer.
+- Steps 18–37 are committed and pushed to origin/master (this checkpoint
+  commit: "feat(financial): harden numeric representation"; the prior synced
+  commit was the Step 36 MT5 tenant-session checkpoint, before that the Step 35
+  security hardening checkpoint and b95eaa1).
 - Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 735 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
@@ -1275,7 +1327,7 @@ GET /users (super_admin or admin; role-based visibility):
 Static/type verification:
 
 Direct Pylance/pyright execution was not available in the environment for any of
-Steps 8–33. Manual static/type reviews were performed instead. This limitation
+Steps 8–37. Manual static/type reviews were performed instead. This limitation
 must be reported rather than hidden.
 
 ## Known Issues (current)
@@ -1356,6 +1408,9 @@ Resolved:
 - (Audit finding) What may leave the process toward an external LLM was
   implicit in the prompt template — RESOLVED by Step 35 (explicit
   OutboundDataPolicy).
+- (Deferred item) Money representation: balances, equity, profit and volume
+  were float throughout the provider contracts — RESOLVED by Step 37 (Decimal
+  end to end, JSON numbers preserved on the wire).
 
 These issues are known and must NOT be fixed automatically.
 
@@ -1363,8 +1418,8 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–36 are complete, committed, and synced to origin/master (this
-checkpoint commit: "feat(mt5): add tenant-scoped mt5 sessions").
+Steps 12–37 are complete, committed, and synced to origin/master (this
+checkpoint commit: "feat(financial): harden numeric representation").
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
@@ -1396,9 +1451,6 @@ none may be started without an explicit instruction:
 - observability foundation: request IDs, structured logging, and a real
   readiness endpoint that reports database / MT5 / LLM availability separately
   from liveness (today /health is an unconditional ok)
-- money representation: balances, equity, profit and volume are still float
-  throughout the provider contracts; an exact representation should be decided
-  before more money-touching code lands
 - role-migration pre-flight: the broker_admin→super_admin migration aborts on
   the unique partial index if any broker holds more than one broker_admin
 - login tenant discriminator: usernames are unique per broker but login matches

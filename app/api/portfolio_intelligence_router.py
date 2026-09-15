@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from app.core.blocking import run_mt5_call
 from app.core.dependencies import get_current_user, get_portfolio_intelligence_service
 from app.db.models import User
+from app.api.numeric import DecimalAsNumber
 from app.services.portfolio_intelligence import PortfolioIntelligenceService
 
 router = APIRouter()
@@ -24,9 +25,10 @@ class SymbolExposureResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     symbol: str
-    buy_volume: float
-    sell_volume: float
-    net_volume: float
+    # Decimal in the contract, JSON numbers on the wire (unchanged format).
+    buy_volume: DecimalAsNumber
+    sell_volume: DecimalAsNumber
+    net_volume: DecimalAsNumber
     position_count: int
 
 
@@ -45,20 +47,22 @@ class PortfolioIntelligenceResponse(BaseModel):
     broker_id: int
     as_of: datetime
     account_currency: str
-    balance: float
-    equity: float
-    margin: float
-    free_margin: float
+    # Money and volume are Decimal in the contract, JSON numbers on the wire.
+    balance: DecimalAsNumber
+    equity: DecimalAsNumber
+    margin: DecimalAsNumber
+    free_margin: DecimalAsNumber
+    # A ratio, not money: float in the contract and float on the wire.
     margin_level: float
     open_positions: int
     buy_positions: int
     sell_positions: int
     symbols: list[str]
-    total_volume: float
-    buy_volume: float
-    sell_volume: float
+    total_volume: DecimalAsNumber
+    buy_volume: DecimalAsNumber
+    sell_volume: DecimalAsNumber
     # BUY volume minus SELL volume across all open positions.
-    directional_balance: float
+    directional_balance: DecimalAsNumber
     exposure: list[SymbolExposureResponse]
     risk: RiskAssessmentResponse
 

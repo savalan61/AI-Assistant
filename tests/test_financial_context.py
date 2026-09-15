@@ -7,6 +7,7 @@ additionally drives the real composition-root wiring with the provider seams
 patched, so no MT5 terminal is needed. No pytest asyncio plugin.
 """
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -32,10 +33,10 @@ AS_OF = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 ACCOUNT = AccountInfo(
     login=10001,
     name="Test Trader",
-    balance=10000.0,
-    equity=10050.0,
-    margin=250.0,
-    free_margin=9800.0,
+    balance=Decimal("10000.00"),
+    equity=Decimal("10050.00"),
+    margin=Decimal("250.00"),
+    free_margin=Decimal("9800.00"),
     margin_level=4020.0,
     currency="USD",
     server="Test-Server",
@@ -46,19 +47,19 @@ POSITIONS: tuple[Position, ...] = (
         ticket=123456789,
         symbol="XAUUSD",
         type=PositionType.BUY,
-        volume=0.10,
-        open_price=3642.50,
-        current_price=3648.20,
-        profit=57.00,
+        volume=Decimal("0.10"),
+        open_price=Decimal("3642.50"),
+        current_price=Decimal("3648.20"),
+        profit=Decimal("57.00"),
     ),
     Position(
         ticket=987654321,
         symbol="EURUSD",
         type=PositionType.SELL,
-        volume=1.00,
-        open_price=1.0850,
-        current_price=1.0820,
-        profit=-30.00,
+        volume=Decimal("1.00"),
+        open_price=Decimal("1.0850"),
+        current_price=Decimal("1.0820"),
+        profit=Decimal("-30.00"),
     ),
 )
 
@@ -68,13 +69,13 @@ TRADES: tuple[TradeHistoryEntry, ...] = (
         order_ticket=987654321,
         symbol="XAUUSD",
         type=TradeType.BUY,
-        volume=0.10,
-        price=3648.20,
-        profit=57.00,
+        volume=Decimal("0.10"),
+        price=Decimal("3648.20"),
+        profit=Decimal("57.00"),
         time=datetime(2026, 9, 14, 12, 30, 0, tzinfo=UTC),
         close_reason=None,
-        stop_loss=3635.00,
-        take_profit=3650.00,
+        stop_loss=Decimal("3635.00"),
+        take_profit=Decimal("3650.00"),
     ),
 )
 
@@ -197,7 +198,7 @@ def test_context_composes_account_positions_history_and_portfolio() -> None:
 def test_portfolio_intelligence_is_derived_from_the_same_snapshot() -> None:
     # A deliberately different provider value proves the portfolio component is
     # built from the reported account, not from a second, independent read.
-    account = ACCOUNT._replace(balance=555.0, margin_level=250.0)
+    account = ACCOUNT._replace(balance=Decimal("555.00"), margin_level=250.0)
     service, _, _, _ = make_service(account=account)
 
     context = service.build(broker_id=1, now=AS_OF)

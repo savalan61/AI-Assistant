@@ -1,22 +1,24 @@
+from datetime import UTC, datetime
+from decimal import Decimal
+
 from app.providers.trade_history import TradeHistoryEntry, TradeHistoryProvider, TradeType
 
 # Deterministic executed-trade history returned for every call; fixed values
 # keep tests repeatable (the FakePositionProvider pattern, applied to trade
-# history).
-from datetime import UTC, datetime
-
+# history). Money and volume are Decimal, exactly as the real MT5 provider
+# produces them.
 _FAKE_TRADE: TradeHistoryEntry = TradeHistoryEntry(
     ticket=246802468,
     order_ticket=987654321,
     symbol="XAUUSD",
     type=TradeType.BUY,
-    volume=0.10,
-    price=3648.20,
-    profit=57.00,
+    volume=Decimal("0.10"),
+    price=Decimal("3648.20"),
+    profit=Decimal("57.00"),
     time=datetime(2026, 9, 14, 12, 30, 0, tzinfo=UTC),
     close_reason=None,
-    stop_loss=3635.00,
-    take_profit=3650.00,
+    stop_loss=Decimal("3635.00"),
+    take_profit=Decimal("3650.00"),
 )
 
 

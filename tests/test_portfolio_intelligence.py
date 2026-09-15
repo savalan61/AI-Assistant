@@ -6,6 +6,7 @@ Position contracts; the service is exercised with a deterministic fake account
 provider plus the project's FakePositionProvider. No pytest asyncio plugin.
 """
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -27,10 +28,10 @@ AS_OF = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 
 def make_account(
     *,
-    balance: float = 10000.0,
-    equity: float = 10000.0,
-    margin: float = 0.0,
-    free_margin: float = 10000.0,
+    balance: Decimal = Decimal("10000.00"),
+    equity: Decimal = Decimal("10000.00"),
+    margin: Decimal = Decimal("0.00"),
+    free_margin: Decimal = Decimal("10000.00"),
     margin_level: float = 0.0,
     currency: str = "USD",
 ) -> AccountInfo:
@@ -47,15 +48,15 @@ def make_account(
     )
 
 
-def make_position(ticket: int, symbol: str, position_type: PositionType, volume: float) -> Position:
+def make_position(ticket: int, symbol: str, position_type: PositionType, volume: Decimal) -> Position:
     return Position(
         ticket=ticket,
         symbol=symbol,
         type=position_type,
         volume=volume,
-        open_price=1.0,
-        current_price=1.0,
-        profit=0.0,
+        open_price=Decimal("1.00"),
+        current_price=Decimal("1.00"),
+        profit=Decimal("0.00"),
     )
 
 
@@ -76,8 +77,8 @@ def test_no_positions_yields_a_flat_empty_portfolio() -> None:
 
 def test_only_buy_positions_are_counted_and_summed() -> None:
     positions = (
-        make_position(1, "XAUUSD", PositionType.BUY, 0.10),
-        make_position(2, "EURUSD", PositionType.BUY, 1.00),
+        make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),
+        make_position(2, "EURUSD", PositionType.BUY, Decimal("1.00")),
     )
 
     portfolio = build_portfolio_intelligence(make_account(), positions, AS_OF)
@@ -85,17 +86,17 @@ def test_only_buy_positions_are_counted_and_summed() -> None:
     assert portfolio.open_positions == 2
     assert portfolio.buy_positions == 2
     assert portfolio.sell_positions == 0
-    assert portfolio.buy_volume == pytest.approx(1.10)
+    assert portfolio.buy_volume == Decimal("1.10")
     assert portfolio.sell_volume == 0
-    assert portfolio.total_volume == pytest.approx(1.10)
+    assert portfolio.total_volume == Decimal("1.10")
     # Directional balance equals BUY volume minus SELL volume.
-    assert portfolio.directional_balance == pytest.approx(1.10)
+    assert portfolio.directional_balance == Decimal("1.10")
 
 
 def test_only_sell_positions_produce_a_negative_directional_balance() -> None:
     positions = (
-        make_position(1, "EURUSD", PositionType.SELL, 0.75),
-        make_position(2, "GBPUSD", PositionType.SELL, 0.25),
+        make_position(1, "EURUSD", PositionType.SELL, Decimal("0.75")),
+        make_position(2, "GBPUSD", PositionType.SELL, Decimal("0.25")),
     )
 
     portfolio = build_portfolio_intelligence(make_account(), positions, AS_OF)
@@ -103,14 +104,14 @@ def test_only_sell_positions_produce_a_negative_directional_balance() -> None:
     assert portfolio.buy_positions == 0
     assert portfolio.sell_positions == 2
     assert portfolio.buy_volume == 0
-    assert portfolio.sell_volume == pytest.approx(1.00)
-    assert portfolio.directional_balance == pytest.approx(-1.00)
+    assert portfolio.sell_volume == Decimal("1.00")
+    assert portfolio.directional_balance == Decimal("-1.00")
 
 
 def test_mixed_positions_split_by_direction() -> None:
     positions = (
-        make_position(1, "XAUUSD", PositionType.BUY, 0.10),
-        make_position(2, "EURUSD", PositionType.SELL, 1.00),
+        make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),
+        make_position(2, "EURUSD", PositionType.SELL, Decimal("1.00")),
     )
 
     portfolio = build_portfolio_intelligence(make_account(), positions, AS_OF)
@@ -118,17 +119,17 @@ def test_mixed_positions_split_by_direction() -> None:
     assert portfolio.open_positions == 2
     assert portfolio.buy_positions == 1
     assert portfolio.sell_positions == 1
-    assert portfolio.buy_volume == pytest.approx(0.10)
-    assert portfolio.sell_volume == pytest.approx(1.00)
-    assert portfolio.total_volume == pytest.approx(1.10)
-    assert portfolio.directional_balance == pytest.approx(0.10 - 1.00)
+    assert portfolio.buy_volume == Decimal("0.10")
+    assert portfolio.sell_volume == Decimal("1.00")
+    assert portfolio.total_volume == Decimal("1.10")
+    assert portfolio.directional_balance == Decimal("-0.90")
 
 
 def test_multiple_positions_for_the_same_symbol_aggregate_into_one_exposure() -> None:
     positions = (
-        make_position(1, "XAUUSD", PositionType.BUY, 0.10),
-        make_position(2, "XAUUSD", PositionType.BUY, 0.20),
-        make_position(3, "XAUUSD", PositionType.SELL, 0.05),
+        make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),
+        make_position(2, "XAUUSD", PositionType.BUY, Decimal("0.20")),
+        make_position(3, "XAUUSD", PositionType.SELL, Decimal("0.05")),
     )
 
     exposure = aggregate_exposure(positions)
@@ -136,17 +137,17 @@ def test_multiple_positions_for_the_same_symbol_aggregate_into_one_exposure() ->
     assert len(exposure) == 1
     entry = exposure[0]
     assert entry.symbol == "XAUUSD"
-    assert entry.buy_volume == pytest.approx(0.30)
-    assert entry.sell_volume == pytest.approx(0.05)
-    assert entry.net_volume == pytest.approx(0.25)
+    assert entry.buy_volume == Decimal("0.30")
+    assert entry.sell_volume == Decimal("0.05")
+    assert entry.net_volume == Decimal("0.25")
     assert entry.position_count == 3
 
 
 def test_multiple_symbols_produce_one_entry_each_in_symbol_order() -> None:
     positions = (
-        make_position(1, "XAUUSD", PositionType.BUY, 0.10),
-        make_position(2, "EURUSD", PositionType.SELL, 1.00),
-        make_position(3, "GBPUSD", PositionType.BUY, 0.50),
+        make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),
+        make_position(2, "EURUSD", PositionType.SELL, Decimal("1.00")),
+        make_position(3, "GBPUSD", PositionType.BUY, Decimal("0.50")),
     )
 
     portfolio = build_portfolio_intelligence(make_account(), positions, AS_OF)
@@ -157,9 +158,9 @@ def test_multiple_symbols_produce_one_entry_each_in_symbol_order() -> None:
 
 def test_symbols_currently_held_are_unique_and_sorted() -> None:
     positions = (
-        make_position(1, "XAUUSD", PositionType.BUY, 0.10),
-        make_position(2, "XAUUSD", PositionType.SELL, 0.10),
-        make_position(3, "EURUSD", PositionType.BUY, 0.10),
+        make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),
+        make_position(2, "XAUUSD", PositionType.SELL, Decimal("0.10")),
+        make_position(3, "EURUSD", PositionType.BUY, Decimal("0.10")),
     )
 
     portfolio = build_portfolio_intelligence(make_account(), positions, AS_OF)
@@ -168,7 +169,7 @@ def test_symbols_currently_held_are_unique_and_sorted() -> None:
 
 
 def test_zero_volume_positions_still_count_as_open_positions() -> None:
-    positions = (make_position(1, "XAUUSD", PositionType.BUY, 0.0),)
+    positions = (make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.0")),)
 
     exposure = aggregate_exposure(positions)
 
@@ -184,9 +185,9 @@ def test_zero_volume_positions_still_count_as_open_positions() -> None:
 
 
 def test_exposure_is_deterministic_regardless_of_input_order() -> None:
-    first = make_position(1, "XAUUSD", PositionType.BUY, 0.10)
-    second = make_position(2, "EURUSD", PositionType.SELL, 1.00)
-    third = make_position(3, "XAUUSD", PositionType.SELL, 0.20)
+    first = make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10"))
+    second = make_position(2, "EURUSD", PositionType.SELL, Decimal("1.00"))
+    third = make_position(3, "XAUUSD", PositionType.SELL, Decimal("0.20"))
 
     assert aggregate_exposure((first, second, third)) == aggregate_exposure((third, first, second))
 
@@ -199,7 +200,7 @@ def test_risk_is_flat_when_there_are_no_positions() -> None:
 
 
 def test_risk_is_unknown_when_open_positions_have_no_usable_margin_level() -> None:
-    positions = (make_position(1, "XAUUSD", PositionType.BUY, 0.10),)
+    positions = (make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),)
 
     assessment = classify_portfolio_risk(positions, margin_level=0.0)
 
@@ -219,7 +220,7 @@ def test_risk_is_unknown_when_open_positions_have_no_usable_margin_level() -> No
     ],
 )
 def test_risk_bands_follow_the_margin_level(margin_level: float, expected: PortfolioRiskLevel) -> None:
-    positions = (make_position(1, "XAUUSD", PositionType.BUY, 0.10),)
+    positions = (make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),)
 
     assessment = classify_portfolio_risk(positions, margin_level=margin_level)
 
@@ -228,7 +229,7 @@ def test_risk_bands_follow_the_margin_level(margin_level: float, expected: Portf
 
 
 def test_risk_basis_is_descriptive_and_never_predictive() -> None:
-    positions = (make_position(1, "XAUUSD", PositionType.BUY, 0.10),)
+    positions = (make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),)
 
     for margin_level in (600.0, 250.0, 50.0, 0.0):
         basis = classify_portfolio_risk(positions, margin_level=margin_level).basis.lower()
@@ -250,10 +251,10 @@ def test_risk_basis_is_descriptive_and_never_predictive() -> None:
 
 def test_account_fields_pass_through_unmodified() -> None:
     account = make_account(
-        balance=25000.0,
-        equity=25120.5,
-        margin=500.0,
-        free_margin=24620.5,
+        balance=Decimal("25000.0"),
+        equity=Decimal("25120.5"),
+        margin=Decimal("500.0"),
+        free_margin=Decimal("24620.5"),
         margin_level=5024.1,
         currency="EUR",
     )
@@ -298,8 +299,8 @@ def make_service(
 
 def test_service_combines_account_and_positions() -> None:
     positions = (
-        make_position(1, "XAUUSD", PositionType.BUY, 0.10),
-        make_position(2, "EURUSD", PositionType.SELL, 0.40),
+        make_position(1, "XAUUSD", PositionType.BUY, Decimal("0.10")),
+        make_position(2, "EURUSD", PositionType.SELL, Decimal("0.40")),
     )
     service, account_provider, position_provider = make_service(make_account(), positions)
 
@@ -308,9 +309,9 @@ def test_service_combines_account_and_positions() -> None:
     assert account_provider.call_count == 1
     assert position_provider.call_count == 1
     assert portfolio.open_positions == 2
-    assert portfolio.buy_volume == pytest.approx(0.10)
-    assert portfolio.sell_volume == pytest.approx(0.40)
-    assert portfolio.directional_balance == pytest.approx(-0.30)
+    assert portfolio.buy_volume == Decimal("0.10")
+    assert portfolio.sell_volume == Decimal("0.40")
+    assert portfolio.directional_balance == Decimal("-0.30")
 
 
 def test_service_normalizes_the_reference_time_to_utc() -> None:
