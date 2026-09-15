@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
 from app.db.models import User, UserRole
@@ -11,17 +12,25 @@ from app.providers import (
     AccountInfoProvider,
     EconomicCalendarProvider,
     FakeEconomicCalendarProvider,
-    FakeLLMProvider,
+    LLMProvider,
+    LLMProviderPool,
+    LLMRouter,
     MT5AccountInfoProvider,
     MT5MarketDataProvider,
     MT5PositionProvider,
     MT5TradeHistoryProvider,
     MarketDataProvider,
+    OpenAICompatibleLLMProvider,
     PositionProvider,
     TradeHistoryProvider,
 )
 from app.services.account import AccountInfoService
-from app.services.agent import AgentService
+from app.services.agent import AgentService, AgentUsageLimiter
+from app.services.broker_llm_config import (
+    BrokerLLMConfigurationError,
+    LLMConnectionTester,
+    resolve_broker_llm_provider,
+)
 from app.services.economic_calendar import EconomicCalendarService
 from app.services.economic_intelligence import EconomicIntelligenceService
 from app.services.financial_context import FinancialContextService
@@ -205,19 +214,92 @@ def get_portfolio_intelligence_service() -> PortfolioIntelligenceService:
     )
 
 
-# Agent wiring. The LLM provider is the deterministic FakeLLMProvider: the
-# placeholder implementation until a real model adapter is selected, so no API
-# key or vendor configuration exists and tests stay offline. The financial
-# context flows through the single existing architecture below.
-def get_agent_service() -> AgentService:
-    return AgentService(
-        financial_context_service=FinancialContextService(
-            account_service=get_account_info_service(),
-            position_service=get_position_service(),
-            trade_history_service=get_trade_history_service(),
-        ),
-        llm_provider=FakeLLMProvider(),
+# Agent LLM wiring. The production seam is the broker-aware router: a broker
+# with an active configuration uses its own provider, and a broker without one
+# uses the shared free pool. The router is built per request because the tenant
+# — and therefore the provider — differs per authenticated broker.
+#
+# Tests override this seam (deps.get_llm_provider) with the deterministic
+# FakeLLMProvider, keeping the suite offline and AgentService unchanged.
+def get_free_llm_pool() -> LLMProvider:
+    """The shared system fallback pool used when a broker has no active provider.
+
+    Providers are tried in order, falling through only on transient failures.
+    Today the pool holds at most the deployment-level OpenAI-compatible
+    endpoint from settings (the operator's own provider); real free-tier
+    providers are appended here later. An absent or unusable deployment
+    endpoint simply leaves the pool empty, which fails safely (503) rather than
+    ever inventing an answer.
+    """
+    providers: list[LLMProvider] = []
+    if settings.LLM_API_KEY.strip() and settings.LLM_MODEL.strip():
+        try:
+            providers.append(
+                OpenAICompatibleLLMProvider(
+                    api_key=settings.LLM_API_KEY,
+                    base_url=settings.LLM_BASE_URL,
+                    model=settings.LLM_MODEL,
+                    timeout_seconds=settings.LLM_TIMEOUT_SECONDS,
+                )
+            )
+        except RuntimeError:
+            # A placeholder/blank credential counts as "not configured": the
+            # pool stays empty and the request fails safely with 503.
+            providers = []
+    return LLMProviderPool(providers)
+
+
+async def get_llm_provider(broker_id: int, session: AsyncSession) -> LLMProvider:
+    """Resolve the production LLM seam for one broker (composition boundary).
+
+    ``broker_id`` comes from the authenticated database user, never from a
+    request body. A broker whose active configuration exists but cannot be used
+    fails safely here, so its traffic never silently moves onto the shared free
+    pool; a broker with no active configuration gets the free pool.
+    """
+    try:
+        broker_provider = await resolve_broker_llm_provider(session=session, broker_id=broker_id)
+    except BrokerLLMConfigurationError:
+        raise HTTPException(status_code=503, detail="Agent service temporarily unavailable")
+    return LLMRouter(
+        broker_id=broker_id,
+        broker_provider=broker_provider,
+        free_pool=get_free_llm_pool(),
     )
+
+
+# Per-user daily usage limiting is process-wide state by its documented nature
+# (in-process counters, reset on restart): one limiter per process, lazily
+# built from settings behind the same lock-guarded pattern as the MT5 provider
+# caches. The daily limit comes from configuration, never hard-coded.
+_agent_usage_limiter: AgentUsageLimiter | None = None
+_agent_usage_limiter_lock = threading.Lock()
+
+
+def get_agent_usage_limiter() -> AgentUsageLimiter:
+    global _agent_usage_limiter
+    if _agent_usage_limiter is None:
+        with _agent_usage_limiter_lock:
+            if _agent_usage_limiter is None:
+                _agent_usage_limiter = AgentUsageLimiter(settings.AGENT_DAILY_REQUEST_LIMIT)
+    return _agent_usage_limiter
+
+
+def reset_agent_usage_limiter() -> None:
+    # Test/development seam: drop the process-wide limiter so the next request
+    # rebuilds it from current settings. Never called in production flow.
+    global _agent_usage_limiter
+    with _agent_usage_limiter_lock:
+        _agent_usage_limiter = None
+
+
+def get_llm_connection_tester() -> LLMConnectionTester:
+    # Stateless and cheap: no process-wide cache, because it holds no
+    # connection and no credentials — each check builds a short-lived provider
+    # around the broker's own (already decrypted) configuration.
+    return LLMConnectionTester()
+
+
 
 
 # Bearer scheme for HTTP authentication. auto_error=False lets this dependency
@@ -305,3 +387,27 @@ async def get_current_super_admin(
     if current_user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin privileges required")
     return current_user
+
+
+async def get_agent_service(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> AgentService:
+    """Composition root for POST /agent.
+
+    Declared after the authentication boundary because it depends on the
+    authenticated user: the broker's own LLM configuration is resolved from
+    that user's broker (never from the request body), and a broker with no
+    active configuration uses the shared free pool. The financial context keeps
+    flowing through the single existing MT5 composition architecture below, so
+    AgentService depends on LLMProvider alone.
+    """
+    llm_provider = await get_llm_provider(current_user.broker_id, session)
+    return AgentService(
+        financial_context_service=FinancialContextService(
+            account_service=get_account_info_service(),
+            position_service=get_position_service(),
+            trade_history_service=get_trade_history_service(),
+        ),
+        llm_provider=llm_provider,
+    )

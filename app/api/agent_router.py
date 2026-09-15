@@ -5,15 +5,21 @@ answered from their current read-only financial context through the injected
 LLM provider. Strictly read-only: no trading tool, no order action, and no
 mutation exists behind this endpoint, and the agent layer itself cannot trade.
 """
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.blocking import run_mt5_call
-from app.core.dependencies import get_agent_service, get_current_user
+from app.core.dependencies import get_agent_service, get_agent_usage_limiter, get_current_user
 from app.db.models import User
-from app.services.agent import AgentService
+from app.services.agent import (
+    AgentService,
+    AgentUsageLimiter,
+    UsageLimitExceededError,
+    check_scope,
+)
+from app.services.agent.scope import ScopeDecision
 from app.services.financial_context import DEFAULT_TRADE_HISTORY_DAYS
 
 router = APIRouter()
@@ -134,9 +140,10 @@ class AgentResponse(BaseModel):
     # Tenant identity of the authenticated user, read from the database record —
     # never from the request or a token claim.
     broker_id: int
-    # The text the injected LLM provider returned, unchanged. The wired provider
-    # is the deterministic FakeLLMProvider development placeholder, so answers
-    # are labelled placeholder text until a real model adapter is connected.
+    # The text the injected LLM provider returned, unchanged. Production wiring
+    # selects the OpenAI-compatible adapter from settings and is unavailable
+    # (503) until the key/model are configured; the fake remains the explicit
+    # test/development provider.
     answer: str
     # The read-only financial context the answer was resolved against.
     context: FinancialContextResponse
@@ -152,7 +159,23 @@ async def handle_agent_message(
     # Tenant identity stays with the database-backed User.
     current_user: User = Depends(get_current_user),
     service: AgentService = Depends(get_agent_service),
+    limiter: AgentUsageLimiter = Depends(get_agent_usage_limiter),
 ) -> AgentResponse:
+    # Guard chain, cheapest checks first, in this exact order:
+    # 1. Scope: a deterministic financial-scope classification — no LLM, no I/O.
+    # 2. Usage limit: per-user daily quota, keyed by the authenticated user.
+    # 3. Context + LLM: the blocking financial read, off the event loop.
+    #    Rejections at steps 1–2 never read the context or call the LLM.
+    decision = check_scope(payload.message)
+    if decision is ScopeDecision.REJECT:
+        raise HTTPException(status_code=422, detail="Request is outside the assistant's financial scope")
+
+    try:
+        limiter.check_and_consume(current_user.broker_id, current_user.id, datetime.now(UTC))
+    except UsageLimitExceededError:
+        # Generic message: no counters, identities or internals are exposed.
+        raise HTTPException(status_code=429, detail="Daily agent request limit reached")
+
     # The agent reads the financial context (blocking MT5), so the whole call is
     # offloaded through the consolidated MT5 blocking boundary. RuntimeError
     # means an MT5/LLM infrastructure failure (server error 503); the generic

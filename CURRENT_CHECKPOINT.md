@@ -2,41 +2,44 @@
 
 ## Current Status
 
-Step 27 — LLM Provider Abstraction (with Step 26 — AI Agent Boundary)
+Step 33 — LLM Router + Free LLM Pool
+(with Steps 28–32: Agent HTTP Endpoint, Real LLM Adapter, LLM DI Wiring,
+Agent Scope Guard + Per-User Daily Limit, Broker LLM Configuration)
 
 Status:
 
 VERIFIED + COMMITTED + SYNCED
 
-Implementation commit:
+Checkpoint commit:
 
-ecfc800 ("feat(ai): add agent and llm provider boundary")
-(full hash: ecfc8004796fc789e26f2cfea1cd80944c5375f0)
+"feat(ai): add broker llm routing and agent controls" — Steps 29–33 and this
+document update are committed together in this single checkpoint commit.
+The prior synced checkpoint is 5506fa9 ("feat(ai): add agent http endpoint",
+Step 28).
 
-Steps 23 (Economic Intelligence), 24 (Portfolio Intelligence), 25 (Financial
-Context), 26 (AI Agent Boundary) and 27 (LLM Provider Abstraction) are all
-verified, committed and synced.
+Steps 28 (Agent HTTP Endpoint), 29 (Real LLM Adapter), 30 (LLM DI Wiring),
+31 (Agent Scope Guard + Per-User Daily Limit), 32 (Broker LLM Configuration)
+and 33 (LLM Router + Free LLM Pool) are all verified, committed and synced.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 394 passed, 3 warnings (pre-existing third-party
-deprecation warnings); verified 2026-09-15 on the exact committed tree
+pytest tests/ -q → 574 passed, 3 warnings (pre-existing third-party
+deprecation warnings); verified 2026-09-15 on this exact tree
 
-Static verification: python -m compileall app scripts tests → clean.
+Static verification: python -m compileall app tests alembic → clean.
 git diff --check → clean.
 Direct Pylance/pyright execution remains unavailable in this environment
-(as recorded for Steps 8–25); a focused manual static/type review was
-performed for Steps 23–27 instead. No type suppressions were used.
+(as recorded for Steps 8–33); a focused manual static/type review was
+performed for Steps 28–33 instead. No type suppressions were used.
 
-No trading functionality was added or changed in Steps 23–27; all MT5 read
-behavior is untouched.
+No trading functionality was added or changed in Steps 28–33; all MT5 read
+behavior is untouched. The AI remains strictly READ-ONLY.
 
-Working tree at the Step 27 commit:
+Working tree after this checkpoint:
 
 CLEAN
 
-Local HEAD and origin/master both point at ecfc800. (This checkpoint
-document update is the only change pending after that commit.)
+Local HEAD and origin/master both point at this checkpoint commit.
 
 ## Completed Stages
 
@@ -326,6 +329,165 @@ Includes:
 - no real LLM is connected and no HTTP agent endpoint exists yet
 - 10 focused tests; combined Steps 26+27 suite 394 passed
 
+### Step 28 — Agent HTTP Endpoint (READ-ONLY)
+Status: VERIFIED + COMMITTED (5506fa9)
+
+Includes:
+
+- POST /agent in app/api/agent_router.py: the single authenticated HTTP
+  surface for the agent capability
+- AgentRequest (extra="forbid"): message (required, min length 1) and optional
+  trade_history_days (>= 1, default 30); there is no broker_id/user_id field,
+  so a supplied one is a 422 — tenant scope cannot be redirected
+- response: request (echoed verbatim), broker_id (from the authenticated
+  database User), answer, and the read-only context (account, positions,
+  trade_history, portfolio_intelligence) projected through explicit Pydantic
+  schemas that mirror the existing endpoints
+- account identity (login/holder/server) is omitted from the response, the
+  same fields the LLM prompt deliberately excludes
+- blocking MT5 work is offloaded through the consolidated run_mt5_call
+  boundary; a RuntimeError from the MT5/LLM infrastructure becomes a generic
+  503 and unexpected exceptions propagate
+- no real LLM was connected at this step; the fake provider was injected
+- 22 focused tests
+
+### Step 29 — Real LLM Adapter
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- OpenAICompatibleLLMProvider in app/providers/openai_compatible_llm.py: the
+  production counterpart to FakeLLMProvider, implementing the existing
+  LLMProvider contract against any server exposing the OpenAI-compatible
+  POST {base_url}/chat/completions shape (vendor-agnostic: no vendor SDK)
+- configuration from settings — LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
+  LLM_TIMEOUT_SECONDS; nothing hard-coded, and the key is never logged or
+  embedded in an exception message
+- uses httpx, already present in the dependency tree (starlette's TestClient
+  depends on it); the HTTP transport is injectable (httpx.MockTransport in
+  tests), so the suite stays fully offline
+- fail-closed construction: a blank/placeholder key or an empty model raises
+  RuntimeError before any network call
+- failure translation at the provider boundary into RuntimeError, preserving
+  the existing API 503 behavior; a successful status with an unusable body is
+  an error, never fabricated text; no payload or credential is echoed
+- 28 focused tests
+
+### Step 30 — LLM DI Wiring
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- the production LLM composition seam (deps.get_llm_provider) selects the
+  real adapter from Settings; the fake is never the production provider
+- missing/invalid LLM configuration fails closed with 503 instead of silently
+  degrading to a placeholder answer
+- tests override the seam (deps.get_llm_provider) with the deterministic
+  FakeLLMProvider, so no API test constructs the HTTP adapter or opens a
+  socket
+- AgentService remains provider-agnostic: it depends on LLMProvider only
+- focused composition-root wiring tests
+
+### Step 31 — Agent Scope Guard + Per-User Daily Limit
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- app/services/agent/scope.py: check_scope(message) → ScopeDecision, a
+  deterministic whitelist-first financial-scope classification (account,
+  balance, equity, margin, positions, trades, P&L, risk/exposure, market,
+  technical, fundamental, news, economic topics). No LLM is used to classify
+  and no agent framework was introduced
+- a small blocklist of clearly off-topic asks (image generation, jokes,
+  story/movie/poem writing, generic coding, essays, translation, recipes,
+  workouts); ambiguous short talk is allowed by design, and a financial
+  question wins over an incidental off-topic word
+- app/services/agent/usage.py: AgentUsageLimiter — a per
+  (broker_id, user_id, UTC day) counter, in-process and lock-guarded; the
+  daily maximum comes from AGENT_DAILY_REQUEST_LIMIT (settings, never
+  hard-coded)
+- enforced order: authenticated user → scope guard → usage limit →
+  FinancialContextService → LLM; rejections happen before any context read or
+  LLM call, and a rejected request consumes no quota
+- out-of-scope request → 422 ("Request is outside the assistant's financial
+  scope"); limit exceeded → 429 ("Daily agent request limit reached"), both
+  generic and exposing no counters or internals
+- in-process only: no Redis, no database table, no billing, no token
+  accounting, no distributed limiting (see known issue 10)
+- 21 scope tests + 13 usage tests, plus API integration tests
+
+### Step 32 — Broker LLM Configuration (Super Admin)
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- BrokerLLMConfig (app/db/models/broker_llm_config.py): one configuration per
+  broker enforced by a database UNIQUE constraint on broker_id, plus a CHECK
+  constraint allowing only implemented provider kinds; columns: provider kind,
+  model, base_url, encrypted API key, is_active, created_at/updated_at
+- Alembic migration b1f7c9d24e08_add_broker_llm_config (current single head),
+  verified to render the correct PostgreSQL DDL and to apply and roll back
+  cleanly on SQLite
+- app/core/encryption.py: Fernet (cryptography) authenticated symmetric
+  encryption — encrypt_secret / decrypt_secret / generate_encryption_key /
+  EncryptionError. The key comes from SECRET_ENCRYPTION_KEY (environment) and
+  is never hard-coded; the utility fails closed with no usable key; nothing
+  logs, returns or echoes the key, plaintext or ciphertext. No crypto is
+  hand-rolled
+- GET /broker/llm-config (super_admin only) → provider, model, base_url,
+  is_active, api_key_set, updated_at; the API key is never returned; 404 when
+  no configuration exists for the authenticated broker
+- PUT /broker/llm-config (super_admin only) → create-or-update upsert; a
+  broker_id/role in the body is a 422; 503 when encryption is unavailable;
+  409 on a concurrent-create constraint race
+- POST /broker/llm-config/test (super_admin only) → status OK|FAILED with
+  provider/model and a safe detail; 404 unset, 409 disabled, 503 undecryptable
+  credential; the connection check runs through the existing LLMProvider
+  boundary
+- authorization: super_admin may manage its own broker's configuration;
+  admin/customer → 403; unauthenticated → 401; broker_id is the authenticated
+  super_admin's only, so cross-broker read/modify is impossible
+- 42 focused tests (including encryption unit tests); no trading operation is
+  involved
+
+### Step 33 — LLM Router + Free LLM Pool
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- LLMRouter (app/providers/llm_router.py): a broker-aware LLMProvider.
+  Policy: a broker with an ACTIVE configuration always uses its own provider,
+  and a failure there raises a safe RuntimeError and never silently consumes
+  the shared free pool; a broker with no active configuration uses the free
+  pool. The router performs selection only — it holds no credential, never
+  logs or returns a key, and imports no FastAPI/SQLAlchemy/MT5 or financial
+  logic
+- LLMProviderPool (app/providers/llm_pool.py): an ordered provider pool that
+  falls through to the next provider only on LLMFallbackError, stops
+  immediately on any other RuntimeError, and raises one generic
+  "no LLM provider is currently available" when exhausted (not itself
+  fallback-eligible). An empty pool is valid and fails safely at call time
+- LLMFallbackError(RuntimeError) in app/providers/llm.py: the single,
+  explicitly designated fallback-eligible failure (transient only)
+- adapter error classification: transport failures, timeouts, 429 and 5xx →
+  LLMFallbackError; authentication (401/403), malformed body and empty text →
+  plain RuntimeError
+- resolve_broker_llm_provider
+  (app/services/broker_llm_config/broker_llm_provider_resolver.py): resolves a
+  broker's active provider by broker_id (from the authenticated user, never a
+  request body); decrypts the stored key only here, only when needed; returns
+  None when no active configuration exists; raises
+  BrokerLLMConfigurationError when an active configuration cannot be used, so
+  the caller fails safely instead of silently falling back
+- production seam: get_llm_provider(broker_id, session) returns
+  LLMRouter(broker_provider=resolved-or-None, free_pool=get_free_llm_pool());
+  get_free_llm_pool() holds at most the deployment-level OpenAI-compatible
+  endpoint from Settings and is empty until one is configured
+- no real free-tier provider was integrated; FakeFreeLLMProvider (a
+  deterministic offline test double) exercises the pool's ordering and
+  fallback completely offline
+- 33 focused tests (pool 9, router/resolver 14, composition-root wiring 10)
+
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
 
@@ -593,7 +755,13 @@ FinancialContext (account + positions + trade_history +
 
 ## Current Agent Flow
 
-caller (no HTTP endpoint yet)
+Authenticated user (broker_id comes from the database User, never the request)
+    ↓
+POST /agent (Agent API)
+    ↓
+Scope Guard — deterministic financial-scope classification (reject → 422)
+    ↓
+Usage Limiter — per-user daily quota, in-process (exceeded → 429)
     ↓
 AgentService (app/services/agent/)
     ↓
@@ -601,11 +769,15 @@ FinancialContextService → FinancialContext (existing flows above)
     ↓
 build_prompt(request, context) → LLMPrompt (agent layer; identity omitted)
     ↓
+LLMRouter (broker-aware selection)
+    ├── broker's own configured LLM (BrokerLLMConfig) when active
+    │       └── failure → safe 503; never falls back to the free pool
+    └── shared Free LLM Pool when the broker has no active configuration
+            └── falls through only on LLMFallbackError; empty pool fails safely
+    ↓
 LLMProvider.complete(prompt) → answer text
     ↓
-FakeLLMProvider (current implementation — no real model connected)
-    ↓
-AgentResponse (request + broker_id + context + answer)
+AgentResponse (request + broker_id + answer + context) → 200
 
 ## Positions API Contract
 
@@ -739,17 +911,74 @@ no endpoint exists. The trade-history window is configurable and defaults to
 authenticated database user. It remains the single source of financial data
 for the agent layer.
 
-## Agent / LLM Boundary (internal capability — no HTTP endpoint)
+## Agent / LLM Boundary (HTTP surface: POST /agent)
 
+POST /agent is the single authenticated HTTP surface for the agent. The router
+enforces the guard chain (scope → quota) before any context read or LLM call.
 AgentService orchestrates FinancialContextService and an injected LLMProvider;
 it computes no finance of its own. The LLMProvider contract is vendor-neutral
-(one synchronous complete(prompt) -> str over a provider-neutral LLMPrompt),
-and FakeLLMProvider is its current and only implementation: a deterministic,
-offline development/test placeholder whose output must never be presented as a
-real model answer. No real LLM, no HTTP agent endpoint, no agent framework
-(LangChain/LangGraph or similar), and no trading tool exists in the agent
-layer. Failures from the context service or the provider propagate unchanged
-to the caller's boundary.
+(one synchronous complete(prompt) -> str over a provider-neutral LLMPrompt).
+The production provider is the broker-aware LLMRouter: a broker with an active
+BrokerLLMConfig uses its own OpenAI-compatible provider, and a broker without
+one uses the shared Free LLM Pool. Production selection is built from
+configuration through the composition root; FakeLLMProvider (deterministic and
+offline) remains the explicit test/development provider and is never the
+production choice, and FakeFreeLLMProvider is the offline test double for the
+pool. No agent framework (LangChain/LangGraph or similar) is used, and no
+trading tool exists anywhere in the agent layer. Failures from the context
+service or the provider propagate to the caller's boundary and become a
+generic 503 — no credential, endpoint or upstream detail is leaked.
+
+## Agent API Contract
+
+POST /agent (any authenticated user) — request body:
+
+    {"message": "What is my exposure?", "trade_history_days": 30}
+
+→ 200:
+
+    {
+      "request": "What is my exposure?",
+      "broker_id": 1,
+      "answer": "...",
+      "context": {
+        "as_of": "2026-09-15T12:00:00Z",
+        "account": {"currency": "USD", ...},
+        "positions": [ ... ],
+        "trade_history": [ ... ],
+        "portfolio_intelligence": { ... }
+      }
+    }
+
+- message is required (min length 1); trade_history_days is optional (>= 1,
+  default 30); extra fields — including broker_id/user_id — are a 422, so
+  tenant scope cannot be redirected.
+- enforced order: scope guard → usage limit → context read → LLM.
+- out-of-scope request → 422; daily limit exceeded → 429; unauthenticated →
+  401; MT5/LLM infrastructure failure (RuntimeError) → 503 with a generic
+  detail.
+- broker_id is the authenticated database User's, never from the request.
+- account identity (login, holder name, server) is omitted from the response.
+
+## Broker LLM Configuration API Contract
+
+Super Admin only, under /broker/llm-config; the API key is never returned:
+
+- GET /broker/llm-config → 200
+
+      {"provider": "openai_compatible", "model": "...", "base_url": "...",
+       "is_active": true, "api_key_set": true, "updated_at": "..."}
+
+  404 when no configuration exists for the authenticated broker.
+- PUT /broker/llm-config → 200 (create or update, upsert); body
+  {provider, model, base_url, api_key} — broker_id/role fields are a 422. The
+  key is stored as Fernet ciphertext; 503 if encryption is unavailable; 409 on
+  a concurrent-create constraint race.
+- POST /broker/llm-config/test → 200
+  {"status": "OK"|"FAILED", "provider": "...", "model": "...", "detail": "..."}; 404 unset,
+  409 disabled, 503 undecryptable credential.
+- authorization: super_admin → allowed; admin/customer → 403; unauthenticated
+  → 401; a broker can only ever read or modify its own configuration.
 
 ## Users API Contract
 
@@ -839,26 +1068,51 @@ GET /users (super_admin or admin; role-based visibility):
   internal read-only capability with no HTTP endpoint.
 - Agent boundary (AgentService + AgentResponse in app/services/agent/) exists
   and is read-only: it orchestrates FinancialContextService and an injected
-  LLMProvider, and adds no HTTP endpoint.
+  LLMProvider.
+- POST /agent exposes the agent over HTTP (authenticated; broker_id from the
+  database User; no broker_id/user_id accepted in the body) and is read-only.
+- Agent guard chain exists and is enforced in this order: scope guard
+  (deterministic, no LLM) → per-user daily usage limit → context read → LLM.
+- The agent scope guard rejects clearly non-financial requests (422) without
+  reading the context or calling the LLM; the in-process, configuration-driven
+  daily limit rejects over-quota requests (429) in the same way, and a rejected
+  request consumes no quota.
 - LLM provider boundary (LLMPrompt/LLMProvider in app/providers/llm.py) exists
-  and is vendor-neutral; FakeLLMProvider is its current and only
-  implementation (deterministic offline placeholder — not a real model).
-- No real LLM is connected; no HTTP agent endpoint exists; no agent framework
-  is used; no trading tool exists in the agent layer.
+  and is vendor-neutral; implementations are FakeLLMProvider (test/development),
+  FakeFreeLLMProvider (offline test double for the pool) and
+  OpenAICompatibleLLMProvider (production, settings-driven).
+- A real LLM adapter exists and is configured from Settings (LLM_API_KEY,
+  LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS); it fails closed when the key
+  or model is missing/invalid and never logs or returns the key.
+- Broker LLM configuration exists: one configuration per broker (database
+  UNIQUE) with the API key encrypted at rest via Fernet; only the broker's
+  super_admin can read or change it, and the key is never returned by any API.
+- LLMRouter exists: a broker with an active configuration uses its own
+  provider, and a broker failure never silently falls back to the free pool;
+  a broker with no active configuration uses the shared Free LLM Pool, whose
+  providers fall through only on LLMFallbackError.
+- The Free LLM Pool is currently empty until a deployment-level
+  OpenAI-compatible endpoint is configured; no real free-tier provider has been
+  integrated yet (see known issue 11).
+- No agent framework (LangChain/LangGraph or similar) is used, and no trading
+  tool exists in the agent or LLM layer.
 - No price prediction, BUY/SELL recommendation or trading action is produced
-  by any intelligence endpoint or the agent boundary.
-- Steps 18–27 are committed and pushed to origin/master (latest: ecfc800).
-- Test suite verified 2026-09-15 on the exact committed tree: pytest tests/ -q → 394 passed, 3 warnings.
+  by any intelligence endpoint or the agent.
+- Steps 18–33 are committed and pushed to origin/master (this checkpoint
+  commit: "feat(ai): add broker llm routing and agent controls"; the prior
+  synced commit was 5506fa9).
+- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 574 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean; the latest implementation commit (ecfc800) has been pushed/synced to origin/master (local HEAD == origin/master).
+- Working tree is clean; this checkpoint commit has been pushed/synced to
+  origin/master (local HEAD == origin/master).
 
 Static/type verification:
 
 Direct Pylance/pyright execution was not available in the environment for any of
-Steps 8–27. Manual static/type reviews were performed instead. This limitation
+Steps 8–33. Manual static/type reviews were performed instead. This limitation
 must be reported rather than hidden.
 
 ## Known Issues (current)
@@ -887,6 +1141,19 @@ must be reported rather than hidden.
    ready for a suitable source; selecting one is an open architectural
    decision. (This is a new numbered item; the former item 9, the MT5
    blocking-call debt, remains resolved below.)
+10. Agent usage limiting is in-process only: a lock-guarded counter in this
+    process's memory, keyed by (broker_id, user_id, UTC day). Counters reset on
+    restart and are not shared across workers. This is intentional for the
+    current single-process development architecture; distributed production
+    limiting is future work and must not be added (no Redis, no database
+    limiter) without an explicit decision.
+11. The shared Free LLM Pool is empty until a deployment-level OpenAI-compatible
+    endpoint (LLM_API_KEY/LLM_MODEL) is configured, and no real free-tier
+    provider has been integrated. With neither a broker configuration nor a
+    deployment endpoint, POST /agent fails safely with 503. Provider pool
+    ordering, health and quota monitoring are future work.
+12. Broker LLM configuration has no audit trail (who changed what, and when)
+    and no API-key rotation flow (re-encrypting existing rows under a new key).
 
 Resolved:
 
@@ -902,19 +1169,30 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–27 are complete, committed (ecfc800), and synced to origin/master.
+Steps 12–33 are complete, committed, and synced to origin/master (this
+checkpoint commit: "feat(ai): add broker llm routing and agent controls").
 
-The next logical areas, in no committed order, are:
+The following are DEFERRED FUTURE WORK only. None of them is implemented, and
+none may be started without an explicit instruction:
 
-- an HTTP surface for the agent/financial context, if a consumer is defined
-  (deliberately kept internal through Step 27)
-- a real LLM vendor adapter behind LLMProvider (configuration injected from
-  settings; keys never in the repository; FakeLLMProvider stays the test
-  default) — the model output must remain read-only and non-advisory
+- real free LLM provider integrations: wire one or more genuine free-tier
+  OpenAI-compatible providers into the shared pool (the abstraction is ready;
+  the pool is empty today)
+- free-provider pool configuration/order: make the pool's membership and order
+  operator-configurable rather than a single deployment endpoint
+- provider health/quota monitoring, and automatic quota/credential status:
+  report sanely — without leaking secrets — whether a provider is usable
+- distributed production usage limiting: replace the in-process agent limit
+  with a shared mechanism once multi-worker/production deployment is designed
+  (known issue 10)
+- LLM configuration audit trail: record who changed a broker's LLM settings and
+  when (known issue 12)
+- API-key rotation: a controlled re-encryption flow for stored broker
+  credentials (known issue 12)
+- the economic calendar production data source (known issue 9) — still required
+  before economic intelligence can carry real data
 - prompt safety screening before generation (deterministic refusal of
   trading-instruction requests) — a deliberate decision, not yet started
-- the economic calendar production data source (known issue 9) — required
-  before economic intelligence can carry real data
 - tenant-scoped MT5 design (known issue 1)
 - remaining known issues (IPC timeout, /health MT5 readiness, multi-worker
   semantics, candle UTC review, last_error robustness, Windows dependency,
@@ -925,13 +1203,14 @@ Do NOT implement any next step until explicitly instructed.
 When instructed, begin by inspecting the existing provider abstractions
 (app/providers/position.py, app/providers/trade_history.py,
 app/providers/account_info.py, app/providers/economic_calendar.py,
-app/providers/llm.py, app/providers/market_data.py), the MT5
-providers, the consolidated blocking
-boundary (app/core/blocking.py), the intelligence services
-(app/services/economic_intelligence/, app/services/portfolio_intelligence/,
-app/services/financial_context/), the agent boundary
-(app/services/agent/), and the composition root
-(app/core/dependencies.py).
+app/providers/llm.py, app/providers/llm_pool.py, app/providers/llm_router.py,
+app/providers/openai_compatible_llm.py, app/providers/market_data.py), the MT5
+providers, the consolidated blocking boundary (app/core/blocking.py), the
+intelligence services (app/services/economic_intelligence/,
+app/services/portfolio_intelligence/, app/services/financial_context/), the
+agent boundary and its guard chain (app/services/agent/), the broker LLM
+configuration service and resolver (app/services/broker_llm_config/), and the
+composition root (app/core/dependencies.py).
 
 ## Architectural Guardrails
 

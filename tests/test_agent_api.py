@@ -5,9 +5,10 @@ LLM. The get_db dependency is overridden with a per-test file-based async
 SQLite database; the REAL authentication dependency runs (real JWT decode +
 real database lookup). The account-info, positions and trade-history
 composition-root seams are patched with deterministic fakes (the established
-lifecycle-test pattern), so no MT5 terminal is needed. The wired LLM provider
-is the real FakeLLMProvider (deterministic, offline). JWT config uses
-test-only values; async setup is driven with asyncio.run.
+lifecycle-test pattern), so no MT5 terminal is needed. The LLM composition
+seam (deps.get_llm_provider) is overridden with the real FakeLLMProvider
+(deterministic, offline), so no network call and no API key are involved.
+JWT config uses test-only values; async setup is driven with asyncio.run.
 """
 import asyncio
 import threading
@@ -158,6 +159,17 @@ def make_fake_trade_provider_class(
     return FakeMT5TradeHistoryProvider, call_threads, windows
 
 
+class FailingLLMProvider(FakeLLMProvider):
+    """Deterministic fake whose complete() raises, simulating LLM failure."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self._error = error
+
+    def complete(self, prompt: object) -> str:
+        raise self._error
+
+
 @pytest.fixture(autouse=True)
 def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_settings, "SECRET_KEY", TEST_SECRET, raising=True)
@@ -166,13 +178,14 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def patched_providers(monkeypatch):
-    """Patch the three MT5 provider seams; returns mutable records per seam."""
+    """Patch the three MT5 provider seams and the LLM seam; returns records."""
 
     def _install(
         *,
         account_error: Exception | None = None,
         position_error: Exception | None = None,
         trade_error: Exception | None = None,
+        llm_error: Exception | None = None,
     ) -> dict[str, object]:
         account_cls, account_threads = make_fake_account_provider_class(ACCOUNT, account_error)
         position_cls, position_threads = make_fake_position_provider_class((XAUUSD_BUY,), position_error)
@@ -180,6 +193,16 @@ def patched_providers(monkeypatch):
         monkeypatch.setattr(deps, "MT5AccountInfoProvider", account_cls)
         monkeypatch.setattr(deps, "MT5PositionProvider", position_cls)
         monkeypatch.setattr(deps, "MT5TradeHistoryProvider", trade_cls)
+        llm: FakeLLMProvider = FakeLLMProvider() if llm_error is None else FailingLLMProvider(llm_error)
+
+        # The production seam is the broker-aware router (async, per-broker).
+        # Tests replace the whole seam with the deterministic offline fake so
+        # these endpoint tests involve no network, no stored configuration and
+        # no broker-provider policy.
+        async def fake_llm_provider(broker_id: int, session: object) -> FakeLLMProvider:
+            return llm
+
+        monkeypatch.setattr(deps, "get_llm_provider", fake_llm_provider)
         deps._account_info_provider = None
         deps._position_provider = None
         deps._trade_history_provider = None
@@ -188,6 +211,7 @@ def patched_providers(monkeypatch):
             "position_threads": position_threads,
             "trade_threads": trade_threads,
             "trade_windows": trade_windows,
+            "llm": llm,
         }
 
     yield _install
@@ -247,6 +271,9 @@ def agent_env(tmp_path):
 
     yield {"make_app": make_app, "factory": factory, **ids}
     asyncio.run(engine.dispose())
+    # Drop the process-wide usage limiter so per-user counts never leak
+    # between tests (each test rebuilds it from current settings).
+    deps.reset_agent_usage_limiter()
 
 
 def auth_header(token: str) -> dict[str, str]:
@@ -494,13 +521,8 @@ def test_trade_history_provider_failure_returns_generic_503(agent_env, patched_p
     assert body == {"detail": "Agent service temporarily unavailable"}
 
 
-def test_llm_provider_failure_returns_generic_503(agent_env, patched_providers, monkeypatch) -> None:
-    class FailingLLMProvider(FakeLLMProvider):
-        def complete(self, prompt: object) -> str:
-            raise RuntimeError("model unavailable")
-
-    monkeypatch.setattr(deps, "FakeLLMProvider", FailingLLMProvider)
-    patched_providers()
+def test_llm_provider_failure_returns_generic_503(agent_env, patched_providers) -> None:
+    patched_providers(llm_error=RuntimeError("model unavailable"))
 
     status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
 
@@ -578,3 +600,139 @@ def test_existing_endpoints_remain_registered() -> None:
         "/economic-intelligence/today",
         "/portfolio-intelligence",
     } <= paths
+
+
+# --- scope guard + per-user daily limit (Step 31) ---------------------------------------------
+
+
+def test_financial_request_is_allowed(agent_env, patched_providers) -> None:
+    record = patched_providers()
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "What is my account balance?"})
+
+    assert status == 200
+    assert body["request"] == "What is my account balance?"
+    assert record["llm"].call_count == 1
+
+
+def test_off_topic_request_is_rejected_with_422(agent_env, patched_providers) -> None:
+    record = patched_providers()
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "Tell me a joke"})
+
+    assert status == 422
+    assert body == {"detail": "Request is outside the assistant's financial scope"}
+    # Rejected before any context read or LLM call.
+    assert record["llm"].call_count == 0
+    assert record["account_threads"] == []
+    assert record["position_threads"] == []
+    assert record["trade_threads"] == []
+
+
+def test_quota_rejection_does_not_reach_context_or_llm(agent_env, patched_providers) -> None:
+    record = patched_providers()
+    monkeypatch_quota = 1
+    import app.core.config as config_module
+
+    config_module.settings.AGENT_DAILY_REQUEST_LIMIT = monkeypatch_quota
+    deps.reset_agent_usage_limiter()
+
+    try:
+        first_status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+        second_status, second_body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my equity?"})
+    finally:
+        config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 50
+        deps.reset_agent_usage_limiter()
+
+    assert first_status == 200
+    assert second_status == 429
+    assert second_body == {"detail": "Daily agent request limit reached"}
+    # Only the admitted request reached the LLM.
+    assert record["llm"].call_count == 1
+
+
+def test_users_have_independent_quotas(agent_env, patched_providers) -> None:
+    patched_providers()
+    import app.core.config as config_module
+
+    config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 1
+    deps.reset_agent_usage_limiter()
+
+    try:
+        status_a, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+        status_b, _ = post_agent(agent_env, agent_env["customer_b_id"], {"message": "my balance?"})
+        blocked_a, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my equity?"})
+    finally:
+        config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 50
+        deps.reset_agent_usage_limiter()
+
+    # Each user consumed their own quota; blocking one does not block the other.
+    assert (status_a, status_b, blocked_a) == (200, 200, 429)
+
+
+def test_quota_cannot_be_bypassed_via_the_request_body(agent_env, patched_providers) -> None:
+    patched_providers()
+    import app.core.config as config_module
+
+    config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 1
+    deps.reset_agent_usage_limiter()
+
+    try:
+        post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+        # A fresh login for the same user cannot widen scope: the quota is keyed
+        # by the authenticated identity, not by any request field. extra="forbid"
+        # already 422s unknown body fields such as user_id/broker_id.
+        status, _ = post_agent(
+            agent_env,
+            agent_env["customer_a_id"],
+            {"message": "my balance?", "user_id": 999999, "broker_id": agent_env["broker_b_id"]},
+        )
+    finally:
+        config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 50
+        deps.reset_agent_usage_limiter()
+
+    # The body fields are rejected outright (422); the quota still blocks the
+    # user's second request even with a brand-new token for the same identity.
+    assert status == 422
+
+
+def test_scope_rejection_happens_before_quota_consumption(agent_env, patched_providers) -> None:
+    patched_providers()
+    import app.core.config as config_module
+
+    config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 1
+    deps.reset_agent_usage_limiter()
+
+    try:
+        rejected_status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "draw a cat"})
+        # The off-topic rejection consumed no quota, so the one permitted request
+        # is still available for a genuine financial question.
+        allowed_status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+    finally:
+        config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 20
+        deps.reset_agent_usage_limiter()
+
+    assert rejected_status == 422
+    assert allowed_status == 200
+
+
+def test_quota_is_scoped_to_the_utc_day_of_the_request(agent_env, patched_providers) -> None:
+    # A practical consequence of the UTC day boundary: the counter is keyed per
+    # user, so a second user's traffic never consumes this user's quota (covered
+    # above); this test pins the per-request day semantics end to end.
+    patched_providers()
+    import app.core.config as config_module
+
+    config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 2
+    deps.reset_agent_usage_limiter()
+
+    try:
+        first, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+        second, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my equity?"})
+        third_status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my margin?"})
+    finally:
+        config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 50
+        deps.reset_agent_usage_limiter()
+
+    assert (first, second) == (200, 200)
+    assert third_status == 429

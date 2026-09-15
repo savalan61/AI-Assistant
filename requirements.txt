@@ -8,5 +8,7 @@ alembic==1.20.0
 aiosqlite==0.22.1
 bcrypt==5.0.0
 PyJWT==2.14.0
+cryptography==50.0.1
+httpx==0.28.1
 MetaTrader5==5.0.6180
 pytest==9.1.1
