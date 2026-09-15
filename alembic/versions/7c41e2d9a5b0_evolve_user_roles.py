@@ -27,18 +27,28 @@ _SUPER_ADMIN_INDEX = "uq_users_broker_super_admin"
 
 
 def upgrade() -> None:
-    """Upgrade schema: migrate roles, then swap the domain constraints."""
-    # Data migration FIRST: every existing broker-level administrator becomes
-    # super_admin before the new CHECK forbids 'broker_admin'. broker_admin is
-    # the current broker-level owner/manager role; nothing is lost or
+    """Upgrade schema: lift the old role domain, rotate roles, enforce the new domain.
+
+    ORDER IS LOAD-BEARING: the old ck_users_role still permits only
+    ('broker_admin', 'customer'), so it must be dropped BEFORE any row is
+    written to 'super_admin'. Reversing these two steps makes the data rotation
+    violate the old CHECK and aborts the upgrade on any database that still
+    holds broker_admin rows.
+    """
+    # Step 1: lift the two-role domain. The role column is briefly unconstrained.
+    op.drop_constraint(_ROLE_CHECK, 'users', type_='check')
+
+    # Step 2: data rotation, now that no CHECK forbids the new value. Every
+    # existing broker-level administrator becomes super_admin; broker_admin is
+    # the current broker-level owner/manager role, so nothing is lost or
     # duplicated — one row becomes one row with the new role value.
     op.execute("UPDATE users SET role = 'super_admin' WHERE role = 'broker_admin'")
 
-    # Domain swap using the same pinned constraint name as the model.
-    op.drop_constraint(_ROLE_CHECK, 'users', type_='check')
+    # Step 3: enforce the new domain using the same pinned constraint name as
+    # the model, so the swap is invisible to the rest of the schema.
     op.create_check_constraint(_ROLE_CHECK, 'users', "role IN ('super_admin', 'admin', 'customer')")
 
-    # One super_admin per broker: database-level enforcement, not just
+    # Step 4: one super_admin per broker: database-level enforcement, not just
     # application logic. The index is partial (only super_admin rows), so
     # multiple admins and customers per broker remain unrestricted.
     op.create_index(
