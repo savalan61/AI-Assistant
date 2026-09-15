@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 22 — Super Admin Creates Admin User (POST /users/admins)
+Step 25 — Financial Context
 
 Status:
 
@@ -10,28 +10,32 @@ VERIFIED + COMMITTED + SYNCED
 
 Implementation commit:
 
-cde617e ("feat(auth): add super admin admin creation")
-(full hash: cde617e8325fe6ec87eeeb544d83d37edf2663d8)
+67e8f76 ("feat(financial): add financial context")
+(full hash: 67e8f76a5144a53d2db8d7d8c2f2175184fa57ae)
+
+Steps 23 (Economic Intelligence), 24 (Portfolio Intelligence) and 25
+(Financial Context) are all verified, committed and synced.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 242 passed, 3 warnings (pre-existing third-party
+pytest tests/ -q → 359 passed, 3 warnings (pre-existing third-party
 deprecation warnings); verified 2026-09-15 on the exact committed tree
 
 Static verification: python -m compileall app scripts tests → clean.
 git diff --check → clean.
 Direct Pylance/pyright execution remains unavailable in this environment
-(as recorded for Steps 8–21A); a focused manual static/type review was
-performed instead. No type suppressions were used.
+(as recorded for Steps 8–25); a focused manual static/type review was
+performed for each of Steps 23–25 instead. No type suppressions were used.
 
-No trading functionality was changed in Step 22; all MT5 behavior is
-untouched.
+No trading functionality was added or changed in Steps 23–25; all MT5 read
+behavior is untouched.
 
-Working tree at this checkpoint:
+Working tree at the Step 25 commit:
 
 CLEAN
 
-The commit has been pushed/synced to origin/master.
+Local HEAD and origin/master both point at 67e8f76. (This checkpoint
+document update is the only change pending after that commit.)
 
 ## Completed Stages
 
@@ -188,6 +192,90 @@ Includes:
 - no delete/update/reset-password endpoints and no broker-management
   functionality were added
 - 18 focused tests; full suite 242 passed
+
+### Step 23 — Economic Intelligence (READ-ONLY)
+Status: VERIFIED + COMMITTED (21957c5)
+
+Includes:
+
+- EconomicEvent NamedTuple contract (event_id, timestamp, currency, title,
+  impact, forecast, previous, actual) with the EventImpact StrEnum
+  (LOW/MEDIUM/HIGH) and impact_meets_minimum(), plus the
+  EconomicCalendarProvider abstraction — exported through
+  app/providers/__init__.py
+- the provider abstraction carries an explicit data-source provenance marker
+  so a development/test source can never be mistaken for live financial data
+- EconomicCalendarService: requested-window retrieval, today's (UTC day)
+  events, minimum-impact filtering, chronological ordering, and
+  timezone-aware validation (naive datetimes are rejected, not guessed)
+- EconomicIntelligenceService: composes today's events with the
+  authenticated user's open positions (read through the existing
+  PositionService) and a deterministic, conservative relevance classifier —
+  RELEVANT / POTENTIALLY_RELEVANT / NOT_OBVIOUSLY_RELEVANT — with a factual
+  reason per (event, position) pair
+- GET /economic-intelligence/today (authenticated; optional min_impact
+  filter): broker_id is echoed from the database-backed user and never
+  accepted as input; the blocking position read is routed through
+  run_mt5_call; provider failure → generic 503
+- no LLM is called: the response is structured AI-ready context, not
+  generated analysis
+- CALENDAR DATA SOURCE IS NOT FINAL: the wired provider is
+  FakeEconomicCalendarProvider, a deterministic development/test
+  placeholder. No production economic-calendar provider exists yet
+  (see Known Issues item 9)
+
+### Step 24 — Portfolio Intelligence (READ-ONLY)
+Status: VERIFIED + COMMITTED (21957c5)
+
+Includes:
+
+- PortfolioIntelligence NamedTuple (as_of, account fields, position counts
+  by direction, symbols held, total/buy/sell volume, directional balance,
+  per-symbol exposure, risk assessment) plus SymbolExposure and
+  RiskAssessment, in app/services/portfolio_intelligence/portfolio.py
+- deterministic pure analysis: aggregate_exposure() groups open positions
+  by symbol (buy/sell/net volume, position count) in symbol order;
+  build_portfolio_intelligence() derives the whole result from one account
+  snapshot plus one positions snapshot
+- risk classification based only on data that actually exists (the account
+  margin level): FLAT with no open positions, LOW/ELEVATED/HIGH bands
+  otherwise, and an explicit UNKNOWN when positions exist but the margin
+  level is not usable — no invented monetary exposure, leverage, market
+  value, unrealized P&L or percentage exposure
+- PortfolioIntelligenceService composes the existing AccountInfoService and
+  PositionService; no MT5 access and no new provider
+- GET /portfolio-intelligence (authenticated): broker_id from the
+  database-backed user; blocking reads routed through run_mt5_call;
+  provider failure → generic 503
+- strictly read-only: no price prediction, no recommendation, no
+  BUY/SELL/OPEN/CLOSE/MODIFY action
+
+### Step 25 — Financial Context (READ-ONLY)
+Status: VERIFIED + COMMITTED (67e8f76)
+
+Includes:
+
+- FinancialContext NamedTuple composing AccountInfo + Positions +
+  TradeHistory + PortfolioIntelligence, plus broker_id and as_of
+- FinancialContextService in app/services/financial_context/ composes the
+  existing AccountInfoService, PositionService and TradeHistoryService; it
+  adds no provider, no database access and no MT5 call of its own
+- the trade-history window is configurable: build(broker_id,
+  trade_history_days=30, now=None) — the default is 30 days
+  (DEFAULT_TRADE_HISTORY_DAYS), any positive day count is accepted, and a
+  value below 1 is rejected before any provider is touched
+- the reference time is a single UTC-aware as_of (injected, else now); a
+  naive datetime is rejected rather than read as local time
+- the portfolio component is derived from the same account/positions
+  snapshot the context reports (through the existing
+  build_portfolio_intelligence analysis), so the context can never contain a
+  portfolio view that disagrees with its own account or positions, and the
+  account and positions are read exactly once per context
+- broker_id is supplied by the caller from the authenticated database user;
+  nothing in the service derives tenant identity from a request
+- internal service/domain capability: no HTTP endpoint was added, and no LLM
+  or agent logic exists
+- 19 focused tests; full suite 359 passed
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
@@ -403,8 +491,56 @@ MT5 (history_deals_get + related history orders)
     ↓
 tuple[TradeHistoryEntry, ...]
 
-All four MT5-backed endpoints route their blocking calls through the same
+All six MT5-backed endpoints route their blocking calls through the same
 consolidated boundary (run_mt5_call); providers and services remain synchronous.
+
+## Current Economic Intelligence Flow
+
+Authenticated request
+    ↓
+get_current_user()
+    ↓
+run_mt5_call (blocking boundary, app/core/blocking.py)
+    ↓
+EconomicIntelligenceService
+    ↓
+EconomicCalendarService → EconomicCalendarProvider → FakeEconomicCalendarProvider
+        (deterministic development/test placeholder — no production source yet)
+    ↓
+PositionService → PositionProvider → MT5PositionProvider → MT5
+    ↓
+deterministic relevance classification (relevance.py)
+    ↓
+AI-ready economic context
+
+## Current Portfolio Intelligence Flow
+
+Authenticated request
+    ↓
+get_current_user()
+    ↓
+run_mt5_call (blocking boundary, app/core/blocking.py)
+    ↓
+PortfolioIntelligenceService
+    ↓
+AccountInfoService + PositionService
+    ↓
+pure exposure analysis (portfolio.py)
+    ↓
+portfolio / exposure result + margin-based risk classification
+
+## Current Financial Context Flow
+
+caller (no HTTP endpoint yet)
+    ↓
+FinancialContextService
+    ↓
+AccountInfoService + PositionService + TradeHistoryService
+    ↓
+build_portfolio_intelligence (same snapshot)
+    ↓
+FinancialContext (account + positions + trade_history +
+                   portfolio_intelligence + broker_id + as_of)
 
 ## Positions API Contract
 
@@ -462,6 +598,80 @@ wrapped response:
 - close_reason is TP/SL/MANUAL/OTHER, or null when MT5 supplies no reason.
 - stop_loss/take_profit come from the related closing order when it can be
   retrieved, otherwise null — never invented.
+
+## Economic Intelligence API Contract
+
+GET /economic-intelligence/today?min_impact=LOW|MEDIUM|HIGH (optional) returns
+today's (UTC day) events with per-position relevance:
+
+    {
+      "broker_id": 1,
+      "as_of": "2026-09-15T07:08:54Z",
+      "window_from": "2026-09-15T00:00:00Z",
+      "window_to": "2026-09-16T00:00:00Z",
+      "data_source": "fake-development-placeholder",
+      "position_symbols": ["XAUUSD"],
+      "events": [
+        {
+          "event": {
+            "event_id": "...", "timestamp": "...", "currency": "USD",
+            "title": "...", "impact": "HIGH",
+            "forecast": null, "previous": null, "actual": null
+          },
+          "overall_relevance": "POTENTIALLY_RELEVANT",
+          "positions": [
+            {"ticket": 123456789, "symbol": "XAUUSD", "type": "BUY",
+             "relevance": "POTENTIALLY_RELEVANT", "reason": "..."}
+          ]
+        }
+      ]
+    }
+
+- data_source names the calendar provenance. It is currently
+  "fake-development-placeholder": those events are deterministic
+  development/test data, NOT live financial data.
+- relevance is RELEVANT / POTENTIALLY_RELEVANT / NOT_OBVIOUSLY_RELEVANT. The
+  classifier is conservative and does not assert RELEVANT from a symbol
+  string alone; reasons are factual, never forecasts.
+- invalid min_impact → 422; unauthenticated → 401; provider failure → 503.
+- no BUY/SELL action, recommendation or price prediction is returned.
+
+## Portfolio Intelligence API Contract
+
+GET /portfolio-intelligence returns the combined account + exposure summary:
+
+    {
+      "broker_id": 1,
+      "as_of": "2026-09-15T12:00:00Z",
+      "account_currency": "USD",
+      "balance": 10000.0, "equity": 10050.0,
+      "margin": 250.0, "free_margin": 9800.0, "margin_level": 4020.0,
+      "open_positions": 2, "buy_positions": 1, "sell_positions": 1,
+      "symbols": ["EURUSD", "XAUUSD"],
+      "total_volume": 1.1, "buy_volume": 0.1, "sell_volume": 1.0,
+      "directional_balance": -0.9,
+      "exposure": [
+        {"symbol": "EURUSD", "buy_volume": 0.0, "sell_volume": 1.0,
+         "net_volume": -1.0, "position_count": 1}
+      ],
+      "risk": {"level": "LOW", "basis": "..."}
+    }
+
+- directional_balance is BUY volume minus SELL volume across all open
+  positions; exposure has one entry per symbol in symbol order.
+- risk.level is FLAT (no positions) / LOW / ELEVATED / HIGH (margin-level
+  bands) / UNKNOWN (positions exist but the margin level is not usable).
+  risk.basis is a factual, deterministic reason — never a forecast.
+- unauthenticated → 401; provider failure → 503.
+
+## Financial Context (internal capability — no HTTP endpoint)
+
+FinancialContextService composes the account snapshot, open positions, trade
+history and portfolio intelligence into one typed FinancialContext for future
+AI consumption. It is intentionally an internal service/domain capability:
+no endpoint, no LLM and no agent logic exists yet. The trade-history window is
+configurable and defaults to 30 days. Tenant identity (broker_id) is supplied
+by the caller from the authenticated database user.
 
 ## Users API Contract
 
@@ -538,18 +748,33 @@ GET /users (super_admin or admin; role-based visibility):
 - Open positions (Position contract, MT5PositionProvider, FakePositionProvider, PositionService, GET /positions) exist and are read-only.
 - Trade history (TradeHistoryEntry contract, MT5TradeHistoryProvider,
   FakeTradeHistoryProvider, TradeHistoryService, GET /trade-history) exists and is read-only.
-- Steps 18/19/20/21A/22 are committed and pushed to origin/master (latest: cde617e).
-- Test suite verified 2026-09-15 on the exact committed tree: pytest tests/ -q → 242 passed, 3 warnings.
+- Economic intelligence (EconomicEvent/EventImpact contract,
+  EconomicCalendarProvider, FakeEconomicCalendarProvider,
+  EconomicCalendarService, EconomicIntelligenceService, the relevance
+  classifier, GET /economic-intelligence/today) exists and is read-only; its
+  calendar source is a deterministic placeholder, not live data.
+- Portfolio intelligence (PortfolioIntelligence / SymbolExposure /
+  RiskAssessment contracts, PortfolioIntelligenceService,
+  GET /portfolio-intelligence) exists and is read-only.
+- Financial context (FinancialContext contract, FinancialContextService with a
+  configurable trade-history window defaulting to 30 days) exists as an
+  internal read-only capability with no HTTP endpoint.
+- No LLM/agent layer exists yet; the intelligence outputs are structured so a
+  future Agent can consume them.
+- No price prediction, BUY/SELL recommendation or trading action is produced
+  by any intelligence endpoint.
+- Steps 18–25 are committed and pushed to origin/master (latest: 67e8f76).
+- Test suite verified 2026-09-15 on the exact committed tree: pytest tests/ -q → 359 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean; the latest implementation commit (cde617e) has been pushed/synced to origin/master.
+- Working tree is clean; the latest implementation commit (67e8f76) has been pushed/synced to origin/master (local HEAD == origin/master).
 
 Static/type verification:
 
 Direct Pylance/pyright execution was not available in the environment for any of
-Steps 8–17. Manual static/type reviews were performed instead. This limitation
+Steps 8–25. Manual static/type reviews were performed instead. This limitation
 must be reported rather than hidden.
 
 ## Known Issues (current)
@@ -566,6 +791,18 @@ must be reported rather than hidden.
 7. MetaTrader5 is currently a Windows-specific dependency and needs future CI/Docker consideration.
 8. Minor cleanup/deprecation/hygiene items remain (Pydantic class-based Config,
    .gitignore entries such as .pytest_cache/).
+9. Economic calendar data source is unresolved. Economic intelligence is wired
+   to FakeEconomicCalendarProvider, a deterministic development/test
+   placeholder; there is NO production economic-calendar provider, and its
+   responses must not be presented as live financial data. MT5's Python
+   integration (MetaTrader5==5.0.6180) does not expose the MQL5 Economic
+   Calendar API at all (verified by introspection), and the evaluated
+   third-party free tiers either gate the calendar behind a paid plan or
+   restrict the free/personal tier to non-commercial use — unsuitable for a
+   commercial multi-tenant product. The provider abstraction is in place and
+   ready for a suitable source; selecting one is an open architectural
+   decision. (This is a new numbered item; the former item 9, the MT5
+   blocking-call debt, remains resolved below.)
 
 Resolved:
 
@@ -581,10 +818,16 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–22 are complete, committed (cde617e), and synced to origin/master.
+Steps 12–25 are complete, committed (67e8f76), and synced to origin/master.
 
 The next logical areas, in no committed order, are:
 
+- the economic calendar production data source (known issue 9) — required
+  before economic intelligence can carry real data
+- an HTTP surface for the financial context, if a consumer is defined
+  (deliberately kept internal in Step 25)
+- an LLM/agent layer that consumes the existing AI-ready contexts (not
+  started)
 - tenant-scoped MT5 design (known issue 1)
 - remaining known issues (IPC timeout, /health MT5 readiness, multi-worker
   semantics, candle UTC review, last_error robustness, Windows dependency,
@@ -594,9 +837,12 @@ Do NOT implement any next step until explicitly instructed.
 
 When instructed, begin by inspecting the existing provider abstractions
 (app/providers/position.py, app/providers/trade_history.py,
-app/providers/account_info.py, app/providers/market_data.py), the MT5
-providers, the consolidated blocking boundary (app/core/blocking.py), and
-the composition root (app/core/dependencies.py).
+app/providers/account_info.py, app/providers/economic_calendar.py,
+app/providers/market_data.py), the MT5 providers, the consolidated blocking
+boundary (app/core/blocking.py), the intelligence services
+(app/services/economic_intelligence/, app/services/portfolio_intelligence/,
+app/services/financial_context/), and the composition root
+(app/core/dependencies.py).
 
 ## Architectural Guardrails
 
