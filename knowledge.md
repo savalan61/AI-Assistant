@@ -1,5 +1,18 @@
 # AI Broker Assistant — Project Knowledge
 
+> **Status note (authority).** This document is a historical project-knowledge
+> snapshot that stops at Steps 18–20. Several sections below (role names, MT5
+> session design, the future-stage list) describe earlier states of the system.
+> CURRENT_CHECKPOINT.md is authoritative for the current state; treat anything
+> here that conflicts with it as historical. Two facts in particular have moved:
+> roles are now super_admin / admin / customer (Step 21A, one super_admin per
+> Broker enforced by a database partial unique index), and MT5 authentication is
+> tenant-scoped (Step 36) with a per-user, administrator-provisioned credential
+> (Step 38): explicit mt5_login / mt5_server columns plus an encrypted MT5
+> INVESTOR (read-only) password, falling back to a numeric username +
+> Broker.mt5_server when those columns are NULL. The MT5 trading (master)
+> password is never requested, stored or used, and no API returns a credential.
+
 ## 1. Project Overview
 
 AI Broker Assistant is a production-oriented, read-only AI assistant for brokers.

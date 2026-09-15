@@ -1,4 +1,11 @@
-"""Users API: Broker Admin creates Customer Users within their own tenant."""
+"""Users API: tenant-scoped user management.
+
+Covers creating Customer/Admin users inside the caller's own broker, listing
+those users, and provisioning a user's MT5 INVESTOR (read-only) credential.
+The tenant is always the authenticated database user's broker — no endpoint
+accepts a broker_id — and no response ever carries a password hash, an MT5
+credential, or any other secret.
+"""
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -7,10 +14,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_broker_manager, get_current_super_admin
+from app.core.dependencies import (
+    get_current_broker_manager,
+    get_current_super_admin,
+    resolve_mt5_account_credentials,
+)
+from app.core.encryption import EncryptionError, encrypt_secret
 from app.core.security import hash_password
 from app.db.database import get_db
-from app.db.models import User, UserRole
+from app.db.models import Broker, User, UserRole
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -98,6 +110,93 @@ class UserResponse(BaseModel):
     phone: str | None
     role: UserRole
     is_active: bool
+
+
+# An MT5 account number: the same ASCII-digit shape the username rule enforces,
+# because both are MT5 logins. The alias is deliberate — it documents that the
+# two rules are meant to agree, without duplicating the pattern.
+_MT5_LOGIN_PATTERN = _USERNAME_PATTERN
+# MT5 server names are short identifiers (e.g. "BrokerName-Live2"); the cap
+# matches the User and Broker columns so oversized input cannot become a
+# database error.
+_MT5_SERVER_MAX_LENGTH = 100
+# Upper bound on a stored credential. MT5 passwords are far shorter; the cap
+# only stops an oversized secret being encrypted into the column.
+_MT5_PASSWORD_MAX_LENGTH = 128
+
+
+class MT5CredentialRequest(BaseModel):
+    """Write-only payload provisioning a user's MT5 INVESTOR credential.
+
+    Deliberately excludes broker_id, user_id, role and is_active: the target
+    comes from the path (scoped to the caller's tenant) and the tenant from the
+    authenticated caller, so extra="forbid" turns any such attempt into a 422
+    rather than a silently ignored value.
+
+    There is intentionally no field for an MT5 trading (master) password — this
+    API only accepts a read-only credential, and the password field is named
+    after that fact.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mt5_login: str
+    mt5_server: str
+    # Write-only: no response schema in this module has a matching field, so a
+    # plaintext credential cannot be echoed back by construction.
+    mt5_investor_password: str
+
+    @field_validator("mt5_login")
+    @classmethod
+    def _validate_mt5_login(cls, value: str) -> str:
+        if not _MT5_LOGIN_PATTERN.fullmatch(value):
+            raise ValueError("mt5_login must be 4-12 digits")
+        return value
+
+    @field_validator("mt5_server")
+    @classmethod
+    def _validate_mt5_server(cls, value: str) -> str:
+        # Surrounding whitespace is trimmed (a pasted server name), but a value
+        # that is empty or contains control characters is rejected.
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("mt5_server must not be empty")
+        if len(trimmed) > _MT5_SERVER_MAX_LENGTH:
+            raise ValueError(f"mt5_server must be at most {_MT5_SERVER_MAX_LENGTH} characters")
+        if any(character < " " for character in trimmed):
+            raise ValueError("mt5_server must not contain control characters")
+        return trimmed
+
+    @field_validator("mt5_investor_password")
+    @classmethod
+    def _validate_mt5_investor_password(cls, value: str) -> str:
+        # The password is never trimmed: it is stored exactly as given, since
+        # whitespace may be part of a real credential. Only its shape is
+        # bounded, and no rule ever echoes it back in an error message.
+        if not value.strip():
+            raise ValueError("mt5_investor_password must not be empty")
+        if len(value) > _MT5_PASSWORD_MAX_LENGTH:
+            raise ValueError(f"mt5_investor_password must be at most {_MT5_PASSWORD_MAX_LENGTH} characters")
+        return value
+
+
+class MT5CredentialStatus(BaseModel):
+    """Non-secret view of a user's effective MT5 credential configuration.
+
+    Contains no password field of any kind. The login and server are the
+    *effective* values the session boundary would authenticate with — the
+    user's own provisioning when present, otherwise the legacy fallback of a
+    numeric username and the broker's server — so this response answers "what
+    would an MT5 read use?" without disclosing anything secret.
+    """
+
+    user_id: int
+    username: str
+    mt5_login: str | None
+    mt5_server: str | None
+    # All three parts are present. Not a liveness check: whether MT5 actually
+    # accepts the credential is only known when a read attempts to authenticate.
+    mt5_configured: bool
 
 
 def _duplicate_conflict() -> HTTPException:
@@ -228,3 +327,109 @@ async def create_admin(
     await session.refresh(admin)
     # UserResponse is the non-sensitive projection: no credential fields.
     return UserResponse.model_validate(admin)
+
+
+# --- MT5 credential provisioning ---------------------------------------------
+#
+# A broker administrator provisions the MT5 INVESTOR (read-only) credential of
+# a user in its own tenant. Only three facts are ever written — the account
+# number, the server, and the encrypted password — and the plaintext exists only
+# for the duration of the request that supplied it.
+
+
+def _credentials_unavailable() -> HTTPException:
+    # Encryption is unconfigured or failed. The cause is never disclosed and no
+    # secret is included, matching the broker LLM credential boundary.
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="MT5 credential storage is temporarily unavailable",
+    )
+
+
+async def _manageable_target(session: AsyncSession, caller: User, user_id: int) -> User:
+    """Load the user whose MT5 credential ``caller`` may manage.
+
+    Tenant isolation is structural: a target outside the caller's broker is
+    reported exactly like a non-existent one, so a caller can never learn which
+    user ids exist in another tenant. Role hierarchy: an admin manages customer
+    credentials only; a super_admin holds broker-level privileges and may also
+    provision itself or an admin.
+    """
+    target = await session.get(User, user_id)
+    if target is None or target.broker_id != caller.broker_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if caller.role is UserRole.ADMIN and target.role is not UserRole.CUSTOMER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An admin may manage customer credentials only",
+        )
+    return target
+
+
+async def _mt5_credential_status(session: AsyncSession, user: User) -> MT5CredentialStatus:
+    """Project one user's effective MT5 credential configuration (never the secret)."""
+    broker = await session.get(Broker, user.broker_id)
+    # Reuse the composition root's resolver so this status reports exactly what
+    # an MT5-backed request for this user would use — one definition of
+    # "effective", including the legacy fallback.
+    credentials = resolve_mt5_account_credentials(user, broker)
+    return MT5CredentialStatus(
+        user_id=user.id,
+        username=user.username,
+        mt5_login=str(credentials.login) if credentials.login is not None else None,
+        mt5_server=credentials.server,
+        mt5_configured=(
+            credentials.login is not None
+            and bool(credentials.server)
+            and bool(credentials.password_encrypted)
+        ),
+    )
+
+
+@router.put("/{user_id}/mt5-credentials", response_model=MT5CredentialStatus)
+async def set_mt5_credentials(
+    user_id: int,
+    request: MT5CredentialRequest,
+    current_admin: User = Depends(get_current_broker_manager),
+    session: AsyncSession = Depends(get_db),
+) -> MT5CredentialStatus:
+    """Provision or replace a user's MT5 INVESTOR (read-only) credential.
+
+    Both manager roles reach this endpoint (get_current_broker_manager rejects
+    customers with 403); the target is resolved inside the caller's tenant and
+    the role rule is applied there. The password is encrypted before it reaches
+    the database and is never returned, logged or included in an error; on an
+    encryption failure the request fails closed (503) and nothing is written.
+    """
+    target = await _manageable_target(session, current_admin, user_id)
+    try:
+        # Encrypted immediately: the plaintext lives only inside this call and
+        # is never logged. A broker never learns the customer's MT5 password
+        # from this API, only that a credential is configured.
+        encrypted = encrypt_secret(request.mt5_investor_password)
+    except EncryptionError:
+        raise _credentials_unavailable()
+
+    target.mt5_login = request.mt5_login
+    target.mt5_server = request.mt5_server
+    target.mt5_password_encrypted = encrypted
+    await session.commit()
+    await session.refresh(target)
+    # Safe projection: account identity and configured-ness, never the secret.
+    return await _mt5_credential_status(session, target)
+
+
+@router.get("/{user_id}/mt5-credentials", response_model=MT5CredentialStatus)
+async def get_mt5_credentials(
+    user_id: int,
+    current_admin: User = Depends(get_current_broker_manager),
+    session: AsyncSession = Depends(get_db),
+) -> MT5CredentialStatus:
+    """Report a user's MT5 credential configuration without disclosing it.
+
+    Deliberately read-only and password-free: this is what a manager sees when
+    checking whether a customer can be served MT5 data, and a customer can
+    never reach it (403) or obtain the stored password from any endpoint.
+    """
+    target = await _manageable_target(session, current_admin, user_id)
+    return await _mt5_credential_status(session, target)

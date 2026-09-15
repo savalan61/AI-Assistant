@@ -187,9 +187,22 @@ Application credentials and MT5 credentials are separate.
 
 Current business model:
 
-- username = MT5 login/account number
+- username = application/Agent login
 - password_hash = application/Agent password
-- mt5_password_encrypted = encrypted MT5 password
+- mt5_login / mt5_server = the user's MT5 account number and server, provisioned
+  per user by a broker administrator (an admin for customers, a super_admin for
+  any user in its broker) through PUT /users/{user_id}/mt5-credentials
+- mt5_password_encrypted = encrypted MT5 INVESTOR (read-only) password
+
+When mt5_login / mt5_server are NULL the resolver falls back to a numeric
+username + Broker.mt5_server, which is how rows provisioned before Step 38 keep
+working. Nothing else may read a credential: decryption happens only inside the
+MT5 session boundary.
+
+Only the INVESTOR (read-only) MT5 password may be accepted. The MT5 trading
+(master) password must NEVER be requested, received, stored or used — no field,
+endpoint, prompt or configuration accepts one. A customer can neither provision,
+change nor read a stored MT5 credential, and no API ever returns one.
 
 Never:
 
@@ -199,7 +212,8 @@ Never:
 - commit .env
 - commit secrets
 
-The MT5 password must remain encrypted because the backend may need the credential later.
+The MT5 password must remain encrypted because the backend needs the credential
+to authenticate a tenant's MT5 session.
 
 ## MT5
 

@@ -70,7 +70,17 @@ class User(Base):
     phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     # Stored as a hash; must never be recoverable in plaintext.
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Encrypted ciphertext; backend needs it to connect to MT5 later.
+    # The user's MT5 account number and server, stored per user rather than
+    # derived from the application username / Broker.mt5_server, so one broker
+    # can host customers on different MT5 servers and an administrator can
+    # provision an account explicitly. Both stay NULL on rows provisioned the
+    # older way: credential resolution then falls back to (username,
+    # Broker.mt5_server), so existing behaviour is unchanged.
+    mt5_login: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    mt5_server: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Fernet ciphertext of the user's MT5 INVESTOR (read-only) password. The
+    # trading/master password is never requested, stored or used: only a
+    # read-only credential can be provisioned, and no API ever returns it.
     mt5_password_encrypted: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # Role defaults to customer (least privilege); existing rows are backfilled

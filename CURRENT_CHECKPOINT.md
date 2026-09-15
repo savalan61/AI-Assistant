@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 37 — Decimal Money & Financial Numeric Representation
+Step 38 — MT5 Investor / Read-Only Credential Provisioning
++ Step 37 — Decimal Money & Financial Numeric Representation
 + maintenance — role-migration ordering fix & development user seed
 
 Status:
@@ -11,12 +12,24 @@ VERIFIED + COMMITTED + SYNCED
 
 Checkpoint commit:
 
-The latest commit is "fix(db): correct user role migration ordering" (3a63af9),
-which carries the reordered role migration and the new development user seed
-script. The prior synced commit was the Step 37 checkpoint ("feat(financial):
-harden numeric representation"), before that the Step 36 MT5 tenant-session
-commit, the Step 35 security hardening commit and b95eaa1 ("feat(ai): add
-broker llm routing and agent controls", Steps 29–33).
+The latest commit is "feat(mt5): add investor credential provisioning" (Step
+38), which carries the per-user MT5 account fields, the provisioning endpoints,
+the new migration and this document update. The prior synced commit was
+"fix(db): correct user role migration ordering" (3a63af9), which carried the
+reordered role migration and the development user seed script; before that the
+Step 37 checkpoint ("feat(financial): harden numeric representation"), the Step
+36 MT5 tenant-session commit, the Step 35 security hardening commit and b95eaa1
+("feat(ai): add broker llm routing and agent controls", Steps 29–33).
+
+Step 38 makes the MT5 credential an explicit, administrator-provisioned,
+per-user fact — the MT5 account number, the MT5 server, and the encrypted
+INVESTOR (read-only) password — instead of deriving the first two from the
+application username and the broker row. A broker administrator, or the
+broker's super_admin, writes them for a customer through a protected endpoint;
+a customer can neither write nor read them, and no API ever returns the
+password. The legacy derivation (numeric username + Broker.mt5_server) is
+preserved as the fallback, so every pre-existing row keeps working unchanged.
+There is still no master/trading-password support anywhere.
 
 The maintenance fix corrects a real sequencing defect in the Step 21A role
 migration: it ran the broker_admin → super_admin data rotation while the old
@@ -727,6 +740,78 @@ Includes:
   three accounts and the broker row is untouched. pytest tests/ -q → 735 passed,
   3 warnings; compileall and git diff --check clean.
 
+### Step 38 — MT5 Investor / Read-Only Credential Provisioning
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- app/db/models/user.py: two additive nullable columns, mt5_login (String(32))
+  and mt5_server (String(100)). The existing mt5_password_encrypted is now
+  documented as the ciphertext of the MT5 INVESTOR (read-only) password. There
+  is no master/trading-password field anywhere, and no API accepts one.
+- alembic/versions/c4a91f2e6d77_add_user_mt5_credentials.py: additive migration
+  (nullable columns, no backfill, nothing rewritten). Both directions were
+  executed on the local PostgreSQL database: downgrade removes the two new
+  columns and KEEPS the encrypted-password column, upgrade restores them, and
+  the three development users were intact afterwards.
+- app/core/dependencies.py: effective_mt5_login() and effective_mt5_server(),
+  and a resolver built on them — the user's provisioned mt5_login/mt5_server
+  win, with the legacy fallback of a numeric username and Broker.mt5_server
+  preserved exactly, so no existing behaviour changed.
+- app/api/users_router.py: PUT and GET /users/{user_id}/mt5-credentials. PUT
+  upserts the three facts (the password is encrypted BEFORE anything is
+  assigned, so an encryption failure writes nothing); GET reports safe metadata
+  only — the effective mt5_login, the effective mt5_server and mt5_configured.
+  Neither response model has a password field, so the plaintext cannot be
+  echoed back by construction. UserResponse is unchanged, so the existing user
+  list/create contracts and their exact-field tests are untouched.
+- Authorization: both endpoints sit behind get_current_broker_manager
+  (customers get 403 on both verbs). The target is resolved inside the caller's
+  tenant: a user id belonging to another broker is reported exactly like a
+  non-existent one (404) and is never modified. An admin may manage CUSTOMER
+  credentials only (403 when the target is an admin or the super_admin); the
+  super_admin holds broker-level privileges and may also provision an admin or
+  itself.
+- Secrets: the password is write-only, Fernet-encrypted at rest via the existing
+  encrypt_secret (no new crypto, no new dependency), decrypted only inside
+  MT5SessionManager.acquire, and excluded from MT5AccountCredentials.__repr__.
+  Failures are generic (503 when encryption is unavailable) and no API, log or
+  error message contains the credential. The agent prompt path is unchanged and
+  omits account identity entirely (login, holder name, server, account number),
+  so no credential can reach a model.
+- Read-only safety: no trading function was added anywhere; the AI remains
+  strictly READ-ONLY, and a test asserts the provisioning module references no
+  MT5 trading function.
+- 26 new tests (test_mt5_credentials_api.py): admin authorization, customer
+  rejection on both verbs, an admin being unable to manage admin credentials,
+  the super_admin managing an admin, cross-broker 404 with the target row proven
+  unmodified, unknown id, encrypted at rest (not the plaintext, not containing
+  it, and round-tripping through the real Fernet path), update replacing the
+  previous credential, only the credential columns written, no password in any
+  response text, fail-closed 503 with nothing written when the encryption key is
+  absent, resolution precedence and legacy fallback, and repr masking of the
+  ciphertext at the session boundary.
+
+Not verified in this step (reported rather than hidden):
+
+- A LIVE login with a real investor password was NOT performed: no MT5
+  credential is available in this environment, and the application deliberately
+  has nowhere to keep a real one in source. The compatibility conclusion comes
+  from the installed MetaTrader5==5.0.6180 API surface: login() is the same call
+  for either password type, the read functions never depend on trading
+  permission, and the only read-only signal that exists is
+  AccountInfo.trade_allowed (an investor password reports False; TerminalInfo.
+  trade_allowed is merely the terminal's algo-trading switch and is NOT the
+  credential's permission).
+- Write-time proof that a submitted credential is read-only is NOT implemented
+  (optional hardening, deliberately left out of this step): it would require an
+  account_info() call inside the MT5 session boundary, which by design touches
+  only initialize/login/last_error/shutdown today, and it would make
+  provisioning depend on a live terminal.
+- Provisioning fails closed with 503 on the local development database because
+  SECRET_ENCRYPTION_KEY is not set there. That is the intended behaviour
+  (nothing is written) and it was verified end to end through the real app.
+
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
 
@@ -868,6 +953,32 @@ get_current_user()
 database-backed User
     ↓
 protected API
+
+## Current MT5 Credential Provisioning Flow
+
+Authenticated request (PUT /users/{user_id}/mt5-credentials)
+    ↓
+get_current_user() → get_current_broker_manager()   (customer ⇒ 403)
+    ↓
+target resolved inside the caller's OWN broker (otherwise 404; never written)
+    ↓
+role rule: admin → customers only; super_admin → any user in their broker
+    ↓
+encrypt_secret(mt5_investor_password)   (failure ⇒ 503, nothing written)
+    ↓
+users.mt5_login / users.mt5_server / users.mt5_password_encrypted (ciphertext)
+
+Then, on every MT5-backed read:
+
+authenticated user
+    ↓
+get_mt5_credentials → effective login/server: the provisioned mt5_login and
+    ↓                 mt5_server, else numeric username + Broker.mt5_server
+MT5AccountCredentials (ciphertext only; masked in repr)
+    ↓
+MT5SessionManager.acquire → decrypt (only here) → initialize / login
+    ↓
+provider read (account info / positions / trade history / market data)
 
 ## Current Market Data Flow
 
@@ -1362,19 +1473,30 @@ GET /users (super_admin or admin; role-based visibility):
   with Decimal(str(...)); account margin_level and candle tick volume
   intentionally remain float. API JSON still exposes numbers, not strings, via
   the shared DecimalAsNumber serializer.
-- Steps 18–37 plus the role-migration ordering fix and the development user
-  seed are committed and pushed to origin/master (latest commit: "fix(db):
-  correct user role migration ordering" (3a63af9); the prior synced commit was
-  the Step 37 checkpoint "feat(financial): harden numeric representation",
-  before that the Step 36 MT5 tenant-session commit, the Step 35 security
-  hardening commit and b95eaa1).
+- Steps 18–38 plus the role-migration ordering fix and the development user
+  seed are committed and pushed to origin/master (latest commit: "feat(mt5):
+  add investor credential provisioning"; the prior synced commit was "fix(db):
+  correct user role migration ordering" (3a63af9), before that the Step 37
+  checkpoint "feat(financial): harden numeric representation", the Step 36 MT5
+  tenant-session commit, the Step 35 security hardening commit and b95eaa1).
+- A user carries its own MT5 identity: mt5_login and mt5_server (nullable,
+  explicit) plus mt5_password_encrypted holding the ciphertext of the MT5
+  INVESTOR (read-only) password. An admin may provision these for a customer and
+  a super_admin for any user in its broker; a customer can neither provision nor
+  read them, and no endpoint ever returns the password. The legacy derivation
+  (numeric username + Broker.mt5_server) still applies when the explicit fields
+  are NULL, so pre-Step-38 rows behave exactly as before. No master/trading
+  password is accepted or stored anywhere.
 - The development database (local PostgreSQL, APP_ENV=development) is at
   migration head and holds exactly three development accounts on the existing
   developer Broker: one per role (super_admin / admin / customer), created by
   scripts/create_dev_users.py with documented development-only credentials.
   These usernames are non-numeric and the broker has no mt5_server, so the
   MT5-backed endpoints answer 503 for them by design (the tenant session fails
-  closed); they exercise authentication, roles and the agent surface.
+  closed); they exercise authentication, roles and the agent surface. Their MT5
+  credentials are unprovisioned, and provisioning them there currently returns
+  503 as well because SECRET_ENCRYPTION_KEY is not set in the local environment
+  — the fail-closed path, verified end to end.
 - Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 735 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
@@ -1470,6 +1592,10 @@ Resolved:
 - (Deferred item) Money representation: balances, equity, profit and volume
   were float throughout the provider contracts — RESOLVED by Step 37 (Decimal
   end to end, JSON numbers preserved on the wire).
+- (Deferred item) MT5 credential provisioning UX — RESOLVED by Step 38: the
+  MT5 account number, server and encrypted investor password are now
+  administrator-provisioned per user through a protected, tenant-scoped API
+  instead of being seeded directly into the database.
 - (Maintenance defect) The role-evolution migration rotated broker_admin rows
   to super_admin before dropping the old two-role CHECK constraint, so it
   aborted on any database still holding broker_admin rows — RESOLVED in 3a63af9
@@ -1482,16 +1608,24 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–37 plus the role-migration ordering fix and the development user seed
-are complete, committed, and synced to origin/master (latest commit: "fix(db):
-correct user role migration ordering" (3a63af9)).
+Steps 12–38 plus the role-migration ordering fix and the development user seed
+are complete, committed, and synced to origin/master (latest commit:
+"feat(mt5): add investor credential provisioning").
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
 
-- MT5 credential provisioning UX: how a user's encrypted MT5 password and a
-  broker's mt5_server get set in production (the session boundary is ready;
-  today they can only be seeded in the database directly)
+- investor-only credential verification: prove — at write time or at session
+  acquisition — that a provisioned credential really is the read-only one, using
+  AccountInfo.trade_allowed. Deliberately NOT implemented in Step 38 (it would
+  add an account_info() call to a session boundary that today touches only
+  initialize/login/last_error/shutdown, and would make provisioning depend on a
+  live terminal).
+- live MT5 investor-password verification: Step 38 established compatibility
+  from the installed API surface (login() is identical for either password type;
+  reads never depend on trading permission; AccountInfo.trade_allowed is the only
+  read-only signal), but no live login was performed because no real credential
+  was available.
 - market-data multi-tenant semantics: market data is now tenant-scoped like
   every other read; whether a shared read-only market-data feed (no customer
   account needed) should be carved out is an open product decision

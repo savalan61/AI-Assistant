@@ -80,15 +80,27 @@ Current known fields:
 - email
 - phone
 - password_hash
+- mt5_login
+- mt5_server
 - mt5_password_encrypted
 - is_active
-- role (broker_admin / customer)
+- role (super_admin / admin / customer)
 
 Important:
 
-- username represents the MT5 login/account number
+- username is the application/Agent login
 - password_hash is the application/Agent password
-- mt5_password_encrypted is the encrypted MT5 password
+- mt5_login / mt5_server hold the user's MT5 account number and server. A broker
+  administrator provisions them (admin: customers only; super_admin: any user in
+  its broker) through PUT /users/{user_id}/mt5-credentials. They are nullable:
+  when NULL, credential resolution falls back to a numeric username +
+  Broker.mt5_server, so pre-Step-38 rows behave exactly as before.
+- mt5_password_encrypted is the encrypted MT5 INVESTOR (read-only) password. The
+  trading/master password is never requested, stored or used, a customer can
+  neither provision nor read the credential, and no API returns it.
+- role follows the three-role model (Step 21A): exactly one super_admin per
+  Broker (enforced by a database partial unique index), any number of admins,
+  and customers. It was broker_admin/customer before that migration.
 
 User tenant ownership is defined by broker_id.
 
@@ -184,23 +196,33 @@ The application must not expose MT5 implementation details unnecessarily.
 
 The current architecture includes:
 
-- lazy MT5 provider initialization
-- process-wide provider singleton (one cache per provider type, all
-  attaching to the same terminal session)
-- thread-safe initialization
-- failed initialization is not cached
-- provider shutdown
-- FastAPI lifespan
-- startup warm-up
-- graceful shutdown
+- tenant-scoped MT5 authentication: the request's own (server, login) identity is
+  resolved from the authenticated database user and the broker row, and the
+  password is decrypted only inside the session boundary
+- one process-wide MT5SessionManager (app/core/mt5_session.py) that owns the
+  single global terminal connection: it holds the lock for a whole
+  acquire → raw-read span, reuses the session when the tenant already matches,
+  switches accounts under that lock, and forgets the identity after any failed
+  authentication or read
+- per-request provider objects carrying one tenant's credentials; the former
+  process-wide provider caches are gone
+- no startup warm-up (no tenant exists at boot); the session is established
+  lazily by the first authenticated MT5 request
+- graceful shutdown releasing the single session from the FastAPI lifespan
 - blocking MT5 calls through the consolidated run_mt5_call boundary
   (app/core/blocking.py)
 
-This process-wide singleton is a known current limitation and is not yet tenant-scoped.
+The MT5 Python API authenticates ONE account per process, so every MT5 read in
+the process is serialized on that single terminal. That is the documented cost
+of tenant safety; the production answer (one MT5 worker process per broker)
+remains future work.
 
 Do not redesign it unless explicitly instructed.
 
 ## API
+
+This is a partial, steadily growing list; CURRENT_CHECKPOINT.md is the
+authoritative record of every endpoint and contract.
 
 Current JWT-protected, read-only endpoints:
 
@@ -208,7 +230,14 @@ Current JWT-protected, read-only endpoints:
 - GET /account-info → AccountInfo response (nine fields)
 - GET /positions → wrapped positions response; empty result is 200 with
   {"positions": []}, never 404
-- POST /users → Broker-Admin-protected customer creation
+- POST /users → manager-protected customer creation (role forced to customer)
+- POST /users/admins → super_admin-protected admin creation
+- GET /users → role-based, tenant-scoped user listing
+- PUT /users/{user_id}/mt5-credentials → provision a user's MT5 investor
+  (read-only) credential; admin: customers only, super_admin: any user in its
+  broker. Write-only password, encrypted at rest, never returned.
+- GET /users/{user_id}/mt5-credentials → safe credential metadata only
+  (effective mt5_login, effective mt5_server, mt5_configured)
 
 Plus unauthenticated infrastructure:
 

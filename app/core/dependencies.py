@@ -68,24 +68,52 @@ def shutdown_mt5_session() -> None:
         manager.shutdown()
 
 
+def effective_mt5_login(user: User) -> str | None:
+    """The MT5 account number this user is read as (digits, or None).
+
+    Explicit provisioning (``user.mt5_login``) wins; otherwise the application
+    username is used when it is numeric, which is how every row provisioned
+    before per-user MT5 credentials existed keeps working. A non-numeric value
+    is simply not an MT5 account number and fails closed at the session
+    boundary. Kept as a string so leading zeros survive.
+    """
+    explicit = (user.mt5_login or "").strip()
+    if explicit:
+        return explicit
+    username = user.username.strip()
+    return username if username.isdecimal() else None
+
+
+def effective_mt5_server(user: User, broker: Broker | None) -> str | None:
+    """The MT5 server this user's account lives on.
+
+    The user's own server wins; the broker's ``mt5_server`` remains the
+    fallback so a tenant-level configuration keeps working unchanged.
+    """
+    explicit = (user.mt5_server or "").strip()
+    if explicit:
+        return explicit
+    return broker.mt5_server if broker is not None else None
+
+
 def resolve_mt5_account_credentials(user: User, broker: Broker | None) -> MT5AccountCredentials:
     """Extract a tenant's MT5 identity from the authenticated database rows.
 
-    ``user.username`` is the MT5 account number, ``user.mt5_password_encrypted``
-    the stored ciphertext of its password, and ``broker.mt5_server`` the server
-    that account belongs to. Nothing is decrypted here — the ciphertext travels
-    to the session boundary, which is the only place the plaintext exists — and
-    nothing raises: an incomplete record fails closed there, with a message that
-    never discloses which value was missing. Tenant identity therefore always
-    comes from the database User, never from a request body or a token claim.
+    The login and server are the *effective* ones (see the helpers above): the
+    user's own provisioned values when present, otherwise the legacy fallback of
+    a numeric username and the broker's server. ``mt5_password_encrypted`` is
+    the stored ciphertext of the MT5 INVESTOR (read-only) password — the trading
+    password is never accepted anywhere in this system. Nothing is decrypted
+    here — the ciphertext travels to the session boundary, which is the only
+    place the plaintext exists — and nothing raises: an incomplete record fails
+    closed there, with a message that never discloses which value was missing.
+    Tenant identity therefore always comes from the database User, never from a
+    request body or a token claim.
     """
-    username = user.username.strip()
-    # MT5 account numbers are numeric; a non-numeric username is simply not an
-    # MT5 login and fails closed at the session boundary.
-    login = int(username) if username.isdecimal() else None
+    login = effective_mt5_login(user)
     return MT5AccountCredentials(
-        login=login,
-        server=broker.mt5_server if broker is not None else None,
+        login=int(login) if login is not None else None,
+        server=effective_mt5_server(user, broker),
         password_encrypted=user.mt5_password_encrypted,
     )
 
