@@ -1,4 +1,11 @@
 from app.providers.account_info import AccountInfo, AccountInfoProvider
+from app.providers.economic_calendar import (
+    EconomicCalendarProvider,
+    EconomicEvent,
+    EventImpact,
+    impact_meets_minimum,
+)
+from app.providers.fake_economic_calendar import FakeEconomicCalendarProvider
 from app.providers.fake_position import FakePositionProvider
 from app.providers.fake_trade_history import FakeTradeHistoryProvider
 from app.providers.market_data import Candle, MarketDataProvider
@@ -13,6 +20,10 @@ __all__ = [
     "AccountInfo",
     "AccountInfoProvider",
     "Candle",
+    "EconomicCalendarProvider",
+    "EconomicEvent",
+    "EventImpact",
+    "FakeEconomicCalendarProvider",
     "FakePositionProvider",
     "FakeTradeHistoryProvider",
     "MarketDataProvider",
@@ -26,4 +37,5 @@ __all__ = [
     "TradeHistoryEntry",
     "TradeHistoryProvider",
     "TradeType",
+    "impact_meets_minimum",
 ]

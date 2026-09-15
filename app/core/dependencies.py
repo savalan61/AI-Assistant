@@ -9,6 +9,8 @@ from app.db.database import get_db
 from app.db.models import User, UserRole
 from app.providers import (
     AccountInfoProvider,
+    EconomicCalendarProvider,
+    FakeEconomicCalendarProvider,
     MT5AccountInfoProvider,
     MT5MarketDataProvider,
     MT5PositionProvider,
@@ -18,7 +20,10 @@ from app.providers import (
     TradeHistoryProvider,
 )
 from app.services.account import AccountInfoService
+from app.services.economic_calendar import EconomicCalendarService
+from app.services.economic_intelligence import EconomicIntelligenceService
 from app.services.market import MarketDataService
+from app.services.portfolio_intelligence import PortfolioIntelligenceService
 from app.services.positions import PositionService
 from app.services.trade_history import TradeHistoryService
 
@@ -163,6 +168,38 @@ def shutdown_trade_history() -> None:
     shutdown = getattr(provider, "shutdown", None)
     if callable(shutdown):
         shutdown()
+
+
+# Economic-calendar wiring. No MT5 terminal and no credentials are involved, so
+# there is no process-wide provider cache to guard (unlike the MT5 providers):
+# the provider is stateless and cheap to construct per request. The deterministic
+# fake is wired here as the development placeholder until a real calendar source
+# is selected; its provenance marker is carried through every response so the
+# data can never be mistaken for live financial data.
+def get_economic_calendar_service() -> EconomicCalendarService:
+    provider: EconomicCalendarProvider = FakeEconomicCalendarProvider()
+    return EconomicCalendarService(provider)
+
+
+def get_economic_intelligence_service() -> EconomicIntelligenceService:
+    # Reuses the existing positions composition-root path (get_position_service),
+    # so there is exactly one position architecture; an MT5 initialization
+    # failure surfaces as 503 from there, exactly as for GET /positions.
+    return EconomicIntelligenceService(
+        calendar_service=get_economic_calendar_service(),
+        position_service=get_position_service(),
+    )
+
+
+def get_portfolio_intelligence_service() -> PortfolioIntelligenceService:
+    # Reuses the existing account-info and positions composition-root paths, so
+    # there is exactly one account architecture and one position architecture
+    # (no providers are duplicated here); an MT5 initialization failure surfaces
+    # as 503 from those paths, exactly as for GET /account-info and GET /positions.
+    return PortfolioIntelligenceService(
+        account_service=get_account_info_service(),
+        position_service=get_position_service(),
+    )
 
 
 # Bearer scheme for HTTP authentication. auto_error=False lets this dependency
