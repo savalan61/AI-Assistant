@@ -192,6 +192,47 @@ def test_token_for_inactive_user_returns_401(user_db):
     assert response.status_code == 401
 
 
+def test_suspended_broker_returns_401_despite_a_valid_token(user_db):
+    # Suspending a broker must take effect for tokens that were already issued,
+    # not only at the next login.
+    factory, user_id = user_db
+
+    async def suspend() -> None:
+        async with factory() as session:
+            broker = await session.get(Broker, 1)
+            assert broker is not None
+            broker.is_active = False
+            await session.commit()
+
+    asyncio.run(suspend())
+
+    with make_client(factory) as client:
+        response = client.get("/whoami", headers=auth_header(create_access_token(str(user_id))))
+
+    assert response.status_code == 401
+
+
+def test_suspended_broker_error_is_indistinguishable_from_an_unknown_user(user_db):
+    factory, user_id = user_db
+
+    async def suspend() -> None:
+        async with factory() as session:
+            broker = await session.get(Broker, 1)
+            assert broker is not None
+            broker.is_active = False
+            await session.commit()
+
+    asyncio.run(suspend())
+
+    with make_client(factory) as client:
+        suspended = client.get("/whoami", headers=auth_header(create_access_token(str(user_id))))
+        unknown = client.get("/whoami", headers=auth_header(create_access_token("999999")))
+
+    # Neither body nor status reveals that the broker exists but is suspended.
+    assert suspended.status_code == unknown.status_code == 401
+    assert suspended.json() == unknown.json()
+
+
 def test_forged_signature_returns_401(user_db):
     import jwt as pyjwt
 

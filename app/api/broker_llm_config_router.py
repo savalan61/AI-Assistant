@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.blocking import run_mt5_call
 from app.core.dependencies import get_current_super_admin, get_llm_connection_tester
 from app.core.encryption import EncryptionError, decrypt_secret, encrypt_secret
+from app.core.url_security import UrlSecurityError, validate_llm_base_url
 from app.db.database import get_db
 from app.db.models import BrokerLLMConfig, User
 from app.providers.llm import LLMProviderKind
@@ -109,6 +110,15 @@ def _not_configured() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="LLM configuration is not set for this broker")
 
 
+def _endpoint_not_permitted(reason: str) -> HTTPException:
+    # The reason names the policy failure (scheme, or the kind of blocked
+    # address); it never contains a credential.
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=f"base_url is not an allowed outbound endpoint: {reason}",
+    )
+
+
 def _credentials_unavailable() -> HTTPException:
     # Encryption is misconfigured or the stored ciphertext cannot be opened.
     # The reason is never disclosed and no secret is included.
@@ -148,6 +158,15 @@ async def upsert_llm_config(
     always the authenticated super_admin's broker, never request input, so a
     caller cannot configure another tenant.
     """
+    # Security policy first: the broker chooses this endpoint and the server
+    # will POST to it with the broker's key, so it is validated (scheme, host,
+    # embedded credentials, and every address the hostname resolves to) before
+    # anything is encrypted or stored. A rejected endpoint writes nothing.
+    try:
+        validate_llm_base_url(request.base_url)
+    except UrlSecurityError as exc:
+        raise _endpoint_not_permitted(str(exc))
+
     try:
         api_key_encrypted = encrypt_secret(request.api_key)
     except EncryptionError:
@@ -207,6 +226,14 @@ async def test_llm_connection(
         raise _not_configured()
     if not config.is_active:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="LLM configuration is disabled")
+
+    # Defense in depth before the outbound probe: the stored endpoint was
+    # validated on write, but a row edited outside the API must not turn this
+    # endpoint into a request-forgery primitive either.
+    try:
+        validate_llm_base_url(config.base_url, resolve_host=False)
+    except UrlSecurityError as exc:
+        raise _endpoint_not_permitted(str(exc))
 
     try:
         api_key = decrypt_secret(config.api_key_encrypted)

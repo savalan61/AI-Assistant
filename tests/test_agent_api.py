@@ -736,3 +736,93 @@ def test_quota_is_scoped_to_the_utc_day_of_the_request(agent_env, patched_provid
 
     assert (first, second) == (200, 200)
     assert third_status == 429
+
+
+# --- input and prompt size limits (Step 35) ------------------------------------------------
+
+
+def test_oversized_message_is_rejected_with_422(agent_env, patched_providers, monkeypatch) -> None:
+    patched_providers()
+    monkeypatch.setattr(app_settings, "AGENT_MAX_MESSAGE_LENGTH", 20, raising=True)
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "x" * 21})
+
+    assert status == 422
+    assert "at most 20 characters" in str(body)
+
+
+def test_message_at_the_limit_is_accepted(agent_env, patched_providers, monkeypatch) -> None:
+    patched_providers()
+    monkeypatch.setattr(app_settings, "AGENT_MAX_MESSAGE_LENGTH", 20, raising=True)
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "b" * 20})
+
+    assert status == 200
+
+
+def test_oversized_message_never_reaches_the_context_or_the_llm(
+    agent_env, patched_providers, monkeypatch
+) -> None:
+    records = patched_providers()
+    monkeypatch.setattr(app_settings, "AGENT_MAX_MESSAGE_LENGTH", 10, raising=True)
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "y" * 11})
+
+    assert status == 422
+    # Rejected at the validation boundary: no MT5 read and no model call.
+    assert records["account_threads"] == []
+    assert records["llm"].call_count == 0
+
+
+def test_context_too_large_for_a_bounded_prompt_returns_422(
+    agent_env, patched_providers, monkeypatch
+) -> None:
+    patched_providers()
+    # Force the prompt-size guard to fire: the context alone exceeds the limit.
+    monkeypatch.setattr(app_settings, "AGENT_MAX_PROMPT_CHARS", 50, raising=True)
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    assert status == 422
+    assert body == {"detail": "The financial context is too large to process this request"}
+
+
+def test_prompt_size_failure_is_not_reported_as_a_service_outage(
+    agent_env, patched_providers, monkeypatch
+) -> None:
+    patched_providers()
+    monkeypatch.setattr(app_settings, "AGENT_MAX_PROMPT_CHARS", 50, raising=True)
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    assert status != 503
+
+
+def test_outbound_data_policy_narrows_the_prompt_end_to_end(
+    agent_env, patched_providers, monkeypatch
+) -> None:
+    # Proves the egress boundary is actually wired through the composition root,
+    # not merely available: a configuration change removes the data from the
+    # prompt the provider receives.
+    records = patched_providers()
+    monkeypatch.setattr(app_settings, "LLM_SEND_ACCOUNT_BALANCES", False, raising=True)
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    assert status == 200
+    prompt = records["llm"].prompts[0]
+    assert "10000.00" not in prompt.content
+    assert "withheld by the outbound data policy" in prompt.content
+    # The response contract is unchanged: only the outbound prompt narrows.
+    assert "balance" in records["llm"].prompts[0].content.lower()
+
+
+def test_prompt_size_error_leaks_no_financial_data(agent_env, patched_providers, monkeypatch) -> None:
+    patched_providers()
+    monkeypatch.setattr(app_settings, "AGENT_MAX_PROMPT_CHARS", 50, raising=True)
+
+    _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    text = str(body)
+    assert "10000" not in text
+    assert "XAUUSD" not in text

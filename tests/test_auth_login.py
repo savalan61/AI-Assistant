@@ -7,13 +7,14 @@ test-only values. No pytest asyncio plugin: async setup is driven with
 asyncio.run.
 """
 import asyncio
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterator
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import app.core.dependencies as deps
 from app.api.auth_router import router
 from app.core.config import settings as app_settings
 from app.core.security import decode_token
@@ -30,6 +31,24 @@ TEST_PASSWORD = "correct horse battery staple"
 def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_settings, "SECRET_KEY", TEST_SECRET, raising=True)
     monkeypatch.setattr(app_settings, "ALGORITHM", TEST_ALGORITHM, raising=True)
+
+
+@pytest.fixture(autouse=True)
+def fresh_login_throttle() -> Iterator[None]:
+    # The throttle is process-wide state by design, so each test starts from a
+    # clean one (the established reset_agent_usage_limiter pattern).
+    deps.reset_login_throttle()
+    yield
+    deps.reset_login_throttle()
+
+
+@pytest.fixture()
+def small_login_limit(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
+    """Shrink the lockout threshold so it can be reached in a few requests."""
+    monkeypatch.setattr(app_settings, "LOGIN_MAX_FAILURES", 3, raising=True)
+    deps.reset_login_throttle()
+    yield 3
+    deps.reset_login_throttle()
 
 
 @pytest.fixture()
@@ -209,3 +228,75 @@ def test_success_response_exposes_only_token_fields(auth_db):
         response = client.post("/auth/login", json=login_payload())
 
     assert set(response.json().keys()) == {"access_token", "token_type"}
+
+
+# --- brute-force protection -----------------------------------------------------------
+
+
+def statuses_for(client: TestClient, attempts: int, **overrides: str) -> list[int]:
+    return [client.post("/auth/login", json=login_payload(**overrides)).status_code for _ in range(attempts)]
+
+
+def test_repeated_failures_eventually_return_429(auth_db, small_login_limit):
+    factory, _ = auth_db
+
+    with make_client(factory) as client:
+        statuses = statuses_for(client, small_login_limit + 1, password="wrong password")
+
+    assert statuses[:-1] == [401] * small_login_limit
+    assert statuses[-1] == 429
+
+
+def test_throttle_is_identical_for_existing_and_unknown_usernames(auth_db, small_login_limit):
+    factory, _ = auth_db
+
+    with make_client(factory) as client:
+        existing = statuses_for(client, small_login_limit + 1, password="wrong password")
+
+    # Same keys, fresh counters: the unknown username must behave identically,
+    # so the lockout cannot be used to probe which accounts exist.
+    deps.reset_login_throttle()
+    with make_client(factory) as client:
+        unknown = statuses_for(client, small_login_limit + 1, username="no-such-user", password="wrong password")
+
+    assert existing == unknown
+
+
+def test_throttle_applies_even_to_a_correct_password(auth_db, small_login_limit):
+    factory, _ = auth_db
+
+    with make_client(factory) as client:
+        failed = statuses_for(client, small_login_limit, password="wrong password")
+        blocked = client.post("/auth/login", json=login_payload())
+
+    assert failed == [401] * small_login_limit
+    # The lockout is deliberate: it cannot be bypassed by suddenly knowing the
+    # password, which is what makes it effective against guessing.
+    assert blocked.status_code == 429
+
+
+def test_successful_login_clears_failed_attempts(auth_db, small_login_limit):
+    factory, _ = auth_db
+
+    with make_client(factory) as client:
+        assert statuses_for(client, small_login_limit - 1, password="wrong password") == [401] * (small_login_limit - 1)
+        assert client.post("/auth/login", json=login_payload()).status_code == 200
+        # Counters were cleared by the success, so failing again is not 429.
+        assert client.post("/auth/login", json=login_payload(password="wrong password")).status_code == 401
+
+
+def test_throttled_response_is_generic_and_secret_free(auth_db, small_login_limit):
+    factory, _ = auth_db
+
+    with make_client(factory) as client:
+        statuses_for(client, small_login_limit, password="wrong password")
+        response = client.post("/auth/login", json=login_payload())
+
+    body = str(response.json())
+    assert response.status_code == 429
+    assert "username" not in body.lower() or "attempt" in body.lower()
+    assert "10001" not in body
+    assert TEST_PASSWORD not in body
+    assert "no-such-user" not in body
+    assert "password_hash" not in body
+    assert "$2b$" not in body

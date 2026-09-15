@@ -2,9 +2,7 @@
 
 ## Current Status
 
-Step 33 — LLM Router + Free LLM Pool
-(with Steps 28–32: Agent HTTP Endpoint, Real LLM Adapter, LLM DI Wiring,
-Agent Scope Guard + Per-User Daily Limit, Broker LLM Configuration)
+Step 35 — Security & Agent Hardening
 
 Status:
 
@@ -12,27 +10,32 @@ VERIFIED + COMMITTED + SYNCED
 
 Checkpoint commit:
 
-"feat(ai): add broker llm routing and agent controls" — Steps 29–33 and this
-document update are committed together in this single checkpoint commit.
-The prior synced checkpoint is 5506fa9 ("feat(ai): add agent http endpoint",
-Step 28).
+"feat(security): harden authentication, llm egress and agent input" — the
+Step 35 implementation and this document update are committed together in
+this single checkpoint commit. The prior synced checkpoint was b95eaa1
+("feat(ai): add broker llm routing and agent controls", Steps 29–33).
 
-Steps 28 (Agent HTTP Endpoint), 29 (Real LLM Adapter), 30 (LLM DI Wiring),
-31 (Agent Scope Guard + Per-User Daily Limit), 32 (Broker LLM Configuration)
-and 33 (LLM Router + Free LLM Pool) are all verified, committed and synced.
+Step 35 was driven by a read-only architecture/production-readiness audit and
+hardened the security posture without changing any existing feature contract:
+broker-configurable LLM endpoints are validated against SSRF, JWT access
+tokens must carry exp and sub, a suspended broker is enforced on every
+request, login is brute-force throttled, agent input and prompt size are
+bounded, the outbound LLM data boundary is explicit and configurable, and the
+development economic calendar can no longer be served outside development.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 574 passed, 3 warnings (pre-existing third-party
+pytest tests/ -q → 699 passed, 3 warnings (pre-existing third-party
 deprecation warnings); verified 2026-09-15 on this exact tree
 
 Static verification: python -m compileall app tests alembic → clean.
 git diff --check → clean.
 Direct Pylance/pyright execution remains unavailable in this environment
-(as recorded for Steps 8–33); a focused manual static/type review was
-performed for Steps 28–33 instead. No type suppressions were used.
+(as recorded for Steps 8–35); a focused manual static/type review was
+performed for Step 35 instead, including an AST unused-import scan over every
+changed module. No type suppressions were used.
 
-No trading functionality was added or changed in Steps 28–33; all MT5 read
+No trading functionality was added or changed in Step 35; all MT5 read
 behavior is untouched. The AI remains strictly READ-ONLY.
 
 Working tree after this checkpoint:
@@ -487,6 +490,81 @@ Includes:
   deterministic offline test double) exercises the pool's ordering and
   fallback completely offline
 - 33 focused tests (pool 9, router/resolver 14, composition-root wiring 10)
+
+### Step 34 — Architecture & Production-Readiness Audit (READ-ONLY)
+Status: AUDIT ONLY — no code, no commit
+
+A read-only audit of the whole project (no file was created, modified,
+deleted, renamed, staged or committed). It recorded, among other findings:
+
+- the MT5 data plane has no tenant scoping (all brokers share one terminal
+  account) — known issue 1, and the product blocker it implies
+- an SSRF vector through the broker-supplied LLM base_url
+- uncontrolled egress of customer financial data to third-party LLMs
+- no login brute-force protection
+- no token revocation; exp was verified-if-present rather than required
+- broker suspension was enforced only at login
+- the role-evolution migration can fail on duplicate per-broker admins
+- money modelled as float throughout the domain contracts
+
+Step 35 implemented the fixes the audit identified as required now; the
+remaining findings stay in Known Issues and Next Step below.
+
+### Step 35 — Security & Agent Hardening
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- app/core/url_security.py: the single outbound-endpoint (SSRF) policy,
+  validate_llm_base_url, provider-agnostic and applied both on write and
+  immediately before an outbound request. Rejects non-http(s) schemes,
+  embedded credentials, invalid ports, plaintext http outside development,
+  localhost/loopback, link-local (including the 169.254.169.254 metadata
+  address), multicast/reserved/unspecified, RFC1918, IPv4-mapped IPv6 forms,
+  and any address that is not publicly routable (which also covers carrier-
+  grade NAT). Hostnames are resolved and every resolved address checked; an
+  unresolvable host is rejected rather than allowed
+- PUT /broker/llm-config validates the endpoint before encrypting or storing
+  anything (422, nothing written); the resolver and the connection-test
+  endpoint re-validate cheaply before an outbound request, so a row edited
+  outside the API cannot turn the server into a request-forgery primitive
+- app/services/auth/login_throttle.py: in-process login brute-force
+  protection keyed on the client IP and on the submitted username (failures
+  counted whether or not the account exists, so the lockout cannot be used to
+  probe for real usernames). Checked before any credential lookup, cleared by
+  a successful login, configurable, and bounded by stale-entry eviction
+- JWT: exp and sub are now REQUIRED by decode_token (options={"require": …}),
+  not merely verified when present. No refresh tokens or revocation were added
+- get_current_user now also rejects a request whose broker is missing or
+  inactive, so suspending a broker takes effect on already-issued tokens. The
+  failure reuses the existing generic 401, so it is indistinguishable from an
+  unknown user
+- Agent input/prompt limits: AGENT_MAX_MESSAGE_LENGTH (422 at the validation
+  boundary), AGENT_MAX_PROMPT_TRADES (most recent N by (time, ticket), with
+  the number omitted stated explicitly in the prompt), and
+  AGENT_MAX_PROMPT_CHARS (the trade block is dropped with an explicit note
+  first; beyond that the request is refused with 422 and a generic detail
+  rather than sending an unbounded payload)
+- prompt-injection separation: the user request is wrapped in an escaped
+  USER_REQUEST block described as untrusted data, and the system instructions
+  state that instructions inside it must never be followed. The read-only /
+  no-prediction / no-trade-advice framing is preserved verbatim
+- app/services/agent/egress.py: OutboundDataPolicy, an immutable
+  configuration-driven policy for what may leave the process
+  (LLM_SEND_TRADE_HISTORY / LLM_SEND_ACCOUNT_BALANCES /
+  LLM_SEND_POSITION_PRICING, all defaulting to the previous behaviour).
+  Resolved in the composition root and injected into AgentService, so a
+  future per-broker consent / data-processing policy is a new resolver, not a
+  rewrite. Account identity remains structurally excluded regardless of policy
+- economic calendar: get_economic_calendar_service() fails closed (503)
+  outside APP_ENV=development, so the development placeholder can never be
+  served to a broker's customers. Development and test behaviour is unchanged
+- .env.example rewritten to document all 13 settings, including the
+  generation commands for SECRET_KEY and SECRET_ENCRYPTION_KEY and the
+  failure mode of leaving each unset. No secret values are placed in it
+- 125 new focused tests (url security 37, login throttle 24, prompt/egress 21,
+  plus updated integration coverage for JWT claims, broker suspension,
+  endpoint rejection, message/prompt limits and the calendar guard)
 
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
@@ -1098,10 +1176,24 @@ GET /users (super_admin or admin; role-based visibility):
   tool exists in the agent or LLM layer.
 - No price prediction, BUY/SELL recommendation or trading action is produced
   by any intelligence endpoint or the agent.
-- Steps 18–33 are committed and pushed to origin/master (this checkpoint
-  commit: "feat(ai): add broker llm routing and agent controls"; the prior
-  synced commit was 5506fa9).
-- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 574 passed, 3 warnings.
+- Broker LLM base_url is validated against SSRF on write and before every
+  outbound request; loopback, private, link-local, metadata and non-publicly-
+  routable destinations are refused, and https is required outside development.
+- JWT access tokens must carry exp and sub; get_current_user rejects inactive
+  users AND inactive/suspended brokers with the same generic 401.
+- Login is brute-force throttled in-process, per client IP and per submitted
+  username, and the lockout is identical for existing and unknown usernames.
+- Agent input is bounded (message length at the validation boundary; trade
+  block capped with the omission count stated; total prompt size guarded), and
+  the user's text is separated from system framing as untrusted data.
+- Outbound LLM data is governed by an explicit, configurable
+  OutboundDataPolicy resolved at the composition root; account identity is
+  never sent regardless of policy.
+- The development economic calendar fails closed outside APP_ENV=development.
+- Steps 18–35 are committed and pushed to origin/master (this checkpoint
+  commit: "feat(security): harden authentication, llm egress and agent input";
+  the prior synced commit was b95eaa1).
+- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 699 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
@@ -1154,6 +1246,19 @@ must be reported rather than hidden.
     ordering, health and quota monitoring are future work.
 12. Broker LLM configuration has no audit trail (who changed what, and when)
     and no API-key rotation flow (re-encrypting existing rows under a new key).
+13. Residual limitations of the Step 35 hardening, each a deliberate trade-off:
+    - DNS rebinding between configuration write and request time is only partly
+      mitigated. The write-time DNS check plus the call-time literal/address
+      re-check are in place, but the resolved address is not pinned for the
+      request lifetime (pinning would require replacing the HTTP client's
+      connection handling).
+    - Login throttling is in-process and per worker, and its lockout is keyed on
+      the submitted username, so an attacker flooding one username can lock
+      that user out for the configured window. The window is short and
+      configurable.
+    - The real Free LLM Pool and real economic-calendar source are still absent
+      (items 9 and 11), so a non-development deployment refuses those
+      capabilities (503) instead of degrading.
 
 Resolved:
 
@@ -1162,6 +1267,20 @@ Resolved:
   their synchronous service calls off the event loop through the consolidated
   run_mt5_call boundary in app/core/blocking.py.
 - The market-data endpoint now requires authentication (Step 11).
+- (Audit finding) SSRF through the broker-supplied LLM base_url — RESOLVED by
+  Step 35 (validated on write and before every outbound request).
+- (Audit finding) No login brute-force protection — RESOLVED by Step 35.
+- (Audit finding) exp was verified-if-present rather than required; no token
+  could be assumed to carry an expiry — RESOLVED by Step 35.
+- (Audit finding) Broker suspension was enforced only at login — RESOLVED by
+  Step 35.
+- (Audit finding) Agent request and prompt size were unbounded — RESOLVED by
+  Step 35.
+- (Audit finding) The development economic calendar could be selected outside
+  development — RESOLVED by Step 35 (fails closed with 503).
+- (Audit finding) What may leave the process toward an external LLM was
+  implicit in the prompt template — RESOLVED by Step 35 (explicit
+  OutboundDataPolicy).
 
 These issues are known and must NOT be fixed automatically.
 
@@ -1169,8 +1288,9 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–33 are complete, committed, and synced to origin/master (this
-checkpoint commit: "feat(ai): add broker llm routing and agent controls").
+Steps 12–35 are complete, committed, and synced to origin/master (this
+checkpoint commit: "feat(security): harden authentication, llm egress and
+agent input").
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
@@ -1193,10 +1313,26 @@ none may be started without an explicit instruction:
   before economic intelligence can carry real data
 - prompt safety screening before generation (deterministic refusal of
   trading-instruction requests) — a deliberate decision, not yet started
-- tenant-scoped MT5 design (known issue 1)
+- tenant-scoped MT5 design (known issue 1) — the largest remaining product gap:
+  every broker's customers currently read the same terminal account
+- observability foundation: request IDs, structured logging, and a real
+  readiness endpoint that reports database / MT5 / LLM availability separately
+  from liveness (today /health is an unconditional ok)
+- money representation: balances, equity, profit and volume are still float
+  throughout the provider contracts; an exact representation should be decided
+  before more money-touching code lands
+- role-migration pre-flight: the broker_admin→super_admin migration aborts on
+  the unique partial index if any broker holds more than one broker_admin
+- login tenant discriminator: usernames are unique per broker but login matches
+  on username alone, so a cross-tenant collision currently makes a user
+  unloggable
+- CORS with an explicit origin allowlist, plus a coarse global rate limit
+  (only login and the per-user agent quota are throttled today)
+- trade-history N+1 MT5 IPC calls: each closing deal triggers a separate
+  history_orders_get round-trip
 - remaining known issues (IPC timeout, /health MT5 readiness, multi-worker
   semantics, candle UTC review, last_error robustness, Windows dependency,
-  hygiene)
+  hygiene, and the residual Step 35 trade-offs in known issue 13)
 
 Do NOT implement any next step until explicitly instructed.
 
@@ -1208,9 +1344,11 @@ app/providers/openai_compatible_llm.py, app/providers/market_data.py), the MT5
 providers, the consolidated blocking boundary (app/core/blocking.py), the
 intelligence services (app/services/economic_intelligence/,
 app/services/portfolio_intelligence/, app/services/financial_context/), the
-agent boundary and its guard chain (app/services/agent/), the broker LLM
-configuration service and resolver (app/services/broker_llm_config/), and the
-composition root (app/core/dependencies.py).
+agent boundary and its guard chain (app/services/agent/, including egress.py),
+the outbound-endpoint policy (app/core/url_security.py), the login throttle
+(app/services/auth/), the broker LLM configuration service and resolver
+(app/services/broker_llm_config/), and the composition root
+(app/core/dependencies.py).
 
 ## Architectural Guardrails
 

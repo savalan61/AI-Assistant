@@ -8,14 +8,16 @@ mutation exists behind this endpoint, and the agent layer itself cannot trade.
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.blocking import run_mt5_call
+from app.core.config import settings
 from app.core.dependencies import get_agent_service, get_agent_usage_limiter, get_current_user
 from app.db.models import User
 from app.services.agent import (
     AgentService,
     AgentUsageLimiter,
+    PromptTooLargeError,
     UsageLimitExceededError,
     check_scope,
 )
@@ -33,6 +35,17 @@ class AgentRequest(BaseModel):
     # Optional trade-history look-back in days; defaults to the established
     # 30-day window. Values below 1 are rejected with 422 before any work.
     trade_history_days: int = Field(default=DEFAULT_TRADE_HISTORY_DAYS, ge=1)
+
+    # Upper bound on the message: it is rendered into an outbound LLM prompt, so
+    # an unbounded body would be an unbounded (and billable) payload. Read from
+    # settings at validation time so the limit stays configurable per deployment.
+    @field_validator("message")
+    @classmethod
+    def _validate_message_length(cls, value: str) -> str:
+        limit = settings.AGENT_MAX_MESSAGE_LENGTH
+        if len(value) > limit:
+            raise ValueError(f"message must be at most {limit} characters")
+        return value
 
     # Deliberately no broker_id/user_id field: extra="forbid" turns any such
     # supplied field into 422, so a caller can never widen or redirect the
@@ -186,6 +199,14 @@ async def handle_agent_message(
             payload.message,
             current_user.broker_id,
             payload.trade_history_days,
+        )
+    except PromptTooLargeError:
+        # The request was within its limits, but the financial context could not
+        # be rendered into a bounded prompt even after the deterministic
+        # reductions. Reported as an unprocessable request with a generic detail.
+        raise HTTPException(
+            status_code=422,
+            detail="The financial context is too large to process this request",
         )
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Agent service temporarily unavailable")

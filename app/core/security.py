@@ -56,15 +56,20 @@ def create_access_token(subject: str, expires_delta: timedelta | None = None) ->
 
 def decode_token(token: str) -> dict[str, Any]:
     try:
-        # PyJWT verifies both signature and exp when present (required here).
+        # Both claims are required, not merely verified-if-present: a token
+        # with a valid signature but no exp would otherwise never expire, and
+        # one without sub names no user. PyJWT raises
+        # MissingRequiredClaimError (an InvalidTokenError) when either is
+        # absent, so the failure is translated here like any other.
         payload: dict[str, Any] = jwt.decode(
             token,
             settings.SECRET_KEY,
             algorithms=[settings.ALGORITHM],
+            options={"require": ["exp", "sub"]},
         )
     except jwt.InvalidTokenError as exc:
         # Base class of every expected PyJWT failure: ExpiredSignatureError,
-        # InvalidSignatureError, DecodeError, etc. Translated at this boundary
-        # so no third-party details leak to callers.
+        # MissingRequiredClaimError, InvalidSignatureError, DecodeError, etc.
+        # Translated at this boundary so no third-party details leak to callers.
         raise SecurityError("Invalid or expired token") from exc
     return payload

@@ -247,6 +247,43 @@ def test_invalid_stored_configuration_raises_configuration_error(broker_db: dict
         resolve(broker_db, broker_db["broker_a_id"])
 
 
+@pytest.mark.parametrize("base_url", ["https://127.0.0.1/v1", "https://169.254.169.254/v1", "https://10.0.0.5/v1"])
+def test_resolution_refuses_a_stored_endpoint_that_is_not_permitted(
+    broker_db: dict[str, Any], base_url: str
+) -> None:
+    # Re-checked immediately before an outbound request, so a row that bypassed
+    # the write-time policy still cannot make the server call its own network.
+    async def repoint() -> None:
+        async with broker_db["factory"]() as session:
+            config = await session.get(BrokerLLMConfig, 1)
+            assert config is not None
+            config.base_url = base_url
+            await session.commit()
+
+    asyncio.run(repoint())
+
+    with pytest.raises(BrokerLLMConfigurationError):
+        resolve(broker_db, broker_db["broker_a_id"])
+
+
+def test_resolution_refuses_a_plaintext_endpoint_outside_development(
+    broker_db: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app_settings, "APP_ENV", "production", raising=True)
+
+    async def downgrade() -> None:
+        async with broker_db["factory"]() as session:
+            config = await session.get(BrokerLLMConfig, 1)
+            assert config is not None
+            config.base_url = "http://llm.example.test/v1"
+            await session.commit()
+
+    asyncio.run(downgrade())
+
+    with pytest.raises(BrokerLLMConfigurationError):
+        resolve(broker_db, broker_db["broker_a_id"])
+
+
 def test_resolution_is_scoped_to_the_requested_broker(broker_db: dict[str, Any]) -> None:
     # Broker A's configuration must never leak into broker B's resolution.
     assert isinstance(resolve(broker_db, broker_db["broker_a_id"]), OpenAICompatibleLLMProvider)

@@ -12,6 +12,9 @@ Design notes:
 * the prompt is prepared in the agent layer (prompt.py), so the provider does
   not depend on FinancialContext and the agent does not depend on any vendor's
   request format;
+* what may leave the process is governed by an explicit OutboundDataPolicy
+  (egress.py), injected here so a stricter — later per-broker — policy can be
+  supplied without touching this class;
 * no HTTP endpoint — this is an internal service/domain boundary;
 * no agent framework (LangChain, LangGraph, ...) and no tool use;
 * read-only by construction: the only capabilities held here are reading a
@@ -21,6 +24,7 @@ from datetime import datetime
 from typing import NamedTuple
 
 from app.providers.llm import LLMProvider
+from app.services.agent.egress import OutboundDataPolicy
 from app.services.agent.prompt import build_prompt
 from app.services.financial_context import (
     DEFAULT_TRADE_HISTORY_DAYS,
@@ -53,9 +57,18 @@ class AgentService:
     financial-context logic.
     """
 
-    def __init__(self, financial_context_service: FinancialContextService, llm_provider: LLMProvider):
+    def __init__(
+        self,
+        financial_context_service: FinancialContextService,
+        llm_provider: LLMProvider,
+        data_policy: OutboundDataPolicy | None = None,
+    ):
         self._context = financial_context_service
         self._llm = llm_provider
+        # Resolved once per service: the policy decides which classes of
+        # financial data may be rendered into an external prompt. Defaults to
+        # the configured policy so existing construction keeps working.
+        self._data_policy = data_policy if data_policy is not None else OutboundDataPolicy.from_settings()
 
     def handle(
         self,
@@ -84,7 +97,7 @@ class AgentService:
             trade_history_days=trade_history_days,
             now=now,
         )
-        answer = self._llm.complete(build_prompt(request, context))
+        answer = self._llm.complete(build_prompt(request, context, self._data_policy))
         return AgentResponse(
             request=request,
             broker_id=broker_id,

@@ -117,6 +117,32 @@ def test_expired_token_raises_security_error():
         decode_token(token)
 
 
+def test_token_without_exp_is_rejected():
+    # A validly signed token that simply carries no expiry must not be trusted:
+    # exp is required, not merely verified when present.
+    no_exp = jwt.encode({"sub": "user-42"}, TEST_SECRET, algorithm=TEST_ALGORITHM)
+
+    with pytest.raises(SecurityError):
+        decode_token(no_exp)
+
+
+def test_token_without_sub_is_rejected():
+    no_sub = jwt.encode({"exp": 4102444800}, TEST_SECRET, algorithm=TEST_ALGORITHM)
+
+    with pytest.raises(SecurityError):
+        decode_token(no_sub)
+
+
+def test_token_without_required_claims_fails_like_any_invalid_token():
+    # The same generic message as every other rejection: no claim detail leaks.
+    no_exp = jwt.encode({"sub": "user-42"}, TEST_SECRET, algorithm=TEST_ALGORITHM)
+
+    with pytest.raises(SecurityError) as exc_info:
+        decode_token(no_exp)
+
+    assert "Invalid or expired token" in str(exc_info.value)
+
+
 def test_security_error_hides_third_party_details():
     # The boundary must not leak PyJWT internals in the message.
     with pytest.raises(SecurityError) as exc_info:

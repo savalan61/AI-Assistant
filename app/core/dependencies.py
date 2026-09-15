@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
-from app.db.models import User, UserRole
+from app.db.models import Broker, User, UserRole
 from app.providers import (
     AccountInfoProvider,
     EconomicCalendarProvider,
@@ -25,7 +25,8 @@ from app.providers import (
     TradeHistoryProvider,
 )
 from app.services.account import AccountInfoService
-from app.services.agent import AgentService, AgentUsageLimiter
+from app.services.agent import AgentService, AgentUsageLimiter, OutboundDataPolicy
+from app.services.auth import LoginThrottle
 from app.services.broker_llm_config import (
     BrokerLLMConfigurationError,
     LLMConnectionTester,
@@ -188,7 +189,19 @@ def shutdown_trade_history() -> None:
 # fake is wired here as the development placeholder until a real calendar source
 # is selected; its provenance marker is carried through every response so the
 # data can never be mistaken for live financial data.
+#
+# Fail-closed guard: the placeholder must never be served to a broker's
+# customers. Outside development there is no production calendar source yet, so
+# the dependency refuses (503) instead of quietly returning fabricated events.
+_CALENDAR_PLACEHOLDER_ALLOWED_ENVS = frozenset({"development"})
+
+
 def get_economic_calendar_service() -> EconomicCalendarService:
+    if settings.APP_ENV not in _CALENDAR_PLACEHOLDER_ALLOWED_ENVS:
+        raise HTTPException(
+            status_code=503,
+            detail="Economic calendar data source is not configured",
+        )
     provider: EconomicCalendarProvider = FakeEconomicCalendarProvider()
     return EconomicCalendarService(provider)
 
@@ -300,6 +313,44 @@ def get_llm_connection_tester() -> LLMConnectionTester:
     return LLMConnectionTester()
 
 
+def get_outbound_data_policy() -> OutboundDataPolicy:
+    """The policy for what may leave the process in an external LLM prompt.
+
+    Resolved from configuration today. This is deliberately the seam a future
+    per-broker consent / data-processing agreement plugs into: it only has to
+    return a different OutboundDataPolicy instance, and neither the prompt
+    builder nor AgentService changes.
+    """
+    return OutboundDataPolicy.from_settings()
+
+
+# Login brute-force protection is process-wide state by its documented nature
+# (in-process per-IP and per-username counters, reset on restart): one throttle
+# per process, lazily built from settings behind the same lock-guarded pattern
+# as the other in-process limiters. The thresholds come from configuration.
+_login_throttle: LoginThrottle | None = None
+_login_throttle_lock = threading.Lock()
+
+
+def get_login_throttle() -> LoginThrottle:
+    global _login_throttle
+    if _login_throttle is None:
+        with _login_throttle_lock:
+            if _login_throttle is None:
+                _login_throttle = LoginThrottle(
+                    settings.LOGIN_MAX_FAILURES, settings.LOGIN_FAILURE_WINDOW_SECONDS
+                )
+    return _login_throttle
+
+
+def reset_login_throttle() -> None:
+    # Test/development seam: drop the process-wide throttle so the next request
+    # rebuilds it from current settings. Never called in production flow.
+    global _login_throttle
+    with _login_throttle_lock:
+        _login_throttle = None
+
+
 
 
 # Bearer scheme for HTTP authentication. auto_error=False lets this dependency
@@ -352,6 +403,14 @@ async def get_current_user(
 
     # Inactive users must never authenticate.
     if user is None or not user.is_active:
+        raise _unauthorized("User not found or inactive")
+
+    # The tenant must still be active. Login already checks this, but a token
+    # issued before a broker was suspended must stop working immediately rather
+    # than at the next login. The same generic detail is reused so the response
+    # never reveals whether the user, the broker, or the role caused it.
+    broker = await session.get(Broker, user.broker_id)
+    if broker is None or not broker.is_active:
         raise _unauthorized("User not found or inactive")
 
     return user
@@ -410,4 +469,7 @@ async def get_agent_service(
             trade_history_service=get_trade_history_service(),
         ),
         llm_provider=llm_provider,
+        # The outbound-data policy is applied to the prompt the provider gets,
+        # so what may leave the process is explicit at the composition boundary.
+        data_policy=get_outbound_data_policy(),
     )

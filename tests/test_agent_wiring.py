@@ -21,7 +21,7 @@ from app.providers.llm import LLMPrompt, LLMProvider
 from app.providers.llm_pool import LLMProviderPool
 from app.providers.llm_router import LLMRouter
 from app.providers.openai_compatible_llm import OpenAICompatibleLLMProvider
-from app.services.agent import AgentService
+from app.services.agent import AgentService, OutboundDataPolicy
 from app.services.broker_llm_config import BrokerLLMConfigurationError
 
 
@@ -221,6 +221,39 @@ def test_agent_service_reuses_the_single_mt5_composition_paths(
     assert deps._account_info_provider is not None
     assert deps.get_account_info_provider() is deps._account_info_provider
     assert first is not second
+
+
+# --- outbound LLM data policy --------------------------------------------------------
+
+
+def test_outbound_data_policy_comes_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "LLM_SEND_ACCOUNT_BALANCES", False, raising=True)
+    monkeypatch.setattr(settings, "LLM_SEND_POSITION_PRICING", False, raising=True)
+    monkeypatch.setattr(settings, "LLM_SEND_TRADE_HISTORY", False, raising=True)
+
+    policy = deps.get_outbound_data_policy()
+
+    assert policy == OutboundDataPolicy(
+        allow_account_balances=False,
+        allow_position_pricing=False,
+        allow_trade_history=False,
+    )
+
+
+def test_agent_service_is_built_with_the_configured_policy(
+    monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
+) -> None:
+    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+        return None
+
+    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
+    monkeypatch.setattr(settings, "LLM_SEND_TRADE_HISTORY", False, raising=True)
+
+    service = asyncio.run(deps.get_agent_service(make_user(), object()))
+
+    assert isinstance(service._data_policy, OutboundDataPolicy)
+    assert service._data_policy.allow_trade_history is False
 
 
 def test_openai_adapter_is_a_provider_the_pool_accepts() -> None:

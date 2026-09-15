@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.encryption import EncryptionError, decrypt_secret
+from app.core.url_security import UrlSecurityError, validate_llm_base_url
 from app.db.models import BrokerLLMConfig
 from app.providers.llm import LLMProvider, LLMProviderKind
 from app.providers.openai_compatible_llm import OpenAICompatibleLLMProvider
@@ -44,6 +45,16 @@ async def resolve_broker_llm_provider(session: AsyncSession, broker_id: int) -> 
         # The database CHECK constraint allows only implemented kinds; this
         # guard keeps the resolver explicit as more kinds are added.
         raise BrokerLLMConfigurationError("unsupported broker LLM provider kind")
+
+    try:
+        # Re-checked here, immediately before an outbound request, so a row
+        # edited outside the API (or one written before this policy existed)
+        # still cannot make the server call a loopback/private endpoint.
+        # ``resolve_host=False``: the authoritative DNS check runs on write, and
+        # a lookup on every agent request would add latency to the hot path.
+        validate_llm_base_url(config.base_url, resolve_host=False)
+    except UrlSecurityError as exc:
+        raise BrokerLLMConfigurationError("broker LLM endpoint is not permitted") from exc
 
     try:
         api_key = decrypt_secret(config.api_key_encrypted)

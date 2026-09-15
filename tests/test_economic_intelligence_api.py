@@ -402,3 +402,48 @@ def test_placeholder_data_is_never_labelled_as_live(intelligence_env, patched_po
 
     # Provenance is explicit and non-live in every response of this step.
     assert body["data_source"] == "fake-development-placeholder"
+
+
+# --- production safety: the placeholder calendar must not be served ----------------------
+
+
+def test_placeholder_calendar_fails_closed_outside_development(
+    intelligence_env, patched_positions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = patched_positions((XAUUSD,))
+    monkeypatch.setattr(app_settings, "APP_ENV", "production", raising=True)
+
+    status, body = get_intelligence(intelligence_env, intelligence_env["customer_a_id"])
+
+    # No production calendar source exists yet, so the endpoint refuses rather
+    # than returning fabricated events to a broker's customers.
+    assert status == 503
+    assert body == {"detail": "Economic calendar data source is not configured"}
+    # It failed before doing any work.
+    assert record == []
+
+
+@pytest.mark.parametrize("environment", ["staging", "production", ""])
+def test_any_non_development_environment_fails_closed(
+    intelligence_env, patched_positions, monkeypatch: pytest.MonkeyPatch, environment: str
+) -> None:
+    patched_positions((XAUUSD,))
+    monkeypatch.setattr(app_settings, "APP_ENV", environment, raising=True)
+
+    status, _ = get_intelligence(intelligence_env, intelligence_env["customer_a_id"])
+
+    assert status == 503
+
+
+def test_placeholder_calendar_still_works_in_development(
+    intelligence_env, patched_positions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Explicitly pin the development case: the guard must not change dev/test
+    # behaviour.
+    patched_positions((XAUUSD,))
+    monkeypatch.setattr(app_settings, "APP_ENV", "development", raising=True)
+
+    status, body = get_intelligence(intelligence_env, intelligence_env["customer_a_id"])
+
+    assert status == 200
+    assert body["data_source"] == "fake-development-placeholder"

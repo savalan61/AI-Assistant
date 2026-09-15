@@ -32,6 +32,29 @@ class Settings(BaseSettings):
     # LLM call. Must be at least 1 (validated by the limiter).
     AGENT_DAILY_REQUEST_LIMIT: int = 50
 
+    # Agent request/prompt size limits. The message cap is enforced at the API
+    # validation boundary (422); the trade cap and the total prompt cap are
+    # applied deterministically while building the prompt, so an unusually
+    # large financial context can never produce an unbounded outbound payload.
+    AGENT_MAX_MESSAGE_LENGTH: int = 2000
+    AGENT_MAX_PROMPT_TRADES: int = 50
+    AGENT_MAX_PROMPT_CHARS: int = 24000
+
+    # Outbound LLM data policy: what may be rendered into an external model
+    # prompt. All True reproduces the original behaviour; each flag removes a
+    # specific data class from the prompt (see app/services/agent/egress.py).
+    # These are the seam for a future per-broker consent/data-processing policy.
+    LLM_SEND_TRADE_HISTORY: bool = True
+    LLM_SEND_ACCOUNT_BALANCES: bool = True
+    LLM_SEND_POSITION_PRICING: bool = True
+
+    # Login brute-force protection (in-process, per client IP and per submitted
+    # username). After LOGIN_MAX_FAILURES failures inside
+    # LOGIN_FAILURE_WINDOW_SECONDS the login endpoint answers a generic 429.
+    # Counters reset on a successful login and on process restart.
+    LOGIN_MAX_FAILURES: int = 10
+    LOGIN_FAILURE_WINDOW_SECONDS: int = 300
+
     # Encryption key for secrets stored in the database (broker LLM API keys).
     # A urlsafe-base64 Fernet key; generate one with
     # app.core.encryption.generate_encryption_key(). No committed value: an

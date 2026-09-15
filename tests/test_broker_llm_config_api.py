@@ -9,6 +9,7 @@ no test performs a network call. JWT and encryption config use test-only values.
 """
 import asyncio
 import logging
+import socket
 import threading
 from typing import Any, AsyncIterator
 
@@ -22,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import app.services.broker_llm_config.broker_llm_config_service as tester_module
 from app.api.broker_llm_config_router import router
 from app.core.config import settings as app_settings
-from app.core.encryption import decrypt_secret, generate_encryption_key
+from app.core.encryption import decrypt_secret, encrypt_secret, generate_encryption_key
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
@@ -45,12 +46,32 @@ VALID_BODY: dict[str, Any] = {
 }
 
 
+# A public, documentation-range address the fake resolver returns for every
+# configured endpoint host, so the SSRF validator's address checks pass without
+# any real DNS traffic in the suite.
+PUBLIC_ADDRESS = "93.184.216.34"
+
+
 @pytest.fixture(autouse=True)
 def test_only_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_settings, "SECRET_KEY", TEST_SECRET, raising=True)
     monkeypatch.setattr(app_settings, "ALGORITHM", TEST_ALGORITHM, raising=True)
     # Test-only encryption key: generated in-process, never a real credential.
     monkeypatch.setattr(app_settings, "SECRET_ENCRYPTION_KEY", generate_encryption_key(), raising=True)
+
+
+@pytest.fixture(autouse=True)
+def offline_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve configured endpoint hostnames to a public address, fully offline.
+
+    The endpoint validator resolves every host on write (that is the
+    DNS-based SSRF defence), so these API tests must not depend on real DNS.
+    """
+
+    def fake_getaddrinfo(host: str, port: object, *args: object, **kwargs: object) -> list[tuple]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (PUBLIC_ADDRESS, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
 
 @pytest.fixture()
@@ -557,4 +578,127 @@ def test_connection_test_rejects_other_tenants_credentials(broker_db, monkeypatc
     status, _ = post_connection_test(broker_db, broker_db["super_b_id"])
 
     assert status == 404
+    assert calls == []
+
+
+# --- outbound endpoint security (SSRF) ---------------------------------------------------
+
+# Every one of these would make the server issue a request into its own network
+# or send the broker's key in the clear.
+BLOCKED_BASE_URLS = (
+    "https://localhost/v1",
+    "https://ip6-localhost/v1",
+    "https://127.0.0.1/v1",
+    "https://[::1]/v1",
+    "https://169.254.169.254/latest/meta-data/",  # cloud metadata
+    "https://10.0.0.5/v1",
+    "https://192.168.1.10/v1",
+    "https://172.16.0.9/v1",
+    "https://user:secret@llm.example.test/v1",
+    "http://llm.example.test/v1",  # plaintext rejected outside development
+)
+
+
+def raw_insert_config(env: dict[str, Any], broker_id: int, base_url: str) -> None:
+    """Write a configuration row directly, bypassing API validation.
+
+    Simulates a row edited outside the API (or written before the endpoint
+    policy existed), so the call-time re-validation can be exercised.
+    """
+
+    async def insert() -> None:
+        async with env["factory"]() as session:
+            session.add(
+                BrokerLLMConfig(
+                    broker_id=broker_id,
+                    provider=LLMProviderKind.OPENAI_COMPATIBLE,
+                    model="test-model",
+                    base_url=base_url,
+                    api_key_encrypted=encrypt_secret(API_KEY),
+                    is_active=True,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(insert())
+
+
+@pytest.mark.parametrize("base_url", BLOCKED_BASE_URLS)
+def test_blocked_endpoint_is_rejected_and_nothing_is_stored(
+    broker_db, base_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Production posture: the plaintext-http case must be refused as well.
+    monkeypatch.setattr(app_settings, "APP_ENV", "production", raising=True)
+
+    status, body = put_config(broker_db, broker_db["super_a_id"], {**VALID_BODY, "base_url": base_url})
+
+    assert status == 422
+    assert "not an allowed outbound endpoint" in body["detail"]
+    # Rejected before anything was written.
+    assert get_config(broker_db, broker_db["super_a_id"])[0] == 404
+
+
+def test_blocked_endpoint_error_never_echoes_embedded_credentials(broker_db, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_settings, "APP_ENV", "production", raising=True)
+
+    _, body = put_config(
+        broker_db, broker_db["super_a_id"], {**VALID_BODY, "base_url": "https://user:topsecret@llm.example.test/v1"}
+    )
+
+    assert "topsecret" not in str(body)
+
+
+def test_http_endpoint_is_accepted_in_development(broker_db) -> None:
+    # APP_ENV is development in the test settings, where a self-hosted runtime
+    # over plain http is a legitimate convenience.
+    status, body = put_config(broker_db, broker_db["super_a_id"], {**VALID_BODY, "base_url": "http://llm.example.test/v1"})
+
+    assert status == 200
+    assert body["base_url"] == "http://llm.example.test/v1"
+
+
+def test_hostname_resolving_to_a_private_address_is_rejected(
+    broker_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Overrides the autouse public-DNS stub: this host resolves internally.
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))],
+    )
+
+    status, body = put_config(
+        broker_db, broker_db["super_a_id"], {**VALID_BODY, "base_url": "https://internal.example.test/v1"}
+    )
+
+    assert status == 422
+    assert "private" in body["detail"]
+    assert get_config(broker_db, broker_db["super_a_id"])[0] == 404
+
+
+def test_unresolvable_host_is_rejected(broker_db, monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing_getaddrinfo(*args: object, **kwargs: object) -> list[tuple]:
+        raise socket.gaierror("name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", failing_getaddrinfo)
+
+    status, body = put_config(
+        broker_db, broker_db["super_a_id"], {**VALID_BODY, "base_url": "https://typo.example.invalid/v1"}
+    )
+
+    assert status == 422
+    assert "could not be resolved" in body["detail"]
+
+
+def test_stored_private_endpoint_is_refused_by_the_connection_test(
+    broker_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Defense in depth: a row that bypassed the write-time policy must still not
+    # turn the probe into a request-forgery primitive.
+    calls, _ = install_fake_provider(monkeypatch)
+    raw_insert_config(broker_db, broker_db["super_a_id"], "https://169.254.169.254/v1")
+
+    status, body = post_connection_test(broker_db, broker_db["super_a_id"])
+
+    assert status == 422
     assert calls == []

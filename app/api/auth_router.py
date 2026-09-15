@@ -1,12 +1,16 @@
 """Authentication API: login endpoint issuing JWT access tokens."""
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.dependencies import get_login_throttle
 from app.core.security import create_access_token, verify_password
 from app.db.database import get_db
 from app.db.models import Broker, User
+from app.services.auth import LoginThrottle, LoginThrottleExceededError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -34,36 +38,69 @@ def _login_failed() -> HTTPException:
     )
 
 
+def _too_many_attempts() -> HTTPException:
+    # Deliberately identical for a throttled IP and a throttled username, and
+    # independent of whether the account exists, so it cannot be used to probe
+    # which usernames are real.
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Too many failed login attempts; try again later",
+    )
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
     credentials: LoginRequest,
+    request: Request,
     session: AsyncSession = Depends(get_db),
+    throttle: LoginThrottle = Depends(get_login_throttle),
 ) -> TokenResponse:
     """Verify application credentials and issue an access token.
 
     The endpoint stays thin: hashing/verification and token creation are
     delegated to the existing security primitives. Expected authentication
     failures become a generic 401; database/infrastructure errors propagate.
+
+    Brute-force protection runs *before* any credential lookup, so a throttled
+    attempt costs no database work. Failures are counted per client IP and per
+    submitted username; the counters are cleared by a successful login.
     """
+    client_ip = request.client.host if request.client is not None else "unknown"
+    now = datetime.now(UTC)
+
+    try:
+        throttle.check(client_ip, credentials.username, now)
+    except LoginThrottleExceededError:
+        raise _too_many_attempts()
+
+    def _rejected() -> HTTPException:
+        # Every authentication rejection counts against both keys before the
+        # generic 401 is returned, so repeats trigger the throttle.
+        throttle.record_failure(client_ip, credentials.username, now)
+        return _login_failed()
+
     # Username is unique per broker, not globally: an ambiguous match across
     # tenants is refused rather than silently picking one tenant.
     users = (await session.execute(select(User).where(User.username == credentials.username))).scalars().all()
     if len(users) != 1:
-        raise _login_failed()
+        raise _rejected()
     user = users[0]
 
     if not verify_password(credentials.password, user.password_hash):
-        raise _login_failed()
+        raise _rejected()
 
     # Inactive users must never authenticate.
     if not user.is_active:
-        raise _login_failed()
+        raise _rejected()
 
     # The tenant must exist and be active; broker_id comes from the database
     # relationship, never from the request.
     broker = await session.get(Broker, user.broker_id)
     if broker is None or not broker.is_active:
-        raise _login_failed()
+        raise _rejected()
+
+    # A valid login clears this client's and this username's counters.
+    throttle.record_success(client_ip, credentials.username)
 
     # Existing security contract: sub = str(User.id); no broker_id and no MT5
     # credentials are placed into the JWT.
