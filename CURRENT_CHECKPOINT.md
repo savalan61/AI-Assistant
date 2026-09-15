@@ -2,7 +2,9 @@
 
 ## Current Status
 
-Step 38 — MT5 Investor / Read-Only Credential Provisioning
+Step 39 — Live MT5 Investor-Password Verification
++ Step 39A/39B — configuration startup hardening & Pylance `_env_file` fix
++ Step 38 — MT5 Investor / Read-Only Credential Provisioning
 + Step 37 — Decimal Money & Financial Numeric Representation
 + maintenance — role-migration ordering fix & development user seed
 
@@ -12,14 +14,28 @@ VERIFIED + COMMITTED + SYNCED
 
 Checkpoint commit:
 
-The latest commit is "feat(mt5): add investor credential provisioning" (Step
-38), which carries the per-user MT5 account fields, the provisioning endpoints,
-the new migration and this document update. The prior synced commit was
-"fix(db): correct user role migration ordering" (3a63af9), which carried the
-reordered role migration and the development user seed script; before that the
+The latest commit is "fix(config): harden environment settings loading"
+(Steps 39A/39B and this document update), which carries the tolerant,
+secret-safe settings loading and the statically visible env-file selection.
+The prior synced commit was "feat(mt5): add investor credential provisioning"
+(Step 38), which carried the per-user MT5 account fields, the provisioning
+endpoints and the new migration; before that "fix(db): correct user role
+migration ordering" (3a63af9), which carriedthe reordered role migration and the development user seed script; before that
+the
 Step 37 checkpoint ("feat(financial): harden numeric representation"), the Step
 36 MT5 tenant-session commit, the Step 35 security hardening commit and b95eaa1
 ("feat(ai): add broker llm routing and agent controls", Steps 29–33).
+
+Step 39 closed the one open verification from Step 38: with a real MT5 investor
+credential available locally, a one-time live READ-ONLY session was performed —
+explicit login with the investor password succeeded, AccountInfo.trade_allowed
+is False, and account-info, positions, deal-history and rate reads all
+succeeded. Only MT5 read APIs were touched; no trading operation exists or was
+called. Steps 39A/39B harden configuration loading: an unrecognised key in the
+env file no longer aborts startup (it is ignored and reported by NAME only) and
+configuration errors never render a submitted value, while the dotenv file is
+selected through model_config so the Pylance "No parameter named '_env_file'"
+diagnostic is structurally impossible — with no type suppression anywhere.
 
 Step 38 makes the MT5 credential an explicit, administrator-provisioned,
 per-user fact — the MT5 account number, the MT5 server, and the encrypted
@@ -812,6 +828,95 @@ Not verified in this step (reported rather than hidden):
   SECRET_ENCRYPTION_KEY is not set there. That is the intended behaviour
   (nothing is written) and it was verified end to end through the real app.
 
+### Step 39 — Live MT5 Investor-Password Verification (READ-ONLY)
+Status: VERIFIED (no application code changed)
+
+One-time live verification against the locally installed, running MT5 terminal
+(MetaTrader5==5.0.6180, server ComplateCapitalTrade-Server), using a real
+investor credential read from the local environment without ever printing,
+logging or committing it. No application file was modified in this step.
+
+- Explicit login with the investor password: mt5.login(login, password=<investor>,
+  server=<server>) → True, last_error (1, 'Success').
+- AccountInfo.trade_allowed == False with the investor credential — the
+  read-only permission signal Step 38 predicted, now empirically confirmed.
+- All four read families succeeded AFTER the explicit login (so the reads were
+  not merely riding a pre-existing terminal session): account_info(),
+  positions_get() (0 open), history_deals_get() over the trailing 7 days
+  (7 deals), copy_rates_from_pos('EURUSD', H1) (rows returned).
+- trade_mode == 2 (a REAL account). terminal_info().trade_allowed was False as
+  well (the terminal's algo-trading switch, also off — belt and braces).
+- Only initialize/login/terminal_info/account_info/symbol_info/symbols_get/
+  positions_get/history_deals_get/copy_rates_from_pos/shutdown were called.
+  No trading operation exists or was executed; the trading-safety scan over
+  app/ stayed clean (the only ORDER_TYPE_* references are read-only direction
+  mapping in mt5_positions.py).
+- Caveat, reported rather than hidden: MetaTrader5's Python package uses the
+  SAME login() call for either password type, so login success alone does not
+  distinguish investor from master — the read-only proof is the
+  trade_allowed == False flag on the authenticated account.
+- Side finding that motivated Step 39A: the local .env held the credential
+  under an unrecognised key, and pydantic-settings' extra_forbidden error —
+  raised at import time — rendered the value verbatim. The app could not even
+  start. (A step-39 probe reproduced this and unavoidably displayed the local
+  value once; the credential should be treated as exposed and rotated.)
+
+### Step 39A — Configuration Startup Hardening & Secret-Safe Errors
+Status: VERIFIED + COMMITTED
+
+- app/core/config.py: Settings moved off the deprecated class Config onto
+  model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore"). An
+  unrecognised key in the env FILE no longer aborts startup. This was the only
+  safe choice on both axes: extra_forbidden necessarily renders the submitted
+  VALUE (the disclosure mechanism), and the failure fires during module import
+  (a total startup blocker). Typo detection is preserved — unrecognised keys
+  are logged by NAME only via _warn_unknown_env_file_keys(); the value is never
+  read.
+- Process environment variables were never treated as settings inputs by
+  pydantic-settings, so normal deployment environments (PATH, CI variables)
+  are unaffected; that path is pinned by test.
+- load_settings() builds Settings and, on ValidationError, raises RuntimeError
+  rendered from error loc + type only (msg, input and input_value dropped),
+  with 'from None' so the value-bearing original is never chained into the
+  traceback. A bad value for a KNOWN setting (int or bool) fails closed with a
+  message naming the setting and never the value — verified against str(exc)
+  AND the full traceback.format_exception() output.
+- tests/test_config_settings.py (new): module settings load for the real
+  project configuration; unknown key tolerated and reported by name, never by
+  value; comments/blank lines not misreported; known-field errors name the
+  setting and omit the value in str and traceback; strict validation of known
+  fields retained; valid values still read; missing env file fine; unrelated
+  process env vars ignored.
+- .env.example: documents that unrecognised keys are ignored and named-only in
+  warnings, and warns against parking local credentials under undefined names.
+- Side effect: leaving the deprecated class-based Config removed the Pydantic
+  class-config deprecation — warnings 3 → 2.
+- The real local .env was never modified, and is not tracked by git.
+
+### Step 39B — Pylance `_env_file` Diagnostic (no type suppression)
+Status: VERIFIED + COMMITTED
+
+- Symptom: Pylance reported "No parameter named '_env_file'" on the previous
+  Settings(_env_file=...) call. Root cause, established by runtime inspection
+  of the installed package (pydantic 2.13.5 / pydantic-settings 2.15.0):
+  Settings.__init__ IS BaseSettings.__init__ and its runtime signature DOES
+  declare _env_file — but pydantic's @dataclass_transform makes type checkers
+  synthesise __init__ from the model fields alone, hiding every injected
+  pydantic-settings parameter. Any _env_file= keyword is therefore flagged,
+  including one hidden behind a TypedDict splat; only an opaque
+  dict[str, Any] would dodge the check, which would be a soft suppression.
+- Fix: the dotenv file is selected through model_config instead —
+  _settings_for_env_file() derives a Settings variant with
+  SettingsConfigDict(env_file=..., extra="ignore") via type(), and
+  load_settings(env_file=...) instantiates the plain Settings class on the
+  default path (production settings identity unchanged: type(settings) is
+  Settings). The file contains no _env_file= token at all, so the diagnostic
+  is structurally impossible; this is pinned by a source-inspection test.
+- No # type: ignore, no suppression, no checker configuration change.
+- Focused tests grew 10 → 14 (override reads the requested file; default path
+  keeps the base class; env_file=None drops only the dotenv source while still
+  reading the process environment; the keyword form is absent from source).
+
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
 
@@ -1473,11 +1578,12 @@ GET /users (super_admin or admin; role-based visibility):
   with Decimal(str(...)); account margin_level and candle tick volume
   intentionally remain float. API JSON still exposes numbers, not strings, via
   the shared DecimalAsNumber serializer.
-- Steps 18–38 plus the role-migration ordering fix and the development user
-  seed are committed and pushed to origin/master (latest commit: "feat(mt5):
-  add investor credential provisioning"; the prior synced commit was "fix(db):
-  correct user role migration ordering" (3a63af9), before that the Step 37
-  checkpoint "feat(financial): harden numeric representation", the Step 36 MT5
+- Steps 18–39B plus the role-migration ordering fix and the development user
+  seed are committed and pushed to origin/master (latest commit: "fix(config):
+  harden environment settings loading"; the prior synced commit was "feat(mt5):
+  add investor credential provisioning" (Step 38), before that "fix(db):
+  correct user role migration ordering" (3a63af9), the Step 37 checkpoint
+  "feat(financial): harden numeric representation", the Step 36 MT5
   tenant-session commit, the Step 35 security hardening commit and b95eaa1).
 - A user carries its own MT5 identity: mt5_login and mt5_server (nullable,
   explicit) plus mt5_password_encrypted holding the ciphertext of the MT5
@@ -1497,9 +1603,20 @@ GET /users (super_admin or admin; role-based visibility):
   credentials are unprovisioned, and provisioning them there currently returns
   503 as well because SECRET_ENCRYPTION_KEY is not set in the local environment
   — the fail-closed path, verified end to end.
-- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 735 passed, 3 warnings.
-- The 3 warnings are pre-existing third-party deprecation warnings (anyio
-  PortalFactoryType and Pydantic class-based Config in app/core/config.py).
+- The MT5 INVESTOR (read-only) password was verified LIVE (Step 39) against a
+  real account on the locally installed terminal: explicit login succeeded,
+  AccountInfo.trade_allowed is False, and account-info, positions, deal-history
+  and rate reads all succeeded afterwards. No trading operation was called.
+- Configuration loading is hardened (Steps 39A/39B): an unrecognised env-file
+  key is ignored and reported by name only (startup no longer aborts), a
+  validation failure raises a sanitized RuntimeError that names the offending
+  setting and never renders its value (in str and full traceback), the dotenv
+  file is selected through model_config (the Pylance _env_file diagnostic is
+  structurally impossible), and the deprecated class-based Config is gone.
+- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 775 passed, 2 warnings.
+- The 2 warnings are pre-existing third-party deprecation warnings (anyio
+  PortalFactoryType and starlette testclient). The former Pydantic class-based
+  Config warning was eliminated by Step 39A.
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
 - Working tree is clean; this checkpoint commit has been pushed/synced to
@@ -1508,8 +1625,10 @@ GET /users (super_admin or admin; role-based visibility):
 Static/type verification:
 
 Direct Pylance/pyright execution was not available in the environment for any of
-Steps 8–37. Manual static/type reviews were performed instead. This limitation
-must be reported rather than hidden.
+Steps 8–39B (no mypy/pyright/basedpyright/pytype is installed either). Manual
+static/type reviews were performed instead; Step 39B's fix additionally removed
+the flagged construct from the source entirely and pinned that with a test.
+This limitation must be reported rather than hidden.
 
 ## Known Issues (current)
 
@@ -1527,8 +1646,9 @@ must be reported rather than hidden.
 5. Candle timestamps need future UTC review.
 6. MT5 last_error handling has a minor robustness concern.
 7. MetaTrader5 is currently a Windows-specific dependency and needs future CI/Docker consideration.
-8. Minor cleanup/deprecation/hygiene items remain (Pydantic class-based Config,
-   .gitignore entries such as .pytest_cache/).
+8. Minor cleanup/deprecation/hygiene items remain (.gitignore entries such as
+   .pytest_cache/; the Pydantic class-based Config deprecation was resolved by
+   Step 39A).
 9. Economic calendar data source is unresolved. Economic intelligence is wired
    to FakeEconomicCalendarProvider, a deterministic development/test
    placeholder; there is NO production economic-calendar provider, and its
@@ -1608,9 +1728,9 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–38 plus the role-migration ordering fix and the development user seed
+Steps 12–39B plus the role-migration ordering fix and the development user seed
 are complete, committed, and synced to origin/master (latest commit:
-"feat(mt5): add investor credential provisioning").
+"fix(config): harden environment settings loading").
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
@@ -1621,11 +1741,10 @@ none may be started without an explicit instruction:
   add an account_info() call to a session boundary that today touches only
   initialize/login/last_error/shutdown, and would make provisioning depend on a
   live terminal).
-- live MT5 investor-password verification: Step 38 established compatibility
-  from the installed API surface (login() is identical for either password type;
-  reads never depend on trading permission; AccountInfo.trade_allowed is the only
-  read-only signal), but no live login was performed because no real credential
-  was available.
+- live MT5 investor-password verification: DONE in Step 39 (explicit login
+  with a real investor credential succeeded, trade_allowed == False, all read
+  families succeeded). The remaining open half is write-time investor-only
+  verification, below.
 - market-data multi-tenant semantics: market data is now tenant-scoped like
   every other read; whether a shared read-only market-data feed (no customer
   account needed) should be carved out is an open product decision
