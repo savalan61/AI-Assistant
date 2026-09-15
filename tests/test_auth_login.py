@@ -66,7 +66,7 @@ def auth_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int]":
             await session.commit()
             user = User(
                 broker_id=broker.id,
-                username="10001",
+                login="10001",
                 # Real bcrypt hash created via the app's own primitive.
                 password_hash=hash_for_test(TEST_PASSWORD),
                 is_active=True,
@@ -98,8 +98,8 @@ def make_client(factory: async_sessionmaker[AsyncSession]) -> TestClient:
     return TestClient(app)
 
 
-def login_payload(username: str = "10001", password: str = TEST_PASSWORD) -> dict[str, str]:
-    return {"username": username, "password": password}
+def login_payload(login: str = "10001", password: str = TEST_PASSWORD) -> dict[str, str]:
+    return {"login": login, "password": password}
 
 
 def set_active(factory: async_sessionmaker[AsyncSession], model: type, row_id: int, active: bool) -> None:
@@ -159,11 +159,11 @@ def test_wrong_password_returns_401(auth_db):
     assert response.status_code == 401
 
 
-def test_nonexistent_username_returns_401(auth_db):
+def test_nonexistent_login_returns_401(auth_db):
     factory, _ = auth_db
 
     with make_client(factory) as client:
-        response = client.post("/auth/login", json=login_payload(username="no-such-user"))
+        response = client.post("/auth/login", json=login_payload(login="no-such-user"))
 
     assert response.status_code == 401
 
@@ -200,7 +200,7 @@ def test_all_failure_paths_are_indistinguishable(auth_db, bad_password):
 
     with make_client(factory) as client:
         wrong_pw = client.post("/auth/login", json=login_payload(password=bad_password))
-        wrong_user = client.post("/auth/login", json=login_payload(username="no-such-user"))
+        wrong_user = client.post("/auth/login", json=login_payload(login="no-such-user"))
 
     assert wrong_pw.status_code == wrong_user.status_code == 401
     # Identical body and challenge for every rejection path.
@@ -247,17 +247,17 @@ def test_repeated_failures_eventually_return_429(auth_db, small_login_limit):
     assert statuses[-1] == 429
 
 
-def test_throttle_is_identical_for_existing_and_unknown_usernames(auth_db, small_login_limit):
+def test_throttle_is_identical_for_existing_and_unknown_logins(auth_db, small_login_limit):
     factory, _ = auth_db
 
     with make_client(factory) as client:
         existing = statuses_for(client, small_login_limit + 1, password="wrong password")
 
-    # Same keys, fresh counters: the unknown username must behave identically,
+    # Same keys, fresh counters: the unknown login must behave identically,
     # so the lockout cannot be used to probe which accounts exist.
     deps.reset_login_throttle()
     with make_client(factory) as client:
-        unknown = statuses_for(client, small_login_limit + 1, username="no-such-user", password="wrong password")
+        unknown = statuses_for(client, small_login_limit + 1, login="no-such-user", password="wrong password")
 
     assert existing == unknown
 
@@ -294,7 +294,9 @@ def test_throttled_response_is_generic_and_secret_free(auth_db, small_login_limi
 
     body = str(response.json())
     assert response.status_code == 429
-    assert "username" not in body.lower() or "attempt" in body.lower()
+    # The body is exactly the fixed generic message: it names neither the
+    # submitted login (asserted below) nor any internal detail.
+    assert body == str({"detail": "Too many failed login attempts; try again later"})
     assert "10001" not in body
     assert TEST_PASSWORD not in body
     assert "no-such-user" not in body

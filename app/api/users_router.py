@@ -28,10 +28,11 @@ from app.db.models import Broker, User, UserRole
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-# username is the MT5 login/account number: an ASCII-digit string, kept as
-# str so leading zeros survive (never converted to int). Real MT5 account ids
-# fit 4-12 digits. [0-9] is deliberate: \d would also match Unicode digits.
-_USERNAME_PATTERN = re.compile(r"^[0-9]{4,12}$")
+# `login` is the user's single identity AND the MT5 account/login number: an
+# ASCII-digit string, kept as str so leading zeros survive (never converted to
+# int). Real MT5 account ids fit 4-12 digits. [0-9] is deliberate: \d would
+# also match Unicode digits.
+_LOGIN_PATTERN = re.compile(r"^[0-9]{4,12}$")
 # Basic international phone: optional leading '+', then 7-15 digits (E.164
 # range). No phone library is introduced for this simple format.
 _PHONE_PATTERN = re.compile(r"^\+?[0-9]{7,15}$")
@@ -45,7 +46,7 @@ _PHONE_PATTERN = re.compile(r"^\+?[0-9]{7,15}$")
 class CreateUserRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    username: str
+    login: str
     password: str
     email: str | None = None
     phone: str | None = None
@@ -57,10 +58,10 @@ class CreateUserRequest(BaseModel):
     # unique index remains the final backstop).
     role: UserRole | None = None
 
-    @field_validator("username")
+    @field_validator("login")
     @classmethod
-    def _validate_username(cls, value: str) -> str:
-        return _validated_username(value)
+    def _validate_login(cls, value: str) -> str:
+        return _validated_login(value)
 
     @field_validator("password")
     @classmethod
@@ -85,9 +86,11 @@ class CreateUserRequest(BaseModel):
         return value
 
 
-def _validated_username(value: str) -> str:
-    if not _USERNAME_PATTERN.fullmatch(value):
-        raise ValueError("username must be 4-12 digits")
+def _validated_login(value: str) -> str:
+    # The login is also the MT5 account number, so it must look like one. A
+    # non-numeric login would simply never resolve to an MT5 session.
+    if not _LOGIN_PATTERN.fullmatch(value):
+        raise ValueError("login must be 4-12 digits")
     return value
 
 
@@ -136,15 +139,15 @@ def _validated_phone(value: str | None) -> str | None:
 class CreateAdminRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    username: str
+    login: str
     password: str
     email: str | None = None
     phone: str | None = None
 
-    @field_validator("username")
+    @field_validator("login")
     @classmethod
-    def _validate_username(cls, value: str) -> str:
-        return _validated_username(value)
+    def _validate_login(cls, value: str) -> str:
+        return _validated_login(value)
 
     @field_validator("password")
     @classmethod
@@ -167,26 +170,28 @@ class UpdateUserRequest(BaseModel):
 
     Every field is optional; an omitted field is left unchanged, and an
     explicitly supplied ``null`` clears the nullable contact fields (email,
-    phone) only — username, password, role and is_active may never be set to
+    phone) only — login, password, role and is_active may never be set to
     null. Deliberately excluded: id, broker_id, password_hash,
     mt5_password_encrypted, and every MT5 credential field (those are
-    managed exclusively by the dedicated provisioning endpoints). extra=
-    "forbid" rejects anything else with 422.
+    managed exclusively by the dedicated provisioning endpoints). Changing
+    the login changes the user's application login and MT5 account number at
+    once, because they are one value. extra="forbid" rejects anything else
+    with 422.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    username: str | None = None
+    login: str | None = None
     password: str | None = None
     email: str | None = None
     phone: str | None = None
     role: UserRole | None = None
     is_active: bool | None = None
 
-    @field_validator("username")
+    @field_validator("login")
     @classmethod
-    def _validate_username(cls, value: str | None) -> str | None:
-        return value if value is None else _validated_username(value)
+    def _validate_login(cls, value: str | None) -> str | None:
+        return value if value is None else _validated_login(value)
 
     @field_validator("password")
     @classmethod
@@ -215,7 +220,7 @@ class UpdateUserRequest(BaseModel):
         provided = self.model_fields_set
         if not provided:
             raise ValueError("at least one field must be provided")
-        for name in ("username", "password", "role", "is_active"):
+        for name in ("login", "password", "role", "is_active"):
             if name in provided and getattr(self, name) is None:
                 raise ValueError(f"{name} must not be null")
         return self
@@ -228,17 +233,13 @@ class UserResponse(BaseModel):
 
     id: int
     broker_id: int
-    username: str
+    login: str
     email: str | None
     phone: str | None
     role: UserRole
     is_active: bool
 
 
-# An MT5 account number: the same ASCII-digit shape the username rule enforces,
-# because both are MT5 logins. The alias is deliberate — it documents that the
-# two rules are meant to agree, without duplicating the pattern.
-_MT5_LOGIN_PATTERN = _USERNAME_PATTERN
 # MT5 server names are short identifiers (e.g. "BrokerName-Live2"); the cap
 # matches the User and Broker columns so oversized input cannot become a
 # database error.
@@ -259,22 +260,18 @@ class MT5CredentialRequest(BaseModel):
     There is intentionally no field for an MT5 trading (master) password — this
     API only accepts a read-only credential, and the password field is named
     after that fact.
+
+    There is also deliberately no MT5 account-number field: since Step 42 the
+    user's own ``login`` IS the MT5 account number, so provisioning cannot
+    point the credential at an account the user is not identified by.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    mt5_login: str
     mt5_server: str
     # Write-only: no response schema in this module has a matching field, so a
     # plaintext credential cannot be echoed back by construction.
     mt5_investor_password: str
-
-    @field_validator("mt5_login")
-    @classmethod
-    def _validate_mt5_login(cls, value: str) -> str:
-        if not _MT5_LOGIN_PATTERN.fullmatch(value):
-            raise ValueError("mt5_login must be 4-12 digits")
-        return value
 
     @field_validator("mt5_server")
     @classmethod
@@ -308,14 +305,14 @@ class MT5CredentialStatus(BaseModel):
 
     Contains no password field of any kind. The login and server are the
     *effective* values the session boundary would authenticate with — the
-    user's own provisioning when present, otherwise the legacy fallback of a
-    numeric username and the broker's server — so this response answers "what
+    user's own ``login`` when it is numeric, and the user's own MT5 server when
+    present, otherwise the broker's server — so this response answers "what
     would an MT5 read use?" without disclosing anything secret.
     """
 
     user_id: int
-    username: str
-    mt5_login: str | None
+    # The user's single identity, which is also the MT5 account number.
+    login: str
     mt5_server: str | None
     # All three parts are present. Not a liveness check: whether MT5 actually
     # accepts the credential is only known when a read attempts to authenticate.
@@ -323,7 +320,7 @@ class MT5CredentialStatus(BaseModel):
 
 
 def _duplicate_conflict() -> HTTPException:
-    # Generic 409: must not reveal which unique constraint fired (username,
+    # Generic 409: must not reveal which unique constraint fired (login,
     # email, or phone), since that would leak information about other rows.
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists")
 
@@ -357,7 +354,7 @@ async def create_user(
     user = User(
         # The admin's own broker is the tenant boundary for the new user.
         broker_id=current_admin.broker_id,
-        username=request.username,
+        login=request.login,
         # Hashed immediately; the plaintext never touches persistence or logs.
         password_hash=hash_password(request.password),
         email=request.email,
@@ -375,7 +372,7 @@ async def create_user(
         await session.commit()
     except IntegrityError:
         # Expected failure at the commit boundary: the tenant-scoped unique
-        # constraints (username/email/phone per broker) rejected the insert.
+        # constraints (login/email/phone per broker) rejected the insert.
         await session.rollback()
         raise _duplicate_conflict()
 
@@ -439,7 +436,7 @@ async def create_admin(
     admin = User(
         # The super_admin's own broker is the tenant boundary for the new admin.
         broker_id=current_super_admin.broker_id,
-        username=request.username,
+        login=request.login,
         # Hashed immediately; the plaintext never touches persistence or logs.
         password_hash=hash_password(request.password),
         email=request.email,
@@ -455,7 +452,7 @@ async def create_admin(
         await session.commit()
     except IntegrityError:
         # Expected failure at the commit boundary: the tenant-scoped unique
-        # constraints (username/email/phone per broker) rejected the insert.
+        # constraints (login/email/phone per broker) rejected the insert.
         # The one-super-admin partial index cannot fire here — this endpoint
         # only ever writes role='admin' rows.
         await session.rollback()
@@ -514,8 +511,8 @@ async def update_user(
         )
 
     provided = request.model_fields_set
-    if "username" in provided:
-        target.username = request.username
+    if "login" in provided:
+        target.login = request.login
     if "password" in provided:
         target.password_hash = hash_password(request.password)
     if "email" in provided:
@@ -530,7 +527,7 @@ async def update_user(
     try:
         await session.commit()
     except IntegrityError:
-        # Expected failure at the commit boundary: a changed username, email
+        # Expected failure at the commit boundary: a changed login, email
         # or phone collided with the tenant-scoped unique constraints.
         await session.rollback()
         raise _duplicate_conflict()
@@ -611,8 +608,7 @@ async def _mt5_credential_status(session: AsyncSession, user: User) -> MT5Creden
     credentials = resolve_mt5_account_credentials(user, broker)
     return MT5CredentialStatus(
         user_id=user.id,
-        username=user.username,
-        mt5_login=str(credentials.login) if credentials.login is not None else None,
+        login=user.login,
         mt5_server=credentials.server,
         mt5_configured=(
             credentials.login is not None
@@ -646,7 +642,8 @@ async def set_mt5_credentials(
     except EncryptionError:
         raise _credentials_unavailable()
 
-    target.mt5_login = request.mt5_login
+    # The account number is the user's own login, so provisioning writes only
+    # the server and the encrypted secret — never a duplicate account column.
     target.mt5_server = request.mt5_server
     target.mt5_password_encrypted = encrypted
     await session.commit()

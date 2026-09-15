@@ -49,7 +49,7 @@ def user_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int]":
             await session.commit()
             user = User(
                 broker_id=broker.id,
-                username="10001",
+                login="10001",
                 password_hash="$2b$12$notarealhashbutcolumnisrequired01234567890123456789",
                 is_active=True,
                 role=UserRole.SUPER_ADMIN,

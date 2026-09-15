@@ -9,7 +9,7 @@ passwords, they all carry a "Dev…-Local-Only" marker so a real password can
 never collide with them, and this script refuses to run unless
 APP_ENV=development. Never reuse any of these outside a local database.
 
-    role         username          development password
+    role         login             development password
     -----------  ----------------  -----------------------------
     super_admin  dev-super-admin   DevSuperAdmin-Local-Only-1
     admin        dev-admin         DevAdmin-Local-Only-1
@@ -50,7 +50,7 @@ from app.db.models import Broker, User, UserRole
 # role accounts belong to the broker the dev seed already established.
 DEV_BROKER_CODE = "DEV-LOCAL"
 
-# role, username, development-only password — see the module docstring.
+# role, login, development-only password — see the module docstring.
 DEV_USERS: tuple[tuple[UserRole, str, str], ...] = (
     (UserRole.SUPER_ADMIN, "dev-super-admin", "DevSuperAdmin-Local-Only-1"),
     (UserRole.ADMIN, "dev-admin", "DevAdmin-Local-Only-1"),
@@ -81,17 +81,17 @@ async def _clear_users(session: AsyncSession) -> int:
 
 async def _seed_users(session: AsyncSession, broker: Broker) -> None:
     """Create (or reset) the three development accounts on the existing broker."""
-    for role, username, password in DEV_USERS:
+    for role, login, password in DEV_USERS:
         # Application password hashing, identical to the login path.
         password_hash = hash_password(password)
         user = (
-            await session.execute(select(User).where(User.broker_id == broker.id, User.username == username))
+            await session.execute(select(User).where(User.broker_id == broker.id, User.login == login))
         ).scalar_one_or_none()
         if user is None:
             session.add(
                 User(
                     broker_id=broker.id,
-                    username=username,
+                    login=login,
                     password_hash=password_hash,
                     is_active=True,
                     role=role,
@@ -99,23 +99,23 @@ async def _seed_users(session: AsyncSession, broker: Broker) -> None:
                     # password stays NULL for this local test set.
                 )
             )
-            print(f"created  {role.value:<11} username={username!r}")
+            print(f"created  {role.value:<11} login={login!r}")
         else:
             # Idempotent reset: the seeded password and role are authoritative.
             user.password_hash = password_hash
             user.role = role
             user.is_active = True
-            print(f"reset    {role.value:<11} username={username!r}")
+            print(f"reset    {role.value:<11} login={login!r}")
 
 
-async def _authenticate(session: AsyncSession, username: str, password: str) -> tuple[bool, UserRole | None]:
+async def _authenticate(session: AsyncSession, login: str, password: str) -> tuple[bool, UserRole | None]:
     """Authenticate exactly the way the login endpoint does.
 
-    Same primitives in the same order: unique username match, bcrypt
+    Same primitives in the same order: unique login match, bcrypt
     verification, active user, then an existing active broker. The JWT is not
     needed to prove the credential path works.
     """
-    users = (await session.execute(select(User).where(User.username == username))).scalars().all()
+    users = (await session.execute(select(User).where(User.login == login))).scalars().all()
     if len(users) != 1:
         return False, None
     user = users[0]
@@ -161,13 +161,13 @@ async def _run(clear: bool) -> int:
         # path and re-read the stored role from the database.
         print("verification (authentication + stored role):")
         failures = 0
-        for role, username, password in DEV_USERS:
-            ok, stored_role = await _authenticate(session, username, password)
+        for role, login, password in DEV_USERS:
+            ok, stored_role = await _authenticate(session, login, password)
             role_ok = stored_role is role
             status = "OK" if (ok and role_ok) else "FAILED"
             if not (ok and role_ok):
                 failures += 1
-            print(f"  {status:<7} username={username:<16} expected={role.value:<11} stored={stored_role.value if stored_role else None}")
+            print(f"  {status:<7} login={login:<16} expected={role.value:<11} stored={stored_role.value if stored_role else None}")
 
         total = (await session.execute(select(User))).scalars().all()
         print(f"total users now: {len(total)} (expected {len(DEV_USERS)})")

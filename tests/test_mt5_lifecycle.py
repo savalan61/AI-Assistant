@@ -146,7 +146,7 @@ def auth_env(tmp_path, monkeypatch):
             broker = Broker(name="Test Broker", code="TB-1")
             session.add(broker)
             await session.commit()
-            user = User(broker_id=broker.id, username="10001", password_hash="x" * 60, is_active=True)
+            user = User(broker_id=broker.id, login="10001", password_hash="x" * 60, is_active=True)
             session.add(user)
             await session.commit()
             return user.id

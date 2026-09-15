@@ -446,10 +446,10 @@ def test_credentials_repr_omits_the_stored_password() -> None:
 # --- composition root: tenant credentials come from the database identity -----
 
 
-def _user(username: str, broker_id: int = 7, encrypted: str | None = "cipher") -> User:
+def _user(login: str, broker_id: int = 7, encrypted: str | None = "cipher") -> User:
     return User(
         broker_id=broker_id,
-        username=username,
+        login=login,
         password_hash="x" * 60,
         mt5_password_encrypted=encrypted,
         is_active=True,
@@ -464,7 +464,7 @@ def test_credentials_are_resolved_from_the_user_and_broker_rows() -> None:
     assert resolved == MT5AccountCredentials(login=10001, server=SERVER_A, password_encrypted="cipher")
 
 
-def test_non_numeric_username_is_not_an_mt5_login() -> None:
+def test_non_numeric_login_is_not_an_mt5_login() -> None:
     broker = Broker(name="Broker A", code="BA", mt5_server=SERVER_A)
 
     assert deps.resolve_mt5_account_credentials(_user("customer-alice"), broker).login is None

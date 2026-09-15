@@ -70,8 +70,8 @@ class MT5SessionError(RuntimeError):
 class MT5AccountCredentials:
     """A tenant's MT5 identity, resolved from the authenticated database rows.
 
-    - ``login``: the MT5 account number (the user's username, when numeric);
-    - ``server``: the broker's MT5 server;
+    - ``login``: the MT5 account number (the user's ``login``, when numeric);
+    - ``server``: the user's MT5 server, else the broker's;
     - ``password_encrypted``: the stored Fernet ciphertext of the MT5 password.
 
     Any of them may be ``None`` — a record that is not fully configured is not

@@ -149,7 +149,7 @@ def positions_env(tmp_path):
             await session.commit()
             user = User(
                 broker_id=broker.id,
-                username="10001",
+                login="10001",
                 password_hash="x" * 60,
                 is_active=True,
             )

@@ -26,7 +26,7 @@ TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
 SUPER_PASSWORD = "super application password"
 
-ALLOWED_FIELDS = {"id", "broker_id", "username", "email", "phone", "role", "is_active"}
+ALLOWED_FIELDS = {"id", "broker_id", "login", "email", "phone", "role", "is_active"}
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,7 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
             await session.flush()
             super_a = User(
                 broker_id=broker_a.id,
-                username="super-a",
+                login="super-a",
                 # Real bcrypt hash via the app's own primitive.
                 password_hash=hash_for_test(SUPER_PASSWORD),
                 is_active=True,
@@ -64,23 +64,23 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
             )
             admin_a = User(
                 broker_id=broker_a.id,
-                username="admin-a",
+                login="admin-a",
                 password_hash="x-not-a-real-hash",
                 is_active=True,
                 role=UserRole.ADMIN,
             )
             customer = User(
                 broker_id=broker_a.id,
-                # Digit username: the API enforces MT5-login format on created
+                # Digit login: the API enforces MT5-login format on created
                 # users, so the seeded row used by duplicate tests matches it.
-                username="10002",
+                login="10002",
                 password_hash="x-not-a-real-hash",
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             super_b = User(
                 broker_id=broker_b.id,
-                username="super-b",
+                login="super-b",
                 password_hash=hash_for_test(SUPER_PASSWORD),
                 is_active=True,
                 role=UserRole.SUPER_ADMIN,
@@ -120,8 +120,8 @@ def admin_token(user_id: int) -> str:
     return create_access_token(str(user_id))
 
 
-def admin_payload(username: str = "30001", password: str = "admin password", **extra: object) -> dict[str, object]:
-    payload: dict[str, object] = {"username": username, "password": password}
+def admin_payload(login: str = "30001", password: str = "admin password", **extra: object) -> dict[str, object]:
+    payload: dict[str, object] = {"login": login, "password": password}
     payload.update(extra)
     return payload
 
@@ -172,7 +172,7 @@ def test_super_admin_creates_admin_returns_201(users_db) -> None:
 
     assert response.status_code == 201
     body = response.json()
-    assert body["username"] == "30001"
+    assert body["login"] == "30001"
     assert body["email"] == "admin@example.com"
     assert body["phone"] == "+12345678901"
     assert body["is_active"] is True
@@ -263,28 +263,28 @@ def test_caller_cannot_escalate_role(users_db, escalation_role: str) -> None:
 # --- duplicate / uniqueness handling (existing conventions) -------------------------
 
 
-def test_duplicate_username_in_same_broker_returns_409(users_db) -> None:
+def test_duplicate_login_in_same_broker_returns_409(users_db) -> None:
     factory, super_a_id, *_ = users_db
 
     with make_client(factory) as client:
         response = client.post(
             "/users/admins",
             # "10002" already exists in broker A (the seeded customer).
-            json=admin_payload(username="10002"),
+            json=admin_payload(login="10002"),
             headers=auth_header(admin_token(super_a_id)),
         )
 
     assert response.status_code == 409
 
 
-def test_same_username_in_different_broker_is_allowed(users_db) -> None:
+def test_same_login_in_different_broker_is_allowed(users_db) -> None:
     factory, *_, super_b_id = users_db
 
     with make_client(factory) as client:
         response = client.post(
             "/users/admins",
             # Uniqueness is tenant-scoped: broker B may reuse broker A's name.
-            json=admin_payload(username="10002"),
+            json=admin_payload(login="10002"),
             headers=auth_header(admin_token(super_b_id)),
         )
 
@@ -298,12 +298,12 @@ def test_duplicate_email_in_same_broker_returns_409(users_db) -> None:
     with make_client(factory) as client:
         first = client.post(
             "/users/admins",
-            json=admin_payload(username="30011", email="dup@example.com"),
+            json=admin_payload(login="30011", email="dup@example.com"),
             headers=auth_header(admin_token(super_a_id)),
         )
         second = client.post(
             "/users/admins",
-            json=admin_payload(username="30012", email="dup@example.com"),
+            json=admin_payload(login="30012", email="dup@example.com"),
             headers=auth_header(admin_token(super_a_id)),
         )
 
@@ -317,12 +317,12 @@ def test_duplicate_phone_in_same_broker_returns_409(users_db) -> None:
     with make_client(factory) as client:
         first = client.post(
             "/users/admins",
-            json=admin_payload(username="30013", phone="+12345678901"),
+            json=admin_payload(login="30013", phone="+12345678901"),
             headers=auth_header(admin_token(super_a_id)),
         )
         second = client.post(
             "/users/admins",
-            json=admin_payload(username="30014", phone="+12345678901"),
+            json=admin_payload(login="30014", phone="+12345678901"),
             headers=auth_header(admin_token(super_a_id)),
         )
 
@@ -356,7 +356,7 @@ def test_super_admin_can_still_create_customer_via_post_users(users_db) -> None:
 
     with make_client(factory) as client:
         response = client.post(
-            "/users", json={"username": "30015", "password": "customer password"}, headers=auth_header(admin_token(super_a_id))
+            "/users", json={"login": "30015", "password": "customer password"}, headers=auth_header(admin_token(super_a_id))
         )
 
     # POST /users keeps its customer-only contract alongside /users/admins.

@@ -183,21 +183,21 @@ def portfolio_env(tmp_path):
             await session.commit()
             customer_a = User(
                 broker_id=broker_a.id,
-                username="10001",
+                login="10001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             customer_b = User(
                 broker_id=broker_b.id,
-                username="10002",
+                login="10002",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             super_b = User(
                 broker_id=broker_b.id,
-                username="super-b",
+                login="super-b",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.SUPER_ADMIN,

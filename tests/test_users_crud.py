@@ -27,7 +27,7 @@ TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
 PASSWORD = "a-fine-application-password"
 
-ALLOWED_FIELDS = {"id", "broker_id", "username", "email", "phone", "role", "is_active"}
+ALLOWED_FIELDS = {"id", "broker_id", "login", "email", "phone", "role", "is_active"}
 
 
 @pytest.fixture(autouse=True)
@@ -61,21 +61,21 @@ def crud_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], dict[str, int]
             rows = {
                 "super_a": User(
                     broker_id=broker_a.id,
-                    username="999901",
+                    login="999901",
                     password_hash=hash_password(PASSWORD),
                     is_active=True,
                     role=UserRole.SUPER_ADMIN,
                 ),
                 "admin_a": User(
                     broker_id=broker_a.id,
-                    username="999902",
+                    login="999902",
                     password_hash="x-not-a-real-hash",
                     is_active=True,
                     role=UserRole.ADMIN,
                 ),
                 "customer_a": User(
                     broker_id=broker_a.id,
-                    username="999903",
+                    login="999903",
                     password_hash="x-not-a-real-hash",
                     email="customer.a@broker.example",
                     is_active=True,
@@ -83,14 +83,14 @@ def crud_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], dict[str, int]
                 ),
                 "super_b": User(
                     broker_id=broker_b.id,
-                    username="999904",
+                    login="999904",
                     password_hash=hash_password(PASSWORD),
                     is_active=True,
                     role=UserRole.SUPER_ADMIN,
                 ),
                 "customer_b": User(
                     broker_id=broker_b.id,
-                    username="999905",
+                    login="999905",
                     password_hash="x-not-a-real-hash",
                     is_active=True,
                     role=UserRole.CUSTOMER,
@@ -142,7 +142,7 @@ def load_user(factory: async_sessionmaker[AsyncSession], user_id: int) -> User |
 
 
 def create_payload(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {"username": "771001", "password": PASSWORD}
+    payload: dict[str, object] = {"login": "771001", "password": PASSWORD}
     payload.update(overrides)
     return payload
 
@@ -244,7 +244,7 @@ def test_super_admin_gets_one_user(crud_db) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["id"] == ids["customer_a"]
-    assert body["username"] == "999903"
+    assert body["login"] == "999903"
     assert set(body) == ALLOWED_FIELDS
 
 
@@ -296,20 +296,20 @@ def test_super_admin_updates_supported_fields(crud_db) -> None:
     assert row is not None and row.email == "new.address@broker.example"
 
 
-def test_update_username_and_password(crud_db) -> None:
+def test_update_login_and_password(crud_db) -> None:
     factory, ids = crud_db
     with make_client(factory) as client:
         response = client.patch(
             f"/users/{ids['customer_a']}",
-            json={"username": "888123", "password": "brand-new-password-1"},
+            json={"login": "888123", "password": "brand-new-password-1"},
             headers=super_header(ids),
         )
 
     assert response.status_code == 200
-    assert response.json()["username"] == "888123"
+    assert response.json()["login"] == "888123"
     row = load_user(factory, ids["customer_a"])
     assert row is not None
-    assert row.username == "888123"
+    assert row.login == "888123"
     from app.core.security import verify_password
 
     assert verify_password("brand-new-password-1", row.password_hash)
@@ -366,12 +366,12 @@ def test_empty_update_is_rejected(crud_db) -> None:
     assert response.status_code == 422
 
 
-def test_update_duplicate_username_is_generic_conflict(crud_db) -> None:
+def test_update_duplicate_login_is_generic_conflict(crud_db) -> None:
     factory, ids = crud_db
     with make_client(factory) as client:
         response = client.patch(
             f"/users/{ids['customer_a']}",
-            json={"username": "999902"},  # admin_a's username
+            json={"login": "999902"},  # admin_a's login
             headers=super_header(ids),
         )
 

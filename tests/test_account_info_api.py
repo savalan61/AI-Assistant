@@ -121,14 +121,14 @@ def account_env(tmp_path):
             await session.commit()
             customer = User(
                 broker_id=broker.id,
-                username="10001",
+                login="10001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             admin = User(
                 broker_id=broker.id,
-                username="20001",
+                login="20001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.SUPER_ADMIN,

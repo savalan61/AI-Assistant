@@ -2,8 +2,10 @@
 
 ## Current Status
 
-Step 40 — Super Admin User CRUD (this checkpoint)
-+ Fix — MT5 trade-history SL/TP field names (this checkpoint)
+Step 42 — One User Identity (`login`) (this checkpoint)
++ Step 41 — Stabilize & commit Step 40 + the trade-history field fix
++ Step 40 — Super Admin User CRUD
++ Fix — MT5 trade-history SL/TP field names
 + Step 39 — Live MT5 Investor-Password Verification
 + Step 39A/39B — configuration startup hardening & Pylance `_env_file` fix
 + Step 38 — MT5 Investor / Read-Only Credential Provisioning
@@ -12,15 +14,19 @@ Step 40 — Super Admin User CRUD (this checkpoint)
 
 Status:
 
-VERIFIED + COMMITTED (local — not pushed in this step)
+Step 42: VERIFIED + COMMITTED (this checkpoint, local — not pushed)
+Steps 12–41: COMMITTED; the Step 41 commit is also still local (not pushed)
 
 Checkpoint commit:
 
-This checkpoint carries Step 40 (the completed super-admin user CRUD) together
-with the trade-history MT5 compatibility fix and this document update, and it
-leaves the working tree clean. Pushing is deliberately NOT part of this step,
-so the commit stays local until a push is explicitly requested. The prior
-synced commit was "fix(config): harden environment settings loading"
+This checkpoint carries Step 42 (the one-identity `login` rename across the
+model, migration, auth, user management, MT5 credential handling, seed scripts,
+tests and documentation) together with this document update, and it leaves the
+working tree clean. Pushing is deliberately NOT part of this step, so the commit
+stays local until a push is explicitly requested. The prior commit is Step 41 —
+"feat(users): complete super admin user crud" (1577672) — which carries Step 40
+together with the trade-history field fix; it is also still local. The last
+synced (pushed) commit was "fix(config): harden environment settings loading"
 (Steps 39A/39B), which carries the tolerant, secret-safe settings loading and
 the statically visible env-file selection; before that "feat(mt5): add investor
 credential provisioning" (Step 38, the per-user MT5 account fields, the
@@ -118,10 +124,11 @@ Working tree after this checkpoint:
 
 CLEAN
 
-The two bodies of verified work that were sitting uncommitted before it —
-Step 40 and the trade-history field fix — are included in this commit, so the
-working tree is clean again. Until this checkpoint is pushed, local HEAD is one
-commit ahead of origin/master.
+The Step 42 `login` rename and this document update are carried by the
+checkpoint commit, so the working tree is clean again. The last two commits —
+Step 41 (`1577672`, "feat(users): complete super admin user crud") and this
+Step 42 checkpoint — are local, so local HEAD is two commits ahead of
+origin/master until they are pushed.
 
 ## Completed Stages
 
@@ -945,13 +952,69 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
-### Step 40 — Super Admin User CRUD
+### Step 42 — One User Identity (`login`)
 Status: VERIFIED + COMMITTED (this checkpoint)
+
+A user had TWO identity columns describing the same fact: `username` (the
+application login) and `mt5_login` (the MT5 account number). They are now one
+column, `login`, which is both — the application login and the MT5 account
+number. This is a deliberate, breaking API change: there is no compatibility
+`username` field, no alias and no dual-write.
+
+- `app/db/models/user.py`: `username` → `login` (String(100), NOT NULL);
+  `mt5_login` removed; the tenant-scoped unique constraint is now
+  `uq_users_broker_login` (unique per broker, same semantics). `mt5_server` and
+  the encrypted MT5 INVESTOR password are unchanged, and there is still no
+  trading/master password anywhere.
+- Migration `a5d92c41f7be` (revises `c4a91f2e6d77`) is a true column RENAME,
+  not an add-and-copy, so no obsolete `username` column can survive beside the
+  new one. It is guarded and ordered: a pre-flight check aborts loudly if any
+  row's `mt5_login` disagrees with the identity (instead of silently dropping a
+  divergent account number), then renames the column, moves the unique
+  constraint, and drops `mt5_login`. `downgrade()` restores `username` and
+  writes the identity back into a recreated `mt5_login`, so the round trip is
+  lossless.
+- `POST /auth/login` takes `login` + the application password; the throttle
+  keys on the submitted login (per IP and per login) with identical behaviour
+  for existing and unknown logins. The generic 401 detail is now "Incorrect
+  login or password".
+- User CRUD uses `login` throughout: create (`POST /users`, `POST
+  /users/admins`), list, get, partial update (changing the login changes the
+  application login AND the MT5 account number at once), responses and the
+  duplicate-conflict path. The 4-12 ASCII-digit shape is unchanged; it is now
+  documented as what it is — the MT5 account-number format.
+- MT5 credential provisioning uses the SAME `User.login` as the MT5 login:
+  `PUT /users/{id}/mt5-credentials` accepts only `mt5_server` +
+  `mt5_investor_password`. The account-number field was removed from the
+  request (so a client can never aim a credential at a different account) and
+  the response is now `user_id, login, mt5_server, mt5_configured`.
+- `effective_mt5_login()` now reads `user.login` (numeric → the MT5 account
+  number, non-numeric → fails closed at the session boundary). The obsolete
+  `mt5_login` preference/fallback logic is gone; the broker's `mt5_server`
+  fallback remains, because that is still a real tenant-level configuration.
+- Seed scripts (`create_dev_user.py`, `create_dev_users.py`) and every affected
+  test were migrated to `login`.
+- Verification: full suite **799 passed, 2 warnings**; compileall clean; the
+  migration was applied to the local development database and round-tripped
+  (upgrade → downgrade → upgrade) with all four rows and their credentials
+  preserved, and the new divergent-`mt5_login` guard was exercised and observed
+  to abort cleanly with the schema unchanged. Live end-to-end on the real app +
+  Postgres + MT5: all three development accounts authenticate with `login`
+  (200), an old `username` payload is refused (422), and GET /account-info
+  (200, USD), GET /positions (200, 2) and GET /trade-history (200, 4 trades)
+  are unchanged, as is the new 4-field credential status contract.
+- Static/type verification: no mypy/pyright/basedpyright/pytype is installed and
+  Pylance has no CLI, so a focused manual review was performed (reported, not
+  hidden). No type suppression of any kind was added.
+
+
+### Step 40 — Super Admin User CRUD
+Status: VERIFIED + COMMITTED (in the Step 41 commit)
 
 Completes user management for the broker's super_admin, entirely inside the
 authenticated tenant. broker_id is always taken from the database User, never
 from a request body or path, and every response keeps the same non-sensitive
-projection (id, broker_id, username, email, phone, role, is_active) —
+projection (id, broker_id, login, email, phone, role, is_active) —
 password_hash and mt5_password_encrypted are structurally absent.
 
 - GET /users/{user_id} (super_admin): one user of the caller's broker; a user
@@ -1151,7 +1214,7 @@ Includes:
 
 ## Current Authentication Flow
 
-POST /auth/login
+POST /auth/login  { "login": <account/login number>, "password": <app password> }
     ↓
 JWT access token
     ↓
@@ -1175,14 +1238,15 @@ role rule: admin → customers only; super_admin → any user in their broker
     ↓
 encrypt_secret(mt5_investor_password)   (failure ⇒ 503, nothing written)
     ↓
-users.mt5_login / users.mt5_server / users.mt5_password_encrypted (ciphertext)
+users.mt5_server / users.mt5_password_encrypted (ciphertext)
+The account number is NOT provisioned: it is the target user's own login.
 
 Then, on every MT5-backed read:
 
 authenticated user
     ↓
-get_mt5_credentials → effective login/server: the provisioned mt5_login and
-    ↓                 mt5_server, else numeric username + Broker.mt5_server
+get_mt5_credentials → effective login/server: the user's login (numeric) and
+    ↓                 the user's mt5_server, else Broker.mt5_server
 MT5AccountCredentials (ciphertext only; masked in repr)
     ↓
 MT5SessionManager.acquire → decrypt (only here) → initialize / login
@@ -1550,7 +1614,7 @@ Super Admin only, under /broker/llm-config; the API key is never returned:
 POST /users (super_admin or admin; creation of customer users only):
 
     {
-      "username": "20002",
+      "login": "20002",
       "password": "application password",
       "email": "optional@example.com",
       "phone": "+12345678901"
@@ -1561,7 +1625,7 @@ POST /users (super_admin or admin; creation of customer users only):
     {
       "id": 3,
       "broker_id": 1,
-      "username": "20002",
+      "login": "20002",
       "email": "optional@example.com",
       "phone": "+12345678901",
       "role": "customer",
@@ -1592,7 +1656,7 @@ GET /users (super_admin or admin; role-based visibility):
 - the requesting manager is excluded; empty result is a normal 200 with []
 - unauthenticated → 401; customer → 403
 - password_hash and mt5_password_encrypted are structurally absent from
-  every response; UserResponse exposes exactly: id, broker_id, username,
+  every response; UserResponse exposes exactly: id, broker_id, login,
   email, phone, role, is_active
 
 GET /users/{user_id} (super_admin only):
@@ -1603,16 +1667,17 @@ GET /users/{user_id} (super_admin only):
 
 PATCH /users/{user_id} (super_admin only):
 
-    { "username": ..., "password": ..., "email": ..., "phone": ...,
+    { "login": ..., "password": ..., "email": ..., "phone": ...,
       "role": "admin" | "customer", "is_active": true }
 
 - partial semantics: an omitted field is unchanged; an explicit null clears
-  email/phone ONLY (username, password, role and is_active may not be null) →
-  422; an empty body → 422
+  email/phone ONLY (login, password, role and is_active may not be null) →
+  422; an empty body → 422. Changing the login changes the application login
+  AND the MT5 account number at once, because they are one value.
 - "super_admin" as a role value → 422 for every caller (promotion impossible);
   demoting the broker's only super_admin → 409
 - a supplied password is hashed immediately and never returned or logged
-- duplicate username/email/phone inside the tenant → generic 409
+- duplicate login/email/phone inside the tenant → generic 409
 - cross-broker target → 404; admin/customer → 403
 
 DELETE /users/{user_id} (super_admin only):
@@ -1732,20 +1797,26 @@ DELETE /users/{user_id} (super_admin only):
   role migration ordering" (3a63af9), the Step 37 checkpoint "feat(financial):
   harden numeric representation", the Step 36 MT5 tenant-session commit, the
   Step 35 security hardening commit and b95eaa1).
-- A user carries its own MT5 identity: mt5_login and mt5_server (nullable,
-  explicit) plus mt5_password_encrypted holding the ciphertext of the MT5
-  INVESTOR (read-only) password. An admin may provision these for a customer and
-  a super_admin for any user in its broker; a customer can neither provision nor
-  read them, and no endpoint ever returns the password. The legacy derivation
-  (numeric username + Broker.mt5_server) still applies when the explicit fields
-  are NULL, so pre-Step-38 rows behave exactly as before. No master/trading
-  password is accepted or stored anywhere.
+- A user has exactly ONE identity: `login`, which is both the application
+  login and the MT5 account number (a single column since Step 42). It is a
+  numeric string for real accounts; a non-numeric login is not an MT5 account
+  and fails closed at the session boundary. The former `username` and
+  `mt5_login` columns are gone, and there is no compatibility alias.
+- A user also carries `mt5_server` (nullable, explicit) plus
+  mt5_password_encrypted holding the ciphertext of the MT5 INVESTOR (read-only)
+  password. An admin may provision these for a customer and a super_admin for
+  any user in its broker; a customer can neither provision nor read them, and no
+  endpoint ever returns the password. The account number is never provisioned —
+  it is the user's own `login` — and a request supplying an account-number
+  field is refused (422). The broker's `mt5_server` remains the fallback when
+  the user's own server is NULL. No master/trading password is accepted or
+  stored anywhere.
 - The development database (local PostgreSQL, APP_ENV=development) is at
   migration head and holds the developer Broker's accounts: the three seeded
   role accounts (super_admin / admin / customer) created by
   scripts/create_dev_users.py with documented development-only credentials,
   plus an additional customer account with a real provisioned MT5 INVESTOR
-  credential. The three seeded usernames are non-numeric, so the MT5-backed
+  credential. The three seeded logins are non-numeric, so the MT5-backed
   endpoints fail closed (503) for them by design; they exercise authentication,
   roles and the agent surface. SECRET_ENCRYPTION_KEY is now configured in the
   local environment, so credential provisioning succeeds there — the earlier
@@ -1878,12 +1949,10 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–40, the role-migration ordering fix, the development user seed and the
-trade-history field fix are complete and committed (latest commit: this
-checkpoint, which is local until pushed). Step 41 stabilized the tree: the
-previously uncommitted Step 40 work and the trade-history fix are now one
-commit, so the working tree is clean again — local HEAD is one commit ahead of
-origin/master until this checkpoint is pushed.
+Steps 12–42, the role-migration ordering fix, the development user seed and the
+trade-history field fix are complete and committed (latest commit: the Step 42
+checkpoint, which is local until pushed, as is the Step 41 commit before it).
+The working tree is clean.
 
 The immediate next action is deliberately NOT fixed here: the previously open
 work is now landed, so the next stage should be chosen explicitly (candidates

@@ -35,8 +35,9 @@ from app.db.models import Broker, User, UserRole
 # Clearly development-only tenant identity, so no real broker code can collide.
 DEV_BROKER_NAME = "Development Broker (local)"
 DEV_BROKER_CODE = "DEV-LOCAL"
-# Development MT5 login/account number used as the application username.
-DEV_USERNAME = "10001"
+# Development MT5 account/login number: the user's single identity, which is
+# both the application login and the MT5 account number.
+DEV_LOGIN = "10001"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -71,14 +72,14 @@ async def _create_dev_data(session: AsyncSession, password: str, update_password
     else:
         print(f"broker already exists: {DEV_BROKER_CODE} (id={broker.id})")
 
-    # User identity is unique per broker: look up by (broker_id, username).
+    # User identity is unique per broker: look up by (broker_id, login).
     user = (
-        await session.execute(select(User).where(User.broker_id == broker.id, User.username == DEV_USERNAME))
+        await session.execute(select(User).where(User.broker_id == broker.id, User.login == DEV_LOGIN))
     ).scalar_one_or_none()
     if user is None:
         user = User(
             broker_id=broker.id,
-            username=DEV_USERNAME,
+            login=DEV_LOGIN,
             password_hash=password_hash,
             is_active=True,
             # The development seed creates the operator account; the broker
@@ -88,16 +89,16 @@ async def _create_dev_data(session: AsyncSession, password: str, update_password
             # deliberately stays NULL for this step.
         )
         session.add(user)
-        print(f"created user: {DEV_USERNAME} (broker_id={broker.id}, role={user.role.value})")
+        print(f"created user: {DEV_LOGIN} (broker_id={broker.id}, role={user.role.value})")
     else:
         if update_password:
             user.password_hash = password_hash
-            print(f"updated password hash for user: {DEV_USERNAME} (id={user.id}, broker_id={broker.id})")
+            print(f"updated password hash for user: {DEV_LOGIN} (id={user.id}, broker_id={broker.id})")
         if set_role is not None:
             user.role = UserRole(set_role)
-            print(f"set role for user {DEV_USERNAME} (id={user.id}): {set_role}")
+            print(f"set role for user {DEV_LOGIN} (id={user.id}): {set_role}")
         if not update_password and set_role is None:
-            print(f"user already exists: {DEV_USERNAME} (id={user.id}, broker_id={broker.id}); password left unchanged")
+            print(f"user already exists: {DEV_LOGIN} (id={user.id}, broker_id={broker.id}); password left unchanged")
 
     try:
         # Single atomic commit for broker + user; expire_on_commit=False keeps
@@ -111,7 +112,7 @@ async def _create_dev_data(session: AsyncSession, password: str, update_password
         return 1
 
     if user.id is not None:
-        print(f"dev user ready: {DEV_USERNAME} (id={user.id}, broker_id={broker.id}, active={user.is_active})")
+        print(f"dev user ready: {DEV_LOGIN} (id={user.id}, broker_id={broker.id}, active={user.is_active})")
     return 0
 
 

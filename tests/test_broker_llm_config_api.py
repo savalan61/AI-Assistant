@@ -93,10 +93,10 @@ def broker_db(tmp_path) -> dict[str, Any]:
             session.add_all([broker_a, broker_b])
             await session.flush()
 
-            def make(broker: Broker, username: str, role: UserRole) -> User:
+            def make(broker: Broker, login: str, role: UserRole) -> User:
                 return User(
                     broker_id=broker.id,
-                    username=username,
+                    login=login,
                     password_hash="x-not-a-real-hash",
                     is_active=True,
                     role=role,

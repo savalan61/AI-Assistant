@@ -54,7 +54,7 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
             await session.flush()
             admin_a = User(
                 broker_id=broker_a.id,
-                username="admin-a",
+                login="admin-a",
                 # Real bcrypt hash via the app's own primitive.
                 password_hash=hash_for_test(ADMIN_PASSWORD),
                 is_active=True,
@@ -64,16 +64,16 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
             )
             admin_b = User(
                 broker_id=broker_b.id,
-                username="admin-b",
+                login="admin-b",
                 password_hash=hash_for_test(ADMIN_PASSWORD),
                 is_active=True,
                 role=UserRole.SUPER_ADMIN,
             )
             customer = User(
                 broker_id=broker_a.id,
-                # Digit username: the API enforces MT5-login format on created
+                # Digit login: the API enforces MT5-login format on created
                 # users, so the seeded row used by duplicate tests matches it.
-                username="10002",
+                login="10002",
                 password_hash="x-not-a-real-hash",
                 is_active=True,
                 role=UserRole.CUSTOMER,
@@ -113,8 +113,8 @@ def admin_token(user_id: int) -> str:
     return create_access_token(str(user_id))
 
 
-def create_payload(username: str = "20002", password: str = "customer password", **extra: object) -> dict[str, object]:
-    payload: dict[str, object] = {"username": username, "password": password}
+def create_payload(login: str = "20002", password: str = "customer password", **extra: object) -> dict[str, object]:
+    payload: dict[str, object] = {"login": login, "password": password}
     payload.update(extra)
     return payload
 
@@ -150,7 +150,7 @@ def test_admin_can_create_customer_returns_201(users_db) -> None:
         async with factory() as session:
             admin = User(
                 broker_id=1,
-                username="admin-a1",
+                login="admin-a1",
                 password_hash="x-not-a-real-hash",
                 is_active=True,
                 role=UserRole.ADMIN,
@@ -162,7 +162,7 @@ def test_admin_can_create_customer_returns_201(users_db) -> None:
     admin_id = asyncio.run(seed_admin())
 
     with make_client(factory) as client:
-        response = client.post("/users", json=create_payload(username="30002"), headers=auth_header(admin_token(admin_id)))
+        response = client.post("/users", json=create_payload(login="30002"), headers=auth_header(admin_token(admin_id)))
 
     assert response.status_code == 201
     body = response.json()
@@ -192,11 +192,11 @@ def test_super_admin_creates_customer_returns_201(users_db) -> None:
     assert body["role"] == "customer"
     assert body["broker_id"] == 1
     assert body["is_active"] is True
-    assert body["username"] == "20002"
+    assert body["login"] == "20002"
     assert body["email"] == "c@example.com"
     assert body["phone"] == "+12345678901"
     # Exactly the non-sensitive projection; no credential fields exist.
-    assert set(body.keys()) == {"id", "broker_id", "username", "email", "phone", "role", "is_active"}
+    assert set(body.keys()) == {"id", "broker_id", "login", "email", "phone", "role", "is_active"}
 
 
 def test_created_user_persisted_with_derived_role_and_tenant(users_db) -> None:
@@ -223,7 +223,7 @@ def test_second_broker_super_admin_creates_user_in_own_tenant(users_db) -> None:
 
     with make_client(factory) as client:
         body = client.post(
-            "/users", json=create_payload(username="30001"), headers=auth_header(admin_token(admin_b_id))
+            "/users", json=create_payload(login="30001"), headers=auth_header(admin_token(admin_b_id))
         ).json()
 
     # Broker B's super_admin gets a user in broker B, never in another tenant.
@@ -321,28 +321,28 @@ def test_role_cannot_be_supplied(users_db, escalation_role: str) -> None:
 # broker plus a customer, so it cannot exercise that branch).
 
 
-def test_duplicate_username_in_same_broker_returns_409(users_db) -> None:
+def test_duplicate_login_in_same_broker_returns_409(users_db) -> None:
     factory, admin_a_id, _, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
             "/users",
             # "10002" already exists in broker A.
-            json=create_payload(username="10002"),
+            json=create_payload(login="10002"),
             headers=auth_header(admin_token(admin_a_id)),
         )
 
     assert response.status_code == 409
 
 
-def test_same_username_in_different_broker_is_allowed(users_db) -> None:
+def test_same_login_in_different_broker_is_allowed(users_db) -> None:
     factory, _, _, admin_b_id = users_db
 
     with make_client(factory) as client:
         response = client.post(
             "/users",
             # Uniqueness is tenant-scoped: broker B may reuse broker A's name.
-            json=create_payload(username="10002"),
+            json=create_payload(login="10002"),
             headers=auth_header(admin_token(admin_b_id)),
         )
 
@@ -353,8 +353,8 @@ def test_same_username_in_different_broker_is_allowed(users_db) -> None:
 # --- request validation (422 at the schema boundary) --------------------------------
 
 
-@pytest.mark.parametrize("bad_username", ["new-customer", "123", "1234567890123", "", "12a4", "１２３４"])
-def test_invalid_username_rejected_with_422(users_db, bad_username: str) -> None:
+@pytest.mark.parametrize("bad_login", ["new-customer", "123", "1234567890123", "", "12a4", "１２３４"])
+def test_invalid_login_rejected_with_422(users_db, bad_login: str) -> None:
     factory, admin_a_id, _, _ = users_db
 
     with make_client(factory) as client:
@@ -362,27 +362,27 @@ def test_invalid_username_rejected_with_422(users_db, bad_username: str) -> None
             "/users",
             # Letters, wrong length, empty, mixed, and Unicode digits are all
             # outside the MT5-login contract (ASCII digits, 4-12).
-            json=create_payload(username=bad_username),
+            json=create_payload(login=bad_login),
             headers=auth_header(admin_token(admin_a_id)),
         )
 
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize("valid_username", ["1000", "123456789012"])
-def test_username_length_boundaries_accepted(users_db, valid_username: str) -> None:
+@pytest.mark.parametrize("valid_login", ["1000", "123456789012"])
+def test_login_length_boundaries_accepted(users_db, valid_login: str) -> None:
     factory, admin_a_id, _, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
             "/users",
             # Exactly 4 and exactly 12 digits are the inclusive boundaries.
-            json=create_payload(username=valid_username),
+            json=create_payload(login=valid_login),
             headers=auth_header(admin_token(admin_a_id)),
         )
 
     assert response.status_code == 201
-    assert response.json()["username"] == valid_username
+    assert response.json()["login"] == valid_login
 
 
 def test_short_password_rejected_with_422(users_db) -> None:

@@ -32,16 +32,16 @@ def role_db(tmp_path) -> "async_sessionmaker[AsyncSession]":
     asyncio.run(engine.dispose())
 
 
-async def _add_user(factory: async_sessionmaker[AsyncSession], username: str, role: UserRole | None = None) -> int:
+async def _add_user(factory: async_sessionmaker[AsyncSession], login: str, role: UserRole | None = None) -> int:
     async with factory() as session:
-        broker = Broker(name="Test Broker", code=f"TB-{username}")
+        broker = Broker(name="Test Broker", code=f"TB-{login}")
         session.add(broker)
         await session.flush()
         if role is None:
             # Omitting role exercises the model/server default path explicitly.
-            user = User(broker_id=broker.id, username=username, password_hash="x", is_active=True)
+            user = User(broker_id=broker.id, login=login, password_hash="x", is_active=True)
         else:
-            user = User(broker_id=broker.id, username=username, password_hash="x", is_active=True, role=role)
+            user = User(broker_id=broker.id, login=login, password_hash="x", is_active=True, role=role)
         session.add(user)
         await session.commit()
         return user.id
@@ -77,14 +77,14 @@ def test_role_defaults_to_customer_at_database_level(role_db) -> None:
             await session.flush()
             await session.execute(
                 text(
-                    "INSERT INTO users (broker_id, username, password_hash, is_active) "
+                    "INSERT INTO users (broker_id, login, password_hash, is_active) "
                     "VALUES (:b, :u, :p, 1)"
                 ),
                 {"b": broker.id, "u": "raw-user", "p": "x"},
             )
             await session.commit()
             value = (
-                await session.execute(text("SELECT role FROM users WHERE username = 'raw-user'"))
+                await session.execute(text("SELECT role FROM users WHERE login = 'raw-user'"))
             ).scalar_one()
             return UserRole(value)
 
@@ -122,7 +122,7 @@ def test_database_rejects_unknown_role_value(role_db) -> None:
             await session.flush()
             await session.execute(
                 text(
-                    "INSERT INTO users (broker_id, username, password_hash, is_active, role) "
+                    "INSERT INTO users (broker_id, login, password_hash, is_active, role) "
                     "VALUES (:b, :u, :p, 1, 'superuser')"
                 ),
                 {"b": broker.id, "u": "bad-role", "p": "x"},
@@ -137,23 +137,23 @@ def test_database_rejects_unknown_role_value(role_db) -> None:
 
 
 async def _add_user_in_broker(
-    factory: async_sessionmaker[AsyncSession], broker_id: int, username: str, role: UserRole
+    factory: async_sessionmaker[AsyncSession], broker_id: int, login: str, role: UserRole
 ) -> int:
     async with factory() as session:
-        user = User(broker_id=broker_id, username=username, password_hash="x", is_active=True, role=role)
+        user = User(broker_id=broker_id, login=login, password_hash="x", is_active=True, role=role)
         session.add(user)
         await session.commit()
         return user.id
 
 
 async def _create_broker_with_user(
-    factory: async_sessionmaker[AsyncSession], broker_code: str, username: str, role: UserRole
+    factory: async_sessionmaker[AsyncSession], broker_code: str, login: str, role: UserRole
 ) -> tuple[int, int]:
     async with factory() as session:
         broker = Broker(name=broker_code, code=broker_code)
         session.add(broker)
         await session.flush()
-        user = User(broker_id=broker.id, username=username, password_hash="x", is_active=True, role=role)
+        user = User(broker_id=broker.id, login=login, password_hash="x", is_active=True, role=role)
         session.add(user)
         await session.commit()
         return broker.id, user.id
@@ -180,7 +180,7 @@ def test_second_super_admin_rejected_via_raw_sql(role_db) -> None:
         async with factory() as session:
             await session.execute(
                 text(
-                    "INSERT INTO users (broker_id, username, password_hash, is_active, role) "
+                    "INSERT INTO users (broker_id, login, password_hash, is_active, role) "
                     "VALUES (:b, :u, :p, 1, 'super_admin')"
                 ),
                 {"b": broker_id, "u": "super-raw-2", "p": "x"},

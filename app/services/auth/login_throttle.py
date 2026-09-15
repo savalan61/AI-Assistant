@@ -4,24 +4,24 @@ The login endpoint is the only credential gate in front of a financial account,
 so an unlimited number of attempts against it is not acceptable. This is the
 smallest control that removes trivial credential stuffing:
 
-* **Two keys.** Failures are counted per client IP *and* per submitted username,
-  so neither a single address spraying many usernames nor many addresses
-  targeting one username goes unnoticed.
-* **Submitted value, not account existence.** The username key is the string
-  the client sent, normalized for case, and it is counted whether or not that
+* **Two keys.** Failures are counted per client IP *and* per submitted login,
+  so neither a single address spraying many logins nor many addresses targeting
+  one login goes unnoticed.
+* **Submitted value, not account existence.** The login key is the string the
+  client sent, normalized for case, and it is counted whether or not that
   account exists. The rejection behaviour is therefore identical for an
-  existing and a non-existing username, so the throttle cannot be used to
-  probe which accounts exist.
+  existing and a non-existing login, so the throttle cannot be used to probe
+  which accounts exist.
 * **In-process.** A lock-guarded dict in this process's memory, no Redis and no
   database table. It resets on restart and is per worker — the same documented
   limitation as the Agent daily limit, acceptable for the current
   single-process deployment and replaced by a shared store only if/when a
   multi-worker deployment is designed.
 * **Bounded.** Stale entries are evicted, so the dict cannot grow without limit
-  under a flood of distinct usernames or addresses.
+  under a flood of distinct logins or addresses.
 
-Known trade-off: because the lockout is keyed on the submitted username, an
-attacker who floods one username can temporarily lock that user out for the
+Known trade-off: because the lockout is keyed on the submitted login, an
+attacker who floods one login can temporarily lock that user out for the
 configured window. The window is intentionally short and configurable.
 """
 import threading
@@ -34,11 +34,11 @@ _SWEEP_THRESHOLD = 10_000
 
 
 class LoginThrottleExceededError(RuntimeError):
-    """Too many failed login attempts for this client IP or username."""
+    """Too many failed login attempts for this client IP or login."""
 
 
 class LoginThrottle:
-    """Counts failed login attempts per client IP and per submitted username."""
+    """Counts failed login attempts per client IP and per submitted login."""
 
     def __init__(self, max_failures: int, window_seconds: int) -> None:
         if max_failures < 1:
@@ -65,7 +65,7 @@ class LoginThrottle:
         with self._lock:
             return len(self._failures)
 
-    def check(self, client_ip: str, username: str, now: datetime) -> None:
+    def check(self, client_ip: str, login: str, now: datetime) -> None:
         """Raise when either key has reached the limit inside the window.
 
         Called before any credential lookup, so a throttled attempt costs no
@@ -75,24 +75,24 @@ class LoginThrottle:
         self._require_aware(now)
         with self._lock:
             self._sweep_locked(now)
-            for key in self._keys(client_ip, username):
+            for key in self._keys(client_ip, login):
                 if len(self._recent_locked(key, now)) >= self._max_failures:
                     raise LoginThrottleExceededError("too many failed login attempts")
 
-    def record_failure(self, client_ip: str, username: str, now: datetime) -> None:
+    def record_failure(self, client_ip: str, login: str, now: datetime) -> None:
         """Count one failed attempt against both keys."""
         self._require_aware(now)
         with self._lock:
             self._sweep_locked(now)
-            for key in self._keys(client_ip, username):
+            for key in self._keys(client_ip, login):
                 recent = self._recent_locked(key, now)
                 recent.append(now)
                 self._failures[key] = recent
 
-    def record_success(self, client_ip: str, username: str) -> None:
-        """Clear both counters for this client/username after a valid login."""
+    def record_success(self, client_ip: str, login: str) -> None:
+        """Clear both counters for this client/login after a valid login."""
         with self._lock:
-            for key in self._keys(client_ip, username):
+            for key in self._keys(client_ip, login):
                 self._failures.pop(key, None)
 
     @staticmethod
@@ -101,9 +101,9 @@ class LoginThrottle:
             raise ValueError("now must be timezone-aware")
 
     @staticmethod
-    def _keys(client_ip: str, username: str) -> tuple[tuple[str, str], ...]:
-        # Username is normalized so casing cannot be used to evade the counter.
-        return (("ip", client_ip), ("username", username.strip().lower()))
+    def _keys(client_ip: str, login: str) -> tuple[tuple[str, str], ...]:
+        # Login is normalized so casing cannot be used to evade the counter.
+        return (("ip", client_ip), ("login", login.strip().lower()))
 
     def _recent_locked(self, key: tuple[str, str], now: datetime) -> list[datetime]:
         """Failures for ``key`` still inside the window (prunes the entry)."""

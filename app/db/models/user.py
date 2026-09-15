@@ -41,9 +41,9 @@ class UserRole(StrEnum):
 class User(Base):
     __tablename__ = "users"
     # Composite unique constraints ensure tenant-scoped uniqueness;
-    # username/email/phone may repeat across different brokers.
+    # login/email/phone may repeat across different brokers.
     __table_args__ = (
-        UniqueConstraint("broker_id", "username", name="uq_users_broker_username"),
+        UniqueConstraint("broker_id", "login", name="uq_users_broker_login"),
         UniqueConstraint("broker_id", "email", name="uq_users_broker_email"),
         UniqueConstraint("broker_id", "phone", name="uq_users_broker_phone"),
         # Non-native enum: a plain VARCHAR plus a CHECK constraint keeps the
@@ -65,18 +65,22 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     broker_id: Mapped[int] = mapped_column(Integer, ForeignKey("brokers.id"), nullable=False, index=True)
-    username: Mapped[str] = mapped_column(String(100), nullable=False)
+    # THE single user identity, and the only one the system has: it is both the
+    # application login and the MT5 account/login number. Kept as a string so a
+    # leading zero survives (never converted to int). Replaces the former
+    # username column, which was migrated into this one, and the former
+    # mt5_login column, which duplicated it.
+    login: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     # Stored as a hash; must never be recoverable in plaintext.
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    # The user's MT5 account number and server, stored per user rather than
-    # derived from the application username / Broker.mt5_server, so one broker
-    # can host customers on different MT5 servers and an administrator can
-    # provision an account explicitly. Both stay NULL on rows provisioned the
-    # older way: credential resolution then falls back to (username,
-    # Broker.mt5_server), so existing behaviour is unchanged.
-    mt5_login: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The user's MT5 server, stored per user rather than derived from
+    # Broker.mt5_server, so one broker can host customers on different MT5
+    # servers and an administrator can provision it explicitly. Stays NULL on
+    # rows provisioned the older way: credential resolution then falls back to
+    # Broker.mt5_server, so existing behaviour is unchanged. The MT5 account
+    # number is `login` — there is deliberately no second account column.
     mt5_server: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Fernet ciphertext of the user's MT5 INVESTOR (read-only) password. The
     # trading/master password is never requested, stored or used: only a

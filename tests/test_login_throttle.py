@@ -16,9 +16,9 @@ def make_throttle(max_failures: int = 3, window_seconds: int = 300) -> LoginThro
     return LoginThrottle(max_failures=max_failures, window_seconds=window_seconds)
 
 
-def fail_n(throttle: LoginThrottle, times: int, *, ip: str = "1.2.3.4", username: str = "10001") -> None:
+def fail_n(throttle: LoginThrottle, times: int, *, ip: str = "1.2.3.4", login: str = "10001") -> None:
     for _ in range(times):
-        throttle.record_failure(ip, username, NOW)
+        throttle.record_failure(ip, login, NOW)
 
 
 # --- construction ----------------------------------------------------------------------
@@ -56,24 +56,24 @@ def test_below_the_limit_is_admitted() -> None:
     throttle.check("1.2.3.4", "10001", NOW)  # 2 < 3
 
 
-def test_at_the_limit_is_rejected_for_the_username() -> None:
+def test_at_the_limit_is_rejected_for_the_login() -> None:
     throttle = make_throttle(max_failures=3)
     fail_n(throttle, 3)
 
     with pytest.raises(LoginThrottleExceededError):
-        throttle.check("9.9.9.9", "10001", NOW)  # different IP, same username
+        throttle.check("9.9.9.9", "10001", NOW)  # different IP, same login
 
 
 def test_at_the_limit_is_rejected_for_the_ip() -> None:
     throttle = make_throttle(max_failures=3)
-    for username in ("1", "2", "3"):
-        throttle.record_failure("1.2.3.4", username, NOW)
+    for login in ("1", "2", "3"):
+        throttle.record_failure("1.2.3.4", login, NOW)
 
     with pytest.raises(LoginThrottleExceededError):
-        throttle.check("1.2.3.4", "never-seen", NOW)  # same IP, new username
+        throttle.check("1.2.3.4", "never-seen", NOW)  # same IP, new login
 
 
-def test_username_casing_cannot_evade_the_counter() -> None:
+def test_login_casing_cannot_evade_the_counter() -> None:
     throttle = make_throttle(max_failures=2)
     throttle.record_failure("1.2.3.4", "Admin", NOW)
     throttle.record_failure("1.2.3.4", "admin", NOW)
@@ -91,17 +91,17 @@ def test_surrounding_whitespace_cannot_evade_the_counter() -> None:
         throttle.check("8.8.8.8", "10001", NOW)
 
 
-def test_unrelated_client_and_username_is_admitted() -> None:
+def test_unrelated_client_and_login_is_admitted() -> None:
     throttle = make_throttle(max_failures=2)
-    fail_n(throttle, 2, ip="1.1.1.1", username="10001")
+    fail_n(throttle, 2, ip="1.1.1.1", login="10001")
 
     # Neither key matches the throttled pair, so this client is unaffected.
     throttle.check("2.2.2.2", "20002", NOW)
 
 
-def test_username_key_is_global_across_client_ips() -> None:
-    # A distributed spray on one username (a new address each time) is caught
-    # by the username key alone.
+def test_login_key_is_global_across_client_ips() -> None:
+    # A distributed spray on one login (a new address each time) is caught
+    # by the login key alone.
     throttle = make_throttle(max_failures=2)
     throttle.record_failure("1.1.1.1", "10001", NOW)
     throttle.record_failure("2.2.2.2", "10001", NOW)
@@ -144,10 +144,10 @@ def test_successful_login_clears_both_keys() -> None:
     throttle.check("1.2.3.4", "10001", NOW)  # admitted again
 
 
-def test_success_clears_the_ip_key_for_other_usernames() -> None:
+def test_success_clears_the_ip_key_for_other_logins() -> None:
     throttle = make_throttle(max_failures=3)
-    for username in ("1", "2", "3"):
-        throttle.record_failure("1.2.3.4", username, NOW)
+    for login in ("1", "2", "3"):
+        throttle.record_failure("1.2.3.4", login, NOW)
 
     throttle.record_success("1.2.3.4", "2")  # clears the ip key too
 
@@ -165,7 +165,7 @@ def test_rejection_message_is_generic() -> None:
         throttle.check("1.2.3.4", "10001", NOW)
 
     message = str(excinfo.value)
-    # The error must not say whether the username exists, nor echo the input.
+    # The error must not say whether the login exists, nor echo the input.
     assert "10001" not in message
     assert "1.2.3.4" not in message
     assert "exist" not in message

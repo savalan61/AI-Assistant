@@ -69,7 +69,7 @@ def inert_mt5_providers(monkeypatch: pytest.MonkeyPatch):
 def make_user(broker_id: int = 1) -> User:
     return User(
         broker_id=broker_id,
-        username="wiring-user",
+        login="wiring-user",
         password_hash="x-not-a-real-hash",
         is_active=True,
         role=UserRole.CUSTOMER,

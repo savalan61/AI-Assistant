@@ -31,9 +31,8 @@ Application credentials and MT5 credentials are separate.
 
 Current model:
 
-- username = application/Agent login (a numeric value still acts as the
-  legacy MT5 login fallback)
-- mt5_login = the user's MT5 account number (administrator-provisioned)
+- login = the user's single identity: the application/Agent login AND the MT5
+  account/login number (one column since Step 42; there is no separate username)
 - mt5_server = the user's MT5 server (administrator-provisioned)
 - password_hash = Agent/application password
 - mt5_password_encrypted = encrypted MT5 INVESTOR (read-only) password
@@ -81,11 +80,10 @@ Current known fields:
 
 - id
 - broker_id
-- username
+- login
 - email
 - phone
 - password_hash
-- mt5_login
 - mt5_server
 - mt5_password_encrypted
 - is_active
@@ -93,13 +91,16 @@ Current known fields:
 
 Important:
 
-- username is the application/Agent login
+- login is BOTH the application/Agent login and the MT5 account/login number;
+  it is a string so a leading zero survives. Credential resolution uses it
+  directly when it is numeric, and fails closed at the session boundary when it
+  is not.
 - password_hash is the application/Agent password
-- mt5_login / mt5_server hold the user's MT5 account number and server. A broker
-  administrator provisions them (admin: customers only; super_admin: any user in
-  its broker) through PUT /users/{user_id}/mt5-credentials. They are nullable:
-  when NULL, credential resolution falls back to a numeric username +
-  Broker.mt5_server, so pre-Step-38 rows behave exactly as before.
+- mt5_server holds the user's MT5 server. A broker administrator provisions it
+  (admin: customers only; super_admin: any user in its broker) through
+  PUT /users/{user_id}/mt5-credentials. It is nullable: when NULL, credential
+  resolution falls back to Broker.mt5_server. The MT5 account number is never
+  provisioned separately — it is the user's own login.
 - mt5_password_encrypted is the encrypted MT5 INVESTOR (read-only) password. The
   trading/master password is never requested, stored or used, a customer can
   neither provision nor read the credential, and no API returns it.
@@ -256,7 +257,7 @@ Current JWT-protected, read-only endpoints:
   (read-only) credential; admin: customers only, super_admin: any user in its
   broker. Write-only password, encrypted at rest, never returned.
 - GET /users/{user_id}/mt5-credentials → safe credential metadata only
-  (effective mt5_login, effective mt5_server, mt5_configured)
+  (user_id, login, mt5_server, mt5_configured)
 
 Plus unauthenticated infrastructure:
 

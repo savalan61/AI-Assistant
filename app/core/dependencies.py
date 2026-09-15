@@ -71,17 +71,15 @@ def shutdown_mt5_session() -> None:
 def effective_mt5_login(user: User) -> str | None:
     """The MT5 account number this user is read as (digits, or None).
 
-    Explicit provisioning (``user.mt5_login``) wins; otherwise the application
-    username is used when it is numeric, which is how every row provisioned
-    before per-user MT5 credentials existed keeps working. A non-numeric value
-    is simply not an MT5 account number and fails closed at the session
-    boundary. Kept as a string so leading zeros survive.
+    Since Step 42 there is exactly ONE identity column: ``user.login`` is both
+    the application login and the MT5 account number, so there is nothing to
+    prefer and no second column to fall back to. A non-numeric login is simply
+    not an MT5 account number and fails closed at the session boundary — which
+    is how the development role accounts (whose logins are words) keep
+    behaving. Kept as a string so leading zeros survive.
     """
-    explicit = (user.mt5_login or "").strip()
-    if explicit:
-        return explicit
-    username = user.username.strip()
-    return username if username.isdecimal() else None
+    login = user.login.strip()
+    return login if login.isdecimal() else None
 
 
 def effective_mt5_server(user: User, broker: Broker | None) -> str | None:
@@ -100,8 +98,8 @@ def resolve_mt5_account_credentials(user: User, broker: Broker | None) -> MT5Acc
     """Extract a tenant's MT5 identity from the authenticated database rows.
 
     The login and server are the *effective* ones (see the helpers above): the
-    user's own provisioned values when present, otherwise the legacy fallback of
-    a numeric username and the broker's server. ``mt5_password_encrypted`` is
+    user's own ``login`` when it is numeric, and the user's own MT5 server when
+    present, otherwise the broker's server. ``mt5_password_encrypted`` is
     the stored ciphertext of the MT5 INVESTOR (read-only) password — the trading
     password is never accepted anywhere in this system. Nothing is decrypted
     here — the ciphertext travels to the session boundary, which is the only
@@ -239,7 +237,7 @@ def get_outbound_data_policy() -> OutboundDataPolicy:
 
 
 # Login brute-force protection is process-wide state by its documented nature
-# (in-process per-IP and per-username counters, reset on restart): one throttle
+# (in-process per-IP and per-login counters, reset on restart): one throttle
 # per process, lazily built from settings behind the same lock-guarded pattern
 # as the other in-process limiters. The thresholds come from configuration.
 _login_throttle: LoginThrottle | None = None

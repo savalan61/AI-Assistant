@@ -27,7 +27,7 @@ TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
 ADMIN_PASSWORD = "admin application password"
 
-ALLOWED_FIELDS = {"id", "broker_id", "username", "email", "phone", "role", "is_active"}
+ALLOWED_FIELDS = {"id", "broker_id", "login", "email", "phone", "role", "is_active"}
 
 
 @pytest.fixture(autouse=True)
@@ -61,10 +61,10 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
             session.add_all([broker_a, broker_b, broker_c])
             await session.flush()
 
-            def make(broker: Broker, username: str, role: UserRole) -> User:
+            def make(broker: Broker, login: str, role: UserRole) -> User:
                 return User(
                     broker_id=broker.id,
-                    username=username,
+                    login=login,
                     password_hash=hash_password(ADMIN_PASSWORD) if role is UserRole.SUPER_ADMIN else "x-not-a-real-hash",
                     is_active=True,
                     role=role,
@@ -194,7 +194,7 @@ def test_super_admin_does_not_see_itself(users_db) -> None:
     body = list_as(factory, super_a_id)
 
     assert super_a_id not in ids_of(body)
-    assert "super-a" not in [entry["username"] for entry in body]
+    assert "super-a" not in [entry["login"] for entry in body]
 
 
 # --- admin visibility: customers only ---------------------------------------------
@@ -219,8 +219,8 @@ def test_admin_cannot_list_admins_or_super_admins(users_db) -> None:
     # Neither the other admin nor the broker's super_admin is ever returned.
     assert admin_a2_id not in ids_of(body)
     assert super_a_id not in ids_of(body)
-    assert "admin-a2" not in [entry["username"] for entry in body]
-    assert "super-a" not in [entry["username"] for entry in body]
+    assert "admin-a2" not in [entry["login"] for entry in body]
+    assert "super-a" not in [entry["login"] for entry in body]
 
 
 # --- cross-tenant isolation --------------------------------------------------------
@@ -233,7 +233,7 @@ def test_cross_broker_users_are_never_returned(users_db) -> None:
         body = list_as(factory, manager_id)
         # Broker B's rows (including its customer 10004) must never appear.
         assert cust_b_id not in ids_of(body)
-        assert "10004" not in [entry["username"] for entry in body]
+        assert "10004" not in [entry["login"] for entry in body]
 
 
 def test_other_broker_super_admin_sees_only_their_own_tenant(users_db) -> None:
