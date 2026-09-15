@@ -113,7 +113,7 @@ def account_env(tmp_path):
                 username="20001",
                 password_hash="x" * 60,
                 is_active=True,
-                role=UserRole.BROKER_ADMIN,
+                role=UserRole.SUPER_ADMIN,
             )
             session.add_all([customer, admin])
             await session.commit()
@@ -198,7 +198,7 @@ def test_authenticated_customer_can_access_account_info(account_env, patched_acc
     assert response.json()["login"] == 10001
 
 
-def test_authenticated_broker_admin_can_access_account_info(account_env, patched_account_provider):
+def test_authenticated_super_admin_can_access_account_info(account_env, patched_account_provider):
     patched_account_provider()
     client = account_env["make_app"]()
 

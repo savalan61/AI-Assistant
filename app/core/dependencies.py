@@ -220,16 +220,33 @@ async def get_current_user(
     return user
 
 
-async def get_current_broker_admin(
+async def get_current_broker_manager(
     current_user: User = Depends(get_current_user),
 ) -> User:
-    """Require the authenticated user to be a Broker Admin.
+    """Require the authenticated user to manage users: super_admin or admin.
 
     Authorization rides on top of authentication: the database-backed
     User.role is the sole authority — no role claim exists in (or is read
-    from) the JWT. Non-admins are rejected with 403 so an authenticated
+    from) the JWT. Customers are rejected with 403 so an authenticated
     customer is distinguishable from an unauthenticated caller (401).
+    Both manager roles may create customer users; only the super_admin may
+    additionally manage admins and broker-level settings (see
+    get_current_super_admin).
     """
-    if current_user.role != UserRole.BROKER_ADMIN:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Broker admin privileges required")
+    if current_user.role not in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Broker manager privileges required")
+    return current_user
+
+
+async def get_current_super_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Require the authenticated user to be the broker's super_admin.
+
+    The database-backed User.role is the sole authority; at most one
+    super_admin exists per broker (enforced by a partial unique index in the
+    database). Admins and customers are rejected with 403.
+    """
+    if current_user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin privileges required")
     return current_user

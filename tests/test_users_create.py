@@ -1,4 +1,5 @@
-"""Tests for the Broker Admin POST /users endpoint (Step 14).
+"""Tests for the POST /users endpoint (Step 14; super_admin and admin may
+create customers under the evolved three-role model).
 
 Require none of: real PostgreSQL, real MT5, network, or real credentials.
 The get_db dependency is overridden with a per-test file-based async SQLite
@@ -57,14 +58,16 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
                 # Real bcrypt hash via the app's own primitive.
                 password_hash=hash_for_test(ADMIN_PASSWORD),
                 is_active=True,
-                role=UserRole.BROKER_ADMIN,
+                # The seeded operator account is the broker's single
+                # super_admin (the evolved role model).
+                role=UserRole.SUPER_ADMIN,
             )
             admin_b = User(
                 broker_id=broker_b.id,
                 username="admin-b",
                 password_hash=hash_for_test(ADMIN_PASSWORD),
                 is_active=True,
-                role=UserRole.BROKER_ADMIN,
+                role=UserRole.SUPER_ADMIN,
             )
             customer = User(
                 broker_id=broker_a.id,
@@ -138,10 +141,41 @@ def test_customer_cannot_create_users_returns_403(users_db) -> None:
     assert response.status_code == 403
 
 
+def test_admin_can_create_customer_returns_201(users_db) -> None:
+    factory, *_ = users_db
+
+    # The role model allows multiple admins per broker; insert one directly
+    # (POST /users forces customer role, so admins are seeded, not created).
+    async def seed_admin() -> int:
+        async with factory() as session:
+            admin = User(
+                broker_id=1,
+                username="admin-a1",
+                password_hash="x-not-a-real-hash",
+                is_active=True,
+                role=UserRole.ADMIN,
+            )
+            session.add(admin)
+            await session.commit()
+            return admin.id
+
+    admin_id = asyncio.run(seed_admin())
+
+    with make_client(factory) as client:
+        response = client.post("/users", json=create_payload(username="30002"), headers=auth_header(admin_token(admin_id)))
+
+    assert response.status_code == 201
+    body = response.json()
+    # An admin creates inside their own broker, and the created user is a
+    # plain customer regardless of the creator's role.
+    assert body["broker_id"] == 1
+    assert body["role"] == "customer"
+
+
 # --- creation success paths -----------------------------------------------------
 
 
-def test_broker_admin_creates_customer_returns_201(users_db) -> None:
+def test_super_admin_creates_customer_returns_201(users_db) -> None:
     factory, admin_a_id, _, _ = users_db
 
     with make_client(factory) as client:
@@ -154,7 +188,7 @@ def test_broker_admin_creates_customer_returns_201(users_db) -> None:
     assert response.status_code == 201
     body = response.json()
     # Derived fields only: role is forced customer and the tenant is the
-    # admin's broker; optional contact fields round-trip.
+    # super_admin's broker; optional contact fields round-trip.
     assert body["role"] == "customer"
     assert body["broker_id"] == 1
     assert body["is_active"] is True
@@ -184,7 +218,7 @@ def test_created_user_persisted_with_derived_role_and_tenant(users_db) -> None:
     assert user.broker_id == 1
 
 
-def test_second_broker_admin_creates_user_in_own_tenant(users_db) -> None:
+def test_second_broker_super_admin_creates_user_in_own_tenant(users_db) -> None:
     factory, _, _, admin_b_id = users_db
 
     with make_client(factory) as client:
@@ -192,7 +226,7 @@ def test_second_broker_admin_creates_user_in_own_tenant(users_db) -> None:
             "/users", json=create_payload(username="30001"), headers=auth_header(admin_token(admin_b_id))
         ).json()
 
-    # Broker B's admin gets a user in broker B, never in another tenant.
+    # Broker B's super_admin gets a user in broker B, never in another tenant.
     assert body["broker_id"] == 2
 
 
@@ -256,15 +290,18 @@ def test_broker_id_cannot_be_supplied(users_db) -> None:
     assert response.status_code == 422
 
 
-def test_role_cannot_be_supplied(users_db) -> None:
+@pytest.mark.parametrize("escalation_role", ["super_admin", "admin", "broker_admin"])
+def test_role_cannot_be_supplied(users_db, escalation_role: str) -> None:
     factory, admin_a_id, _, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
             "/users",
-            # Privilege-escalation attempt via role: rejected with 422 by the
-            # request model, before any authorization/DB work happens.
-            json=create_payload(role="broker_admin"),
+            # Privilege-escalation attempt via role (including the legacy
+            # value): rejected with 422 by the request model, before any
+            # authorization/DB work happens. Created users are always
+            # customers; no caller can choose another role here.
+            json=create_payload(role=escalation_role),
             headers=auth_header(admin_token(admin_a_id)),
         )
 

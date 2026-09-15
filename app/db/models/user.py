@@ -1,6 +1,16 @@
 from enum import StrEnum
 
-from sqlalchemy import Boolean, CheckConstraint, Enum, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -11,10 +21,20 @@ class UserRole(StrEnum):
 
     A StrEnum (not plain strings) so the role is a typed value everywhere and
     new roles can only be introduced deliberately. The database stores the
-    plain value ("broker_admin" / "customer"), matching StrEnum semantics.
+    plain value ("super_admin" / "admin" / "customer"), matching StrEnum
+    semantics.
+
+    Semantics:
+    - SUPER_ADMIN: exactly one per Broker (enforced by a partial unique
+      index in the database, not just application logic); manages admins and
+      customers; the broker-level owner/manager.
+    - ADMIN: multiple per Broker; manages customers; cannot manage admins or
+      broker-level settings.
+    - CUSTOMER: cannot manage users; uses the normal financial/AI features.
     """
 
-    BROKER_ADMIN = "broker_admin"
+    SUPER_ADMIN = "super_admin"
+    ADMIN = "admin"
     CUSTOMER = "customer"
 
 
@@ -29,7 +49,18 @@ class User(Base):
         # Non-native enum: a plain VARCHAR plus a CHECK constraint keeps the
         # schema portable (same shape on PostgreSQL and SQLite) and evolvable
         # without native enum-type alterations when roles change.
-        CheckConstraint("role IN ('broker_admin', 'customer')", name="ck_users_role"),
+        CheckConstraint("role IN ('super_admin', 'admin', 'customer')", name="ck_users_role"),
+        # Exactly one super_admin per Broker, enforced at the database layer:
+        # a partial unique index admits at most one row per broker_id among
+        # super_admin rows. SQLite supports partial unique indexes, so the
+        # application tests exercise the real constraint, not a re-implementation.
+        Index(
+            "uq_users_broker_super_admin",
+            "broker_id",
+            unique=True,
+            sqlite_where=text("role = 'super_admin'"),
+            postgresql_where=text("role = 'super_admin'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

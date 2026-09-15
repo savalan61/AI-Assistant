@@ -3,10 +3,11 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, field_validator
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_broker_admin
+from app.core.dependencies import get_current_broker_manager
 from app.core.security import hash_password
 from app.db.database import get_db
 from app.db.models import User, UserRole
@@ -108,10 +109,12 @@ def _duplicate_conflict() -> HTTPException:
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
     request: CreateUserRequest,
-    current_admin: User = Depends(get_current_broker_admin),
+    current_admin: User = Depends(get_current_broker_manager),
     session: AsyncSession = Depends(get_db),
 ) -> UserResponse:
-    """Create a Customer User inside the authenticated admin's broker.
+    """Create a Customer User inside the authenticated manager's broker.
+
+    Both super_admin and admin may create customers (get_current_broker_manager).
 
     Tenant isolation is structural: broker_id is always taken from the
     database-backed admin record, never from the request, so a Broker Admin
@@ -142,3 +145,41 @@ async def create_user(
 
     await session.refresh(user)
     return UserResponse.model_validate(user)
+
+
+@router.get("", response_model=list[UserResponse])
+async def list_users(
+    current_admin: User = Depends(get_current_broker_manager),
+    session: AsyncSession = Depends(get_db),
+) -> list[UserResponse]:
+    """List the users the authenticated manager may administer in their own tenant.
+
+    The tenant boundary is structural: the filter uses the database-backed
+    manager's broker_id and no broker_id parameter exists, so a client can
+    never select another broker. Visibility follows the role hierarchy:
+    - super_admin: admins and customers of their broker (the users they manage)
+    - admin: customers of their broker only — never admins or super_admins
+    The requesting manager is always excluded (you cannot list yourself), so
+    a tenant with no manageable users is a normal 200 with an empty list.
+    """
+    # Role-conditional visibility, evaluated at the authorization boundary
+    # from the database-backed role — never from request input.
+    if current_admin.role is UserRole.SUPER_ADMIN:
+        visible_roles = (UserRole.ADMIN, UserRole.CUSTOMER)
+    else:  # admin: customers only; customers never reach here (403 upstream)
+        visible_roles = (UserRole.CUSTOMER,)
+    result = await session.execute(
+        select(User)
+        .where(
+            User.broker_id == current_admin.broker_id,
+            User.id != current_admin.id,
+            User.role.in_(visible_roles),
+        )
+        # Deterministic admin listing: stable ascending primary-key order.
+        .order_by(User.id.asc())
+    )
+    users = result.scalars().all()
+    # UserResponse is the same non-sensitive projection used by POST /users:
+    # credentials (password_hash, mt5_password_encrypted) are structurally
+    # absent from the response schema.
+    return [UserResponse.model_validate(user) for user in users]

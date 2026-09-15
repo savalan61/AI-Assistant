@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
         choices=[r.value for r in UserRole],
         default=None,
         metavar="ROLE",
-        help="If the dev user already exists, set its role (e.g. broker_admin).",
+        help="If the dev user already exists, set its role (e.g. super_admin).",
     )
     return parser.parse_args()
 
@@ -82,8 +82,8 @@ async def _create_dev_data(session: AsyncSession, password: str, update_password
             password_hash=password_hash,
             is_active=True,
             # The development seed creates the operator account; the broker
-            # admin role matches that intent.
-            role=UserRole.BROKER_ADMIN,
+            # super_admin role matches that intent (exactly one per broker).
+            role=UserRole.SUPER_ADMIN,
             # email/phone stay NULL (the model allows it); mt5_password_encrypted
             # deliberately stays NULL for this step.
         )

@@ -1,4 +1,5 @@
-"""Tests for the UserRole foundation (Step 13).
+"""Tests for the UserRole foundation (Step 13; evolved to the three-role
+super_admin/admin/customer model with exactly one super_admin per broker).
 
 Require none of: real PostgreSQL, real MT5, network, or credentials. Each test
 uses a per-test file-based async SQLite database with the real User/Broker
@@ -54,8 +55,8 @@ async def _get_role(factory: async_sessionmaker[AsyncSession], user_id: int) -> 
 
 
 def test_user_role_enum_values() -> None:
-    # Exactly the two roles the architecture currently defines.
-    assert {r.value for r in UserRole} == {"broker_admin", "customer"}
+    # Exactly the three roles the architecture currently defines.
+    assert {r.value for r in UserRole} == {"super_admin", "admin", "customer"}
 
 
 def test_role_defaults_to_customer_when_omitted(role_db) -> None:
@@ -90,11 +91,18 @@ def test_role_defaults_to_customer_at_database_level(role_db) -> None:
     assert asyncio.run(raw_insert_and_read()) is UserRole.CUSTOMER
 
 
-def test_broker_admin_role_round_trips(role_db) -> None:
+def test_super_admin_role_round_trips(role_db) -> None:
     factory = role_db
-    user_id = asyncio.run(_add_user(factory, "u-admin", role=UserRole.BROKER_ADMIN))
+    user_id = asyncio.run(_add_user(factory, "u-super", role=UserRole.SUPER_ADMIN))
 
-    assert asyncio.run(_get_role(factory, user_id)) is UserRole.BROKER_ADMIN
+    assert asyncio.run(_get_role(factory, user_id)) is UserRole.SUPER_ADMIN
+
+
+def test_admin_role_round_trips(role_db) -> None:
+    factory = role_db
+    user_id = asyncio.run(_add_user(factory, "u-admin", role=UserRole.ADMIN))
+
+    assert asyncio.run(_get_role(factory, user_id)) is UserRole.ADMIN
 
 
 def test_customer_role_round_trips(role_db) -> None:
@@ -123,3 +131,84 @@ def test_database_rejects_unknown_role_value(role_db) -> None:
 
     with pytest.raises(IntegrityError):
         asyncio.run(raw_bad_role())
+
+
+# --- exactly one super_admin per broker (database-level invariant) -----------
+
+
+async def _add_user_in_broker(
+    factory: async_sessionmaker[AsyncSession], broker_id: int, username: str, role: UserRole
+) -> int:
+    async with factory() as session:
+        user = User(broker_id=broker_id, username=username, password_hash="x", is_active=True, role=role)
+        session.add(user)
+        await session.commit()
+        return user.id
+
+
+async def _create_broker_with_user(
+    factory: async_sessionmaker[AsyncSession], broker_code: str, username: str, role: UserRole
+) -> tuple[int, int]:
+    async with factory() as session:
+        broker = Broker(name=broker_code, code=broker_code)
+        session.add(broker)
+        await session.flush()
+        user = User(broker_id=broker.id, username=username, password_hash="x", is_active=True, role=role)
+        session.add(user)
+        await session.commit()
+        return broker.id, user.id
+
+
+def test_second_super_admin_in_same_broker_rejected(role_db) -> None:
+    factory = role_db
+    broker_id, _ = asyncio.run(_create_broker_with_user(factory, "TB-SUP-A", "super-a", UserRole.SUPER_ADMIN))
+
+    # The partial unique index is the enforcement boundary: a second
+    # super_admin row for the same broker must be refused by the database,
+    # not merely by API logic.
+    with pytest.raises(IntegrityError):
+        asyncio.run(_add_user_in_broker(factory, broker_id, "super-b", UserRole.SUPER_ADMIN))
+
+
+def test_second_super_admin_rejected_via_raw_sql(role_db) -> None:
+    factory = role_db
+    broker_id, _ = asyncio.run(_create_broker_with_user(factory, "TB-SUP-R", "super-raw", UserRole.SUPER_ADMIN))
+
+    # A raw insert bypasses every application layer: only the database
+    # constraint can refuse it, proving the invariant holds at the boundary.
+    async def raw_second_super_admin() -> None:
+        async with factory() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO users (broker_id, username, password_hash, is_active, role) "
+                    "VALUES (:b, :u, :p, 1, 'super_admin')"
+                ),
+                {"b": broker_id, "u": "super-raw-2", "p": "x"},
+            )
+            await session.commit()
+
+    with pytest.raises(IntegrityError):
+        asyncio.run(raw_second_super_admin())
+
+
+def test_admins_and_customers_do_not_consume_the_super_admin_slot(role_db) -> None:
+    factory = role_db
+    broker_id, _ = asyncio.run(_create_broker_with_user(factory, "TB-SUP-M", "super-m", UserRole.SUPER_ADMIN))
+
+    # The index is partial: any number of admins and customers may coexist
+    # with the single super_admin of the same broker.
+    admin_id = asyncio.run(_add_user_in_broker(factory, broker_id, "admin-m", UserRole.ADMIN))
+    admin2_id = asyncio.run(_add_user_in_broker(factory, broker_id, "admin-m2", UserRole.ADMIN))
+    customer_id = asyncio.run(_add_user_in_broker(factory, broker_id, "customer-m", UserRole.CUSTOMER))
+
+    assert admin_id > 0 and admin2_id > 0 and customer_id > 0
+
+
+def test_separate_brokers_each_have_one_super_admin(role_db) -> None:
+    factory = role_db
+    broker_a_id, super_a = asyncio.run(_create_broker_with_user(factory, "TB-SUP-1", "super-1", UserRole.SUPER_ADMIN))
+    broker_b_id, super_b = asyncio.run(_create_broker_with_user(factory, "TB-SUP-2", "super-2", UserRole.SUPER_ADMIN))
+
+    # One super_admin per broker is allowed; the two brokers are distinct
+    # tenants and never interfere with each other's constraint slot.
+    assert super_a > 0 and super_b > 0 and broker_a_id != broker_b_id

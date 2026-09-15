@@ -52,7 +52,7 @@ def user_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int]":
                 username="10001",
                 password_hash="$2b$12$notarealhashbutcolumnisrequired01234567890123456789",
                 is_active=True,
-                role=UserRole.BROKER_ADMIN,
+                role=UserRole.SUPER_ADMIN,
             )
             session.add(user)
             await session.commit()
@@ -107,7 +107,7 @@ def test_valid_token_and_active_user_returns_user(user_db):
 
     assert response.status_code == 200
     # role is served from the database record, not from any token claim.
-    assert response.json() == {"user_id": user_id, "broker_id": 1, "role": "broker_admin"}
+    assert response.json() == {"user_id": user_id, "broker_id": 1, "role": "super_admin"}
 
 
 def test_bearer_prefix_is_required(user_db):
