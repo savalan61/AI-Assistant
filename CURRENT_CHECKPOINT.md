@@ -3,6 +3,7 @@
 ## Current Status
 
 Step 37 — Decimal Money & Financial Numeric Representation
++ maintenance — role-migration ordering fix & development user seed
 
 Status:
 
@@ -10,12 +11,19 @@ VERIFIED + COMMITTED + SYNCED
 
 Checkpoint commit:
 
-"feat(financial): harden numeric representation" — the Step 37 implementation
-and this document update are committed together in this single checkpoint
-commit. The prior synced checkpoint was the Step 36 commit ("feat(mt5): add
-tenant-scoped mt5 sessions"), which itself followed the Step 35 security
-hardening commit and b95eaa1 ("feat(ai): add broker llm routing and agent
-controls", Steps 29–33).
+The latest commit is "fix(db): correct user role migration ordering" (3a63af9),
+which carries the reordered role migration and the new development user seed
+script. The prior synced commit was the Step 37 checkpoint ("feat(financial):
+harden numeric representation"), before that the Step 36 MT5 tenant-session
+commit, the Step 35 security hardening commit and b95eaa1 ("feat(ai): add
+broker llm routing and agent controls", Steps 29–33).
+
+The maintenance fix corrects a real sequencing defect in the Step 21A role
+migration: it ran the broker_admin → super_admin data rotation while the old
+two-role CHECK constraint was still in place, so upgrading any database that
+still held broker_admin rows aborted. The constraint is now dropped first. The
+local development database was also brought to head and seeded with one
+development account per role.
 
 Step 37 replaced float money with exact Decimal arithmetic at the domain
 boundary (the deferred "money representation" item). Balances, equity, margin,
@@ -677,6 +685,48 @@ Includes:
   what MT5 returns — and are converted by the provider under test. Test count
   is unchanged at 735.
 
+### Maintenance — Role-Migration Ordering Fix + Development User Seed
+Status: VERIFIED + COMMITTED
+
+Includes:
+
+- alembic/versions/7c41e2d9a5b0_evolve_user_roles.py: upgrade() reordered so the
+  old two-role CHECK constraint is dropped BEFORE the data rotation
+  (broker_admin → super_admin); the new three-role CHECK and the partial unique
+  super_admin index are created after it. Previously the UPDATE ran while
+  ck_users_role still permitted only ('broker_admin', 'customer'), so upgrading
+  any database that still held broker_admin rows aborted with a
+  CheckViolationError. downgrade() and the revision identifiers are unchanged,
+  no new migration was added, and the resulting schema and data are identical
+  to the intended end state. The ordering requirement is now documented in the
+  function docstring so it cannot be "tidied" back into the broken shape.
+- Why this surfaced only now: no test exercises the Alembic chain (the test
+  modules build their schema with Base.metadata.create_all / create_all), so the
+  defect was reachable only on a real database — it appeared while provisioning
+  the local development database, which still sat at 3f025a5d3b39 with a
+  broker_admin row.
+- scripts/create_dev_users.py (new, development-only, outside the app package):
+  clears users (only with an explicit --clear) and then creates exactly three
+  accounts on the EXISTING development broker — one per role
+  (super_admin / admin / customer) — using the application's own password
+  hashing, and verifies each account through the same credential path the login
+  endpoint uses. It refuses to run unless APP_ENV=development and refuses to
+  delete anything without --clear. The passwords are fixed, clearly marked
+  development-only values (documented in the file); no real secret exists in it.
+- Local development database brought to head (b1f7c9d24e08): the three-role
+  CHECK domain and the one-super-admin partial unique index now exist, and the
+  broker_llm_configs table was created by the existing migration.
+- Verification for 3a63af9: the ordering semantics were reproduced on the real
+  PostgreSQL engine using temporary tables that were rolled back — the old order
+  raised CheckViolationError, the new order applied cleanly, and the partial
+  unique index still rejected a second super_admin. End to end through the app,
+  all three development accounts log in (200) and authorize correctly
+  (super_admin and admin: GET /users 200 with role-scoped visibility, the
+  super_admin not listing itself; customer: 403); wrong password and unknown
+  username return an identical generic 401. The dev database holds exactly the
+  three accounts and the broker row is untouched. pytest tests/ -q → 735 passed,
+  3 warnings; compileall and git diff --check clean.
+
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
 
@@ -1312,10 +1362,19 @@ GET /users (super_admin or admin; role-based visibility):
   with Decimal(str(...)); account margin_level and candle tick volume
   intentionally remain float. API JSON still exposes numbers, not strings, via
   the shared DecimalAsNumber serializer.
-- Steps 18–37 are committed and pushed to origin/master (this checkpoint
-  commit: "feat(financial): harden numeric representation"; the prior synced
-  commit was the Step 36 MT5 tenant-session checkpoint, before that the Step 35
-  security hardening checkpoint and b95eaa1).
+- Steps 18–37 plus the role-migration ordering fix and the development user
+  seed are committed and pushed to origin/master (latest commit: "fix(db):
+  correct user role migration ordering" (3a63af9); the prior synced commit was
+  the Step 37 checkpoint "feat(financial): harden numeric representation",
+  before that the Step 36 MT5 tenant-session commit, the Step 35 security
+  hardening commit and b95eaa1).
+- The development database (local PostgreSQL, APP_ENV=development) is at
+  migration head and holds exactly three development accounts on the existing
+  developer Broker: one per role (super_admin / admin / customer), created by
+  scripts/create_dev_users.py with documented development-only credentials.
+  These usernames are non-numeric and the broker has no mt5_server, so the
+  MT5-backed endpoints answer 503 for them by design (the tenant session fails
+  closed); they exercise authentication, roles and the agent surface.
 - Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 735 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
@@ -1411,6 +1470,11 @@ Resolved:
 - (Deferred item) Money representation: balances, equity, profit and volume
   were float throughout the provider contracts — RESOLVED by Step 37 (Decimal
   end to end, JSON numbers preserved on the wire).
+- (Maintenance defect) The role-evolution migration rotated broker_admin rows
+  to super_admin before dropping the old two-role CHECK constraint, so it
+  aborted on any database still holding broker_admin rows — RESOLVED in 3a63af9
+  (constraint dropped first; the same end state, with no new migration and no
+  change to downgrade()).
 
 These issues are known and must NOT be fixed automatically.
 
@@ -1418,8 +1482,9 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–37 are complete, committed, and synced to origin/master (this
-checkpoint commit: "feat(financial): harden numeric representation").
+Steps 12–37 plus the role-migration ordering fix and the development user seed
+are complete, committed, and synced to origin/master (latest commit: "fix(db):
+correct user role migration ordering" (3a63af9)).
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
@@ -1452,7 +1517,10 @@ none may be started without an explicit instruction:
   readiness endpoint that reports database / MT5 / LLM availability separately
   from liveness (today /health is an unconditional ok)
 - role-migration pre-flight: the broker_admin→super_admin migration aborts on
-  the unique partial index if any broker holds more than one broker_admin
+  the unique partial index if any broker holds more than one broker_admin (the
+  CHECK-ordering half of this defect was fixed in 3a63af9; the duplicate-row
+  hazard remains, and a clear pre-flight error instead of a raw uniqueness
+  failure is still wanted)
 - login tenant discriminator: usernames are unique per broker but login matches
   on username alone, so a cross-tenant collision currently makes a user
   unloggable
