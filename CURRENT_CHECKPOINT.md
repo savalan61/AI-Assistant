@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 20 — MT5 Trade History (READ-ONLY)
+Step 21A — User Role Model Evolution (super_admin / admin / customer)
 
 Status:
 
@@ -10,13 +10,21 @@ VERIFIED + COMMITTED + SYNCED
 
 Implementation commit:
 
-544cd51 ("feat(mt5): add read-only trade history")
-(full hash: 544cd5173b6500963e729b6aea808c3a2c91e550)
+935f2a2 ("feat(auth): evolve broker roles to super admin and admin")
+(full hash: 935f2a21480f9285e08cfc21db8d35b4ecdde6e9)
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 200 passed, 3 warnings (pre-existing third-party
-deprecation warnings)
+pytest tests/ -q → 224 passed, 3 warnings (pre-existing third-party
+deprecation warnings); verified 2026-09-15 on the exact committed tree
+
+Static verification: python -m compileall app scripts tests → clean.
+Direct Pylance/pyright execution remains unavailable in this environment
+(as recorded for Steps 8–20); a careful manual static/type review was
+performed instead. No type suppressions were used.
+
+No trading functionality was changed in Step 21A; all MT5 behavior is
+untouched.
 
 Working tree at this checkpoint:
 
@@ -116,6 +124,44 @@ Includes:
   mirroring market-data/account-info/positions (failed init not cached);
   blocking call routed through run_mt5_call
 
+### Step 21A — User Role Model Evolution (super_admin / admin / customer)
+Status: VERIFIED + COMMITTED (935f2a2)
+
+Includes:
+
+- UserRole evolved from (broker_admin, customer) to
+  (super_admin, admin, customer) on the existing User table; no separate
+  Admin table was created
+- role semantics: super_admin manages admins and customers (broker-level
+  owner/manager); admin manages customers only; customer has no
+  user-management permissions
+- exactly one super_admin per Broker enforced at the database layer by the
+  partial unique index uq_users_broker_super_admin (broker_id WHERE
+  role = 'super_admin'), declared for PostgreSQL and SQLite so the
+  application tests exercise the real constraint (verified including raw
+  SQL inserts)
+- ck_users_role CHECK updated to the three-role domain (same pinned name)
+- Alembic migration 7c41e2d9a5b0: data-first migration of existing
+  broker_admin users to super_admin (nothing lost or duplicated), then the
+  constraint swap and partial index; conservative downgrade maps
+  super_admin/admin back to broker_admin
+- get_current_broker_manager() (super_admin or admin) replaces
+  get_current_broker_admin(); get_current_super_admin() added for future
+  admin-management endpoints; the role remains authoritative from the
+  database User record — no role claim in the JWT
+- GET /users (Step 21, completed here): Broker-manager-only listing with
+  role-based visibility — super_admin sees admins and customers of their
+  broker, admin sees customers only; same-broker scope is structural
+  (broker_id from the database-backed user; no broker_id parameter), the
+  requesting manager is excluded, deterministic id-ascending order
+- POST /users: super_admin/admin may create customer users only; the
+  created role is forced to customer server-side; role/broker_id escalation
+  attempts are rejected with 422
+- development seed: the dev operator account is created as super_admin
+- test coverage: role matrix, cross-tenant isolation, super-admin
+  uniqueness (ORM-level and raw-SQL), creation paths, credential-exposure
+  guards; full suite 224 passed
+
 ### Step 8 — Authentication Security Foundation
 Completed and committed (531e5cb, "feat(auth): add security foundation").
 
@@ -188,7 +234,8 @@ Commit: 5ac9aeb ("feat(auth): add user roles")
 
 Includes:
 
-- UserRole StrEnum (broker_admin, customer) on the User model
+- UserRole StrEnum (originally broker_admin, customer; evolved to
+  super_admin/admin/customer in Step 21A) on the User model
 - non-native enum storage: VARCHAR + ck_users_role CHECK, portable across PostgreSQL/SQLite
 - Alembic migration 3f025a5d3b39 with least-privilege backfill to customer
 - dev user promoted to broker_admin via the seed script; no role claim in the JWT
@@ -389,6 +436,44 @@ wrapped response:
 - stop_loss/take_profit come from the related closing order when it can be
   retrieved, otherwise null — never invented.
 
+## Users API Contract
+
+POST /users (super_admin or admin; creation of customer users only):
+
+    {
+      "username": "20002",
+      "password": "application password",
+      "email": "optional@example.com",
+      "phone": "+12345678901"
+    }
+
+→ 201 with the non-sensitive projection:
+
+    {
+      "id": 3,
+      "broker_id": 1,
+      "username": "20002",
+      "email": "optional@example.com",
+      "phone": "+12345678901",
+      "role": "customer",
+      "is_active": true
+    }
+
+- role is always forced to customer server-side; extra="forbid" rejects any
+  supplied role/broker_id with 422; tenant-scoped duplicates → 409.
+
+GET /users (super_admin or admin; role-based visibility):
+
+    [ { ...UserResponse... }, ... ]
+
+- super_admin: admins and customers of their own broker
+- admin: customers of their own broker only
+- the requesting manager is excluded; empty result is a normal 200 with []
+- unauthenticated → 401; customer → 403
+- password_hash and mt5_password_encrypted are structurally absent from
+  every response; UserResponse exposes exactly: id, broker_id, username,
+  email, phone, role, is_active
+
 ## Current Verified Facts
 
 - Application authentication exists.
@@ -405,18 +490,23 @@ wrapped response:
   function exists anywhere in app/).
 - All MT5 blocking calls (market-data, account-info, positions, trade-history) are kept
   outside the event loop through the consolidated run_mt5_call boundary.
-- Broker Admin / Customer roles exist; POST /users lets a Broker Admin create Customer Users in their own tenant.
+- super_admin / admin / customer roles exist; exactly one super_admin per
+  Broker is enforced by the database partial unique index
+  (uq_users_broker_super_admin).
+- POST /users lets a super_admin or admin create Customer Users in their own
+  tenant (created role forced to customer); GET /users provides role-based,
+  tenant-scoped listing (super_admin: admins+customers; admin: customers).
 - Account information (AccountInfo contract, MT5AccountInfoProvider, AccountInfoService, GET /account-info) exists and is read-only.
 - Open positions (Position contract, MT5PositionProvider, FakePositionProvider, PositionService, GET /positions) exist and are read-only.
 - Trade history (TradeHistoryEntry contract, MT5TradeHistoryProvider,
   FakeTradeHistoryProvider, TradeHistoryService, GET /trade-history) exists and is read-only.
-- The Step 18/19 work is committed (5b367a4) and pushed to origin/master.
-- Test suite verified 2026-09-14 on the exact committed tree: pytest tests/ -q → 200 passed, 3 warnings.
+- Steps 18/19/20/21A are committed and pushed to origin/master (latest: 935f2a2).
+- Test suite verified 2026-09-15 on the exact committed tree: pytest tests/ -q → 224 passed, 3 warnings.
 - The 3 warnings are pre-existing third-party deprecation warnings (anyio
   PortalFactoryType and Pydantic class-based Config in app/core/config.py).
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean; commit 5b367a4 has been pushed/synced to origin/master.
+- Working tree is clean; the latest implementation commit (935f2a2) has been pushed/synced to origin/master.
 
 Static/type verification:
 
@@ -453,11 +543,12 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–20 are complete, committed (544cd51), and synced to origin/master.
+Steps 12–21A are complete, committed (935f2a2), and synced to origin/master.
 
 The next logical areas, in no committed order, are:
 
-- GET /users listing for Broker Admins (tenant-scoped)
+- super_admin-only admin-creation endpoint (get_current_super_admin already
+  exists as the authorization seam)
 - tenant-scoped MT5 design (known issue 1)
 
 Do NOT implement any next step until explicitly instructed.
