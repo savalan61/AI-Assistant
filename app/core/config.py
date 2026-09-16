@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     LLM_MODEL: str = ""
     LLM_TIMEOUT_SECONDS: float = 30.0
 
+    # Economic-calendar source (DEVELOPMENT/TEST ONLY). The QuantGist free tier
+    # is a temporary stand-in for a real calendar source, never the project's
+    # commercial vendor: its data is delayed and its free quota is small, which
+    # is why its provenance marker is carried into every API response. The key
+    # is only ever read from configuration/config-file/process environment - it
+    # is never committed and never logged. An empty key means the deterministic
+    # development fake stays selected; no non-development environment ever uses
+    # either source (see get_economic_calendar_service, which fails closed).
+    QUANTGIST_API_KEY: str = ""
+    QUANTGIST_BASE_URL: str = "https://api.quantgist.com/v1"
+    QUANTGIST_TIMEOUT_SECONDS: float = 15.0
+
     # Maximum Agent requests per authenticated user per UTC day. Configurable
     # so deployments can tune it; checked in-process before any MT5 read or
     # LLM call. Must be at least 1 (validated by the limiter).

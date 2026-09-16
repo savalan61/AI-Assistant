@@ -58,8 +58,9 @@ Current implemented provider contracts (not database models):
 - Candle
 - TradeHistoryEntry
 - EconomicCalendarProvider (app/providers/economic_calendar.py; the wired
-  implementation is still the development/test placeholder — see
-  CURRENT_CHECKPOINT.md Known Issues item 9)
+  implementations are development/test sources only — FakeEconomicCalendarProvider
+  by default, or the QuantGist free tier when QUANTGIST_API_KEY is configured — and
+  neither is a production source; see CURRENT_CHECKPOINT.md Known Issues item 9)
 - the vendor-neutral LLM provider contract (app/providers/llm.py)
 
 Future/domain entities planned:

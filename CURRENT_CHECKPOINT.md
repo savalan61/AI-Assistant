@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 43 — Tenant-Safe Login (this checkpoint)
+Step 44 — QuantGist Economic Calendar Source (development/test; this checkpoint)
++ Step 43 — Tenant-Safe Login
 + Step 42 — One User Identity (`login`)
 + Step 41 — Stabilize & commit Step 40 + the trade-history field fix
 + Step 40 — Super Admin User CRUD
@@ -15,25 +16,29 @@ Step 43 — Tenant-Safe Login (this checkpoint)
 
 Status:
 
-Step 43: VERIFIED + COMMITTED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9, local — not pushed)
-Step 42: VERIFIED + COMMITTED (local — not pushed)
-Steps 12–41: COMMITTED; the Step 41 commit is also still local (not pushed)
+Step 44: VERIFIED — implemented, deliberately NOT committed (working tree modified; no push)
+Step 43: VERIFIED + COMMITTED + PUSHED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9)
+Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
+Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
-Step 43 (tenant-safe login) — the checkpoint this document describes — is
-committed as 5afd89510af4ec5e63d4bcbf805bc9e73405f1e9 ("feat(auth): make login
-tenant-safe"). It carries the implementation, the tests and the four
+Step 44 (QuantGist development/test economic-calendar source) — the change set
+this checkpoint describes — is implemented and verified but deliberately NOT
+committed, so the working tree is modified (see its section below). The last
+commit is Step 43 (tenant-safe login),
+5afd89510af4ec5e63d4bcbf805bc9e73405f1e9 ("feat(auth): make login
+tenant-safe"), which carries the implementation, the tests and the four
 documentation updates (AGENTS.md, PROJECT_CONTEXT.md, knowledge.md and this
-document), and it leaves the working tree clean. Pushing is deliberately not part
-of this step, so the commit stays local until a push is explicitly requested. The
-prior commit is Step 42 — "refactor(users): collapse username and mt5_login into
-one login identity" (95d00d9), the one-identity `login` rename across the model,
-migration, auth, user management, MT5 credential handling, seed scripts, tests
-and its document update; it is also still local. Before that, Step 41 —
+document); it is pushed, together with its checkpoint-status commit (9dbfb7e)
+and the knowledge-base alignment commit (74cbba5, which is origin/master today).
+The prior commit is Step 42 — "refactor(users): collapse username and mt5_login
+into one login identity" (95d00d9), the one-identity `login` rename across the
+model, migration, auth, user management, MT5 credential handling, seed scripts,
+tests and its document update; it is pushed as well. Before that, Step 41 —
 "feat(users): complete super admin user crud" (1577672) — which carries Step 40
-together with the trade-history field fix; it is also still local. The last
-synced (pushed) commit was "fix(config): harden environment settings loading"
+together with the trade-history field fix; it is pushed too. Before these,
+"fix(config): harden environment settings loading"
 (Steps 39A/39B), which carries the tolerant, secret-safe settings loading and
 the statically visible env-file selection; before that "feat(mt5): add investor
 credential provisioning" (Step 38, the per-user MT5 account fields, the
@@ -168,14 +173,16 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-CLEAN — the Step 43 change set (implementation, tests and the four documentation
-updates) is committed as 5afd895; the only change in flight is this status
-correction itself, which is documentation-only.
+MODIFIED — the Step 44 change set (the QuantGist development/test calendar
+source, its tests and the configuration it needs) is implemented and verified but
+deliberately NOT committed, so the working tree holds that change set until a
+commit is explicitly requested.
 
 The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
-crud"), 42 (`95d00d9`) and 43 (`5afd895`) are local, so local HEAD is three
-commits ahead of origin/master until they are pushed.
+crud"), 42 (`95d00d9`), 43 (`5afd895`) and the two documentation commits after it
+(`9dbfb7e`, `74cbba5`) are pushed: origin/master and local HEAD are both
+74cbba5 until the Step 44 change set is committed.
 
 ## Completed Stages
 
@@ -1008,8 +1015,61 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
+### Step 44 — QuantGist Economic Calendar Source (DEVELOPMENT/TEST ONLY)
+Status: VERIFIED — implemented, deliberately NOT committed (working tree modified; no push)
+
+Connects a real HTTP economic-calendar source behind the existing provider
+abstraction as a temporary development/test stand-in. It does NOT resolve Known
+Issues item 9: the QuantGist free tier is delayed and quota-limited and is
+explicitly not this project's commercial vendor, so no production calendar source
+exists after this step.
+
+Includes:
+
+- app/providers/quantgist_economic_calendar.py: QuantGistEconomicCalendarProvider
+  implementing the unchanged EconomicCalendarProvider interface (source marker
+  "quantgist-free-development", get_events(from, to) -> tuple[EconomicEvent, ...]).
+  One GET /v1/calendar request per UTC date the window touches, with the key in
+  the X-API-Key header; the half-open window is enforced locally, so the vendor's
+  inclusive date filter cannot leak an event at or past the window end.
+- the EconomicEvent contract is unchanged: vendor id -> event_id, release_time ->
+  timezone-aware UTC timestamp, impact low|medium|high -> EventImpact, and numeric
+  forecast/previous/actual rendered as published strings without inventing
+  precision (null stays null). Vendor extensions (surprise_pct, sentiment_score,
+  tags) never cross the boundary.
+- error handling at the provider boundary only: a missing key or blank base URL
+  fails before any request; transport failures, every non-200 response, invalid
+  JSON, structurally wrong payloads, unmapped impacts, naive timestamps and
+  unusable value types all raise RuntimeError, which the existing API layer maps to
+  its generic 503. The API key never reaches a message, a URL or a log line.
+- configuration: QUANTGIST_API_KEY / QUANTGIST_BASE_URL / QUANTGIST_TIMEOUT_SECONDS
+  (empty key default). The key comes only from the environment/.env (git-ignored),
+  never hardcoded and never committed; .env.example documents all three and the
+  source's development/test-only status.
+- composition root: get_economic_calendar_service() keeps its fail-closed guard
+  (503 outside development) and now selects QuantGist when a key is configured,
+  otherwise the deterministic fake, so development behaviour and the existing
+  suite are unchanged. No caching, no retry, no multi-provider framework, and no
+  change to the service, API, schema, or JWT.
+- tests: tests/test_quantgist_economic_calendar.py (54 cases, fully offline through
+  an injected httpx.MockTransport: mapping, provenance, request shape, multi-day
+  fan-out, half-open window, every failure mode, the key never being echoed, and
+  the composition-root selection), one end-to-end test in
+  tests/test_economic_intelligence_api.py proving the configured source reaches
+  GET /economic-intelligence/today as data_source, and the QUANTGIST_API_KEY pin
+  in that file's autouse fixture so a developer's .env cannot change what its
+  existing tests describe.
+- verification: focused 135 passed; full suite 882 passed, 2 warnings (both
+  pre-existing third-party deprecations); compileall clean; pyright 0 errors / 0
+  warnings across the six changed Python files. Three pre-existing
+  dict[str, object] diagnostics in the API test file were fixed with a typed
+  accessor rather than a suppression.
+- read-only: GET requests only. No trading action, no order, no position mutation
+  and no recommendation; the AI remains strictly READ-ONLY, and no position/trade
+  data is sent to the calendar provider.
+
 ### Step 43 — Tenant-Safe Login
-Status: VERIFIED + COMMITTED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9, local — not pushed)
+Status: VERIFIED + COMMITTED + PUSHED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9)
 
 Fixes a real cross-tenant defect. Because `login` is unique only per broker
 while the endpoint matched on it alone, the second broker to register an MT5
@@ -1470,8 +1530,10 @@ run_mt5_call (blocking boundary, app/core/blocking.py)
     ↓
 EconomicIntelligenceService
     ↓
-EconomicCalendarService → EconomicCalendarProvider → FakeEconomicCalendarProvider
-        (deterministic development/test placeholder — no production source yet)
+EconomicCalendarService → EconomicCalendarProvider
+        ├── FakeEconomicCalendarProvider (default, no QUANTGIST_API_KEY)
+        └── QuantGistEconomicCalendarProvider (development/test, when configured)
+        (both are development/test sources only — no production source yet)
     ↓
 PositionService → PositionProvider → MT5PositionProvider → MT5
     ↓
@@ -2008,9 +2070,11 @@ This limitation must be reported rather than hidden.
    .pytest_cache/; the Pydantic class-based Config deprecation was resolved by
    Step 39A).
 9. Economic calendar data source is unresolved. Economic intelligence is wired
-   to FakeEconomicCalendarProvider, a deterministic development/test
-   placeholder; there is NO production economic-calendar provider, and its
-   responses must not be presented as live financial data. MT5's Python
+   to a development/test source only: FakeEconomicCalendarProvider by default,
+   or the QuantGist free tier when QUANTGIST_API_KEY is configured (Step 44) —
+   delayed data with a small daily quota, explicitly NOT a commercial vendor.
+   There is NO production economic-calendar provider, and neither source's
+   responses may be presented as live financial data. MT5's Python
    integration (MetaTrader5==5.0.6180) does not expose the MQL5 Economic
    Calendar API at all (verified by introspection), and the evaluated
    third-party free tiers either gate the calendar behind a paid plan or
@@ -2095,21 +2159,22 @@ They should be addressed one controlled stage at a time.
 ## Next Step
 
 Steps 12–43, the role-migration ordering fix, the development user seed and the
-trade-history field fix are complete and committed (latest commit: Step 43,
-`5afd895`, which is local until pushed, as are the Step 41 and Step 42 commits
-before it).
+trade-history field fix are complete, committed and pushed (origin/master is
+74cbba5, the knowledge-base alignment commit; the latest feature commit is
+Step 43, `5afd895`).
 
-Step 43 (tenant-safe login) is committed as
-5afd89510af4ec5e63d4bcbf805bc9e73405f1e9 ("feat(auth): make login tenant-safe"),
-carrying app/api/auth_router.py, app/core/security.py, app/core/config.py,
-app/services/auth/login_throttle.py, tests/test_auth_login.py,
-tests/test_login_throttle.py, tests/test_security.py and the four documentation
-updates; it is local and unpushed.
+Step 44 (QuantGist development/test economic-calendar source) is implemented and
+verified but deliberately NOT committed: app/providers/quantgist_economic_calendar.py,
+app/providers/__init__.py, app/core/config.py, app/core/dependencies.py,
+.env.example, tests/test_quantgist_economic_calendar.py and
+tests/test_economic_intelligence_api.py hold that change set, and the working tree
+is modified.
 
 The immediate next action is deliberately NOT fixed here: the previously open
 work is now landed, so the next stage should be chosen explicitly (candidates
-are the open items below — the economic-calendar source, the real free LLM
-providers, and the observability foundation are the three largest).
+are the open items below — a production economic-calendar source, which Step 44
+deliberately did NOT provide, the real free LLM providers, and the observability
+foundation are the three largest).
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:

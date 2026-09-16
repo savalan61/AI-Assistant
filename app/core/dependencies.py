@@ -20,6 +20,7 @@ from app.providers import (
     MT5PositionProvider,
     MT5TradeHistoryProvider,
     OpenAICompatibleLLMProvider,
+    QuantGistEconomicCalendarProvider,
 )
 from app.services.account import AccountInfoService
 from app.services.agent import AgentService, AgentUsageLimiter, OutboundDataPolicy
@@ -118,14 +119,19 @@ def resolve_mt5_account_credentials(user: User, broker: Broker | None) -> MT5Acc
 
 # Economic-calendar wiring. No MT5 terminal and no credentials are involved, so
 # there is no process-wide provider or session to guard: the provider is
-# stateless and cheap to construct per request. The deterministic fake is wired
-# here as the development placeholder until a real calendar source is selected;
-# its provenance marker is carried through every response so the data can never
-# be mistaken for live financial data.
+# stateless and cheap to construct per request.
 #
-# Fail-closed guard: the placeholder must never be served to a broker's
-# customers. Outside development there is no production calendar source yet, so
-# the dependency refuses (503) instead of quietly returning fabricated events.
+# Source selection (development/test only): when a QuantGist API key is
+# configured, the QuantGist free tier is used - explicitly a temporary
+# development source (delayed data, small quota), never the project's commercial
+# vendor. Without a key the deterministic fake stays selected, so development and
+# the test suite keep their existing behaviour and provenance marker. Either way
+# the provider's provenance marker is carried through every response so the data
+# can never be mistaken for live financial data.
+#
+# Fail-closed guard: neither source may be served to a broker's customers.
+# Outside development there is still no production calendar source, so the
+# dependency refuses (503) instead of quietly returning placeholder data.
 _CALENDAR_PLACEHOLDER_ALLOWED_ENVS = frozenset({"development"})
 
 
@@ -135,7 +141,15 @@ def get_economic_calendar_service() -> EconomicCalendarService:
             status_code=503,
             detail="Economic calendar data source is not configured",
         )
-    provider: EconomicCalendarProvider = FakeEconomicCalendarProvider()
+    provider: EconomicCalendarProvider
+    if settings.QUANTGIST_API_KEY.strip():
+        provider = QuantGistEconomicCalendarProvider(
+            api_key=settings.QUANTGIST_API_KEY,
+            base_url=settings.QUANTGIST_BASE_URL,
+            timeout_seconds=settings.QUANTGIST_TIMEOUT_SECONDS,
+        )
+    else:
+        provider = FakeEconomicCalendarProvider()
     return EconomicCalendarService(provider)
 
 

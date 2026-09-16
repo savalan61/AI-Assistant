@@ -19,6 +19,7 @@ from app.providers.mt5_positions import MT5PositionProvider
 from app.providers.mt5_trade_history import MT5TradeHistoryProvider
 from app.providers.openai_compatible_llm import OpenAICompatibleLLMProvider
 from app.providers.position import Position, PositionProvider, PositionType
+from app.providers.quantgist_economic_calendar import QuantGistEconomicCalendarProvider
 from app.providers.trade_history import TradeHistoryEntry, TradeHistoryProvider, TradeType
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "Position",
     "PositionProvider",
     "PositionType",
+    "QuantGistEconomicCalendarProvider",
     "TradeHistoryEntry",
     "TradeHistoryProvider",
     "TradeType",
