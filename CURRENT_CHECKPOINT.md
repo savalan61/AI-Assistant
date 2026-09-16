@@ -28,9 +28,8 @@ Step 54 — General Broker Decoration Resolution (this checkpoint)
 
 Status:
 
-Step 54: VERIFIED (implementation, tests and documentation; committed together
-by the Step 54 commit "fix(instruments): resolve decorated broker spellings
-without a suffix list"; local, not pushed)
+Step 54: VERIFIED + COMMITTED (b454784 — "fix(instruments): resolve decorated
+broker spellings without a suffix list"; local, not pushed)
 Step 53: VERIFIED + COMMITTED (e884767 — "fix(market-data): resolve symbols
 through instrument catalog"; local, not pushed)
 Step 52: VERIFIED + COMMITTED (9ab52d5 — "feat(instruments): safely resolve
@@ -609,7 +608,7 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is seventeen commits ahead of it, none of them pushed:
+638f972, and local HEAD is eighteen commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
@@ -620,8 +619,10 @@ Step 48 commit (instrument-aware fundamental relevance), the Step 49 commit (the
 graded financial-research context), the Step 49 follow-up commit (`9081b5f`, the
 research context composed into the agent), the Step 50 commit (`6c2df3e`, MT5
 instrument discovery and resolution), the Step 51 commit (`c9a5a39`, instrument
-resolution inside financial research) and the Step 52 commit (`9ab52d5`, safe
-broker-suffix resolution).
+resolution inside financial research), the Step 52 commit (`9ab52d5`, safe
+broker-suffix resolution), the Step 53 commit (`e884767`, market-data symbol
+resolution through the instrument catalog) and the Step 54 commit (`b454784`,
+general broker-decorated spellings).
 
 ## Completed Stages
 
