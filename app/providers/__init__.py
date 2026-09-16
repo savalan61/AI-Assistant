@@ -1,4 +1,5 @@
 from app.providers.account_info import AccountInfo, AccountInfoProvider
+from app.providers.alphavantage_news import AlphaVantageNewsProvider
 from app.providers.economic_calendar import (
     EconomicCalendarProvider,
     EconomicEvent,
@@ -27,6 +28,7 @@ from app.providers.trade_history import TradeHistoryEntry, TradeHistoryProvider,
 __all__ = [
     "AccountInfo",
     "AccountInfoProvider",
+    "AlphaVantageNewsProvider",
     "Candle",
     "EconomicCalendarProvider",
     "EconomicEvent",

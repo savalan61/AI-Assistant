@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 47 — News & Fundamental Intelligence (this checkpoint)
+Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY — this checkpoint)
++ Step 47 — News & Fundamental Intelligence
 + Step 46 — Explicit Economic-Calendar Source Configuration
 + Step 45 — Economic Intelligence in the Agent Pipeline
 + Step 44 — QuantGist Economic Calendar Source (development/test)
@@ -19,6 +20,7 @@ Step 47 — News & Fundamental Intelligence (this checkpoint)
 
 Status:
 
+Step 47A: VERIFIED (implementation, tests, .env.example and documentation; committed by the Step 47A commit, whose hash the following checkpoint-status commit records here; local, not pushed)
 Step 47: VERIFIED + COMMITTED (c44953d — "feat(fundamental): add news and fundamental intelligence" + its checkpoint-status commit; local, not pushed)
 Step 46: VERIFIED + COMMITTED (ebbb86b — "feat(calendar): add explicit source configuration")
 Step 45: VERIFIED + COMMITTED (b9785cb + its checkpoint-status commit 9ba0d95; local, not pushed)
@@ -29,7 +31,15 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
-Step 47 (news and fundamental intelligence: the NewsProvider contract and its
+Step 47A (the Alpha Vantage development news source: the NewsProvider
+implementation behind the Step 47 contract, the explicit alphavantage source
+option, the environment matrix, the key-redaction measure and the single live
+smoke request) — the change set this checkpoint describes — is implemented,
+verified and committed by the Step 47A commit ("feat(news): add Alpha Vantage
+development source"), which carries the implementation, the tests, .env.example
+and the documentation updates (PROJECT_CONTEXT.md, knowledge.md and this
+document); the follow-up checkpoint-status commit records that hash here.
+Before it, Step 47 (news and fundamental intelligence: the NewsProvider contract and its
 deterministic development/test source, the explicit NEWS_SOURCE selection, the
 deterministic news relevance, the FundamentalIntelligenceService context, the
 per-position fundamental exposure, the JWT-protected
@@ -76,6 +86,61 @@ user seed script), the Step 37 checkpoint ("feat(financial): harden numeric
 representation"), the Step 36 MT5 tenant-session commit, the Step 35 security
 hardening commit and b95eaa1 ("feat(ai): add broker llm routing and agent
 controls", Steps 29–33).
+
+Step 47A adds Alpha Vantage as the real development news provider behind the
+Step 47 contract — a NewsProvider implementation and nothing else: no service,
+API, relevance, agent or schema change, and the fake remains the deterministic
+fallback. `NEWS_SOURCE` gains one value (`alphavantage`), resolved at the same
+composition root: in development, `auto` now selects Alpha Vantage when
+ALPHA_VANTAGE_API_KEY is configured and the deterministic fake otherwise, and
+`alphavantage` names it explicitly; anywhere else `auto` still means no news
+source, and an explicit `alphavantage` outside development refuses with the same
+generic 503 as the other development/test sources. A configured key never makes a
+non-development deployment serve it, an explicitly selected source without a key
+refuses instead of falling back to the fake, and the production slot still
+refuses until a real vendor is registered — so no production or licensing claim
+is made: Alpha Vantage's free tier is explicitly a development/test stand-in
+(small daily quota, personal-use terms) whose provenance marker
+(`alphavantage-free-development`) travels into every API response and agent
+prompt. The adapter performs one bounded NEWS_SENTIMENT query per call (the
+caller's half-open UTC window sent as the vendor's own time filter and re-applied
+locally, `sort=LATEST`, the requested result cap clamped to the vendor maximum),
+parses only the fields our NewsItem contract carries (title, publisher, URL, the
+vendor's own excerpt bounded to 400 characters plus a marker, an aware UTC
+`published_at`, the vendor's topic labels as categories) and drops the vendor's
+sentiment scores/labels and ticker tags — relevance stays exactly where it was,
+with the existing deterministic classifier deciding from currency legs and the
+documented keyword map, so XAUUSD keeps its USD/gold/Fed/inflation mapping. It
+fails closed (generic RuntimeError → the established 503) on a missing key, a
+transport or timeout failure, a non-200 response, an invalid-JSON body, a
+malformed envelope or row, and on the vendor's HTTP-200 `Information`/`Note`
+bodies (invalid key, exhausted quota) — the vendor payload is never echoed. Since
+the vendor requires the key as a query parameter, the adapter also installs (once,
+for the configured value only) a redaction filter on the httpx logger, so the
+HTTP client's own INFO-level request line can never put the key into a log; the
+adapter itself never emits a record, never formats the URL into an error message
+and never chains the original exception. No caching, retry, scheduler, scraping,
+article fetch, database table, news pool, MCP or tool/function calling was added.
+
+Step 47A verification: the new provider/source/security tests were run focused
+(423 passed across the news, fundamental, agent, calendar and config suites); the
+full suite passed 1213 with 2 pre-existing third-party warnings (1134 → 1213)
+WITH OUTBOUND NETWORKING HARD-DISABLED in the test process (socket.getaddrinfo
+and socket.create_connection patched to raise), which is also the proof that no
+automated test can reach Alpha Vantage or any other network; compileall over app
+and tests clean; pyright 0 errors / 0 warnings on the new provider and every
+changed file, including the new test module; git diff --check clean; trading-safety
+greps confirm no order/position-mutation function exists anywhere in app/; a
+secret sweep for the configured key value across the whole repository (excluding
+.env itself) found zero files; and ONE live smoke request was made after all
+offline tests passed, with no retry: the composition-root seam selected
+`alphavantage-free-development`, the request returned 20 real articles (the
+service's own cap) with aware UTC `published_at` values inside the requested
+24-hour window, bounded excerpts (400 characters plus the marker), populated
+publishers/URLs/topics, chronological ordering preserved, and no key in any
+output. An offline probe with 20 real-shaped items then confirmed the prompt
+stays within its existing bound (10,121 characters against the 24,000 limit) with
+both public blocks intact and no sentiment anywhere.
 
 Step 47 delivers news and fundamental intelligence as one vertical slice, so a
 customer's question can be answered with what is happening to an instrument and
@@ -336,15 +401,18 @@ No database migration was needed — these values are not persisted.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 1134 passed, 2 warnings (both pre-existing third-party
+pytest tests/ -q → 1213 passed, 2 warnings (both pre-existing third-party
 deprecation warnings: the anyio BlockingPortal alias and the starlette
 testclient httpx notice); verified 2026-09-16 on this exact tree, after the
-Step 44, Step 45, Step 46 and Step 47 work. Step 44 rewrote the QuantGist cases
+Step 44, Step 45, Step 46, Step 47 and Step 47A work — and run with outbound
+networking hard-disabled, so the number also proves the suite reaches no network
+(neither Alpha Vantage nor anything else). Step 44 rewrote the QuantGist cases
 against the verified live API and took the suite to 897; Step 45 added the
 agent/calendar composition (924); Step 46 added the source x environment matrix
 and the production-seam cases (948); Step 47 added the news provider/service,
 relevance, fundamental-service, fundamental-API, agent-fundamental and news
-source-configuration suites (948 → 1134). Step 40 took it to 799 and Step 39A
+source-configuration suites (948 → 1134); Step 47A added the Alpha Vantage
+provider, source-matrix and secret-hygiene cases (1134 → 1213). Step 40 took it to 799 and Step 39A
 removed the former Pydantic class-config deprecation, which is why the warning
 count is 2 rather than 3.
 
@@ -369,13 +437,16 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-CLEAN — the Step 47 change set (the news provider contract, the deterministic
-development news source, the explicit NEWS_SOURCE selection, the fundamental
-intelligence service and its relevance/exposure layer, the
-GET /fundamental-intelligence/today endpoint, the agent prompt composition, the
-new and extended tests, .env.example and the documentation) is committed by the
-Step 47 commit and its checkpoint-status commit, so nothing from that change set
-is left modified, staged or uncommitted. Before it, the Step 46 change set
+CLEAN — the Step 47A change set (the Alpha Vantage news provider, the
+alphavantage NEWS_SOURCE value and its matrix, the key-redaction measure, the new
+and extended tests, .env.example and the documentation) is committed by the Step
+47A commit and its checkpoint-status commit, so nothing from that change set is
+left modified, staged or uncommitted. The Step 47 change set (the news provider
+contract, the deterministic development news source, the explicit NEWS_SOURCE
+selection, the fundamental intelligence service and its relevance/exposure layer,
+the GET /fundamental-intelligence/today endpoint, the agent prompt composition,
+the tests and the documentation) was committed by the Step 47 commit and its
+checkpoint-status commit. Before it, the Step 46 change set
 (explicit economic-calendar source configuration, the deliberate production
 seam, its tests and .env.example) was committed by ebbb86b.
 
@@ -383,12 +454,13 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is eight commits ahead of it, none of them pushed:
+638f972, and local HEAD is ten commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
-intelligence ahead of technical analysis) and the two Step 47 commits (the
-implementation and this checkpoint-status record).
+intelligence ahead of technical analysis), the two Step 47 commits (the
+implementation and its checkpoint-status record) and the two Step 47A commits
+(the Alpha Vantage development source and this checkpoint-status record).
 
 ## Completed Stages
 
@@ -1221,6 +1293,82 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
+### Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY)
+Status: VERIFIED (committed by the Step 47A commit "feat(news): add Alpha Vantage
+development source"; its hash is recorded by the follow-up checkpoint-status
+commit)
+
+Makes the news source real for development: Alpha Vantage's free-tier News &
+Sentiment feed becomes the provider the Step 47 contract is served by, with the
+deterministic fake kept as the offline fallback. Nothing above the provider
+boundary changed — the news service, the fundamental context, the relevance
+layer, the API endpoints, the agent prompt, tenant isolation and the read-only
+boundary are all untouched, and no production or licensing claim is made.
+
+Includes:
+
+- app/providers/alphavantage_news.py: AlphaVantageNewsProvider (source =
+  "alphavantage-free-development"). One bounded NEWS_SENTIMENT query per call:
+  the caller's half-open UTC window sent as the vendor's own time filter
+  (YYYYMMDDTHHMM) and re-applied locally, sort=LATEST, the requested result cap
+  clamped to the vendor maximum (1000, default 50), and a non-empty declared-tag
+  filter pushed to the vendor's ticker parameter. Parsing is exact (a lenient
+  strptime partial match is rejected by re-formatting the result) and fails closed
+  on a missing title/publisher/publication time, an unusable timestamp shape, an
+  invalid-JSON body, a non-dict envelope, a `feed` that is not a list, or a row
+  that is not an object. Mapping carries title, publisher, the article URL when
+  present, the vendor's own excerpt bounded to 400 characters plus a marker
+  (strictly inside NewsService's 600-character boundary), an aware UTC
+  `published_at`, the vendor's topic labels as categories and a stable article id
+  (sha256 of the URL, or of the title and instant when no URL exists). The
+  vendor's sentiment scores/labels, authors, banner images and ticker tags are
+  dropped, and no article page is ever fetched.
+- Secret hygiene: the vendor requires the key as a query parameter, and httpx logs
+  the full request URL at INFO. The adapter therefore installs, once per
+  configured value, a redaction filter on the httpx logger that removes that exact
+  key from any record (message and arguments, including non-string arguments such
+  as httpx.URL); the filter never drops a record and changes no logging level. The
+  adapter itself emits no record, never formats the URL into an error message and
+  never chains the original httpx exception.
+- app/core/config.py: NewsSource gains ALPHAVANTAGE, plus ALPHA_VANTAGE_API_KEY
+  (default empty — no key is committed or defaulted), ALPHA_VANTAGE_BASE_URL and
+  ALPHA_VANTAGE_TIMEOUT_SECONDS. An invalid value for any of them is reported by
+  setting name only, never by value.
+- app/core/dependencies.py: get_news_service resolves the new source at the same
+  seam. In development, auto selects Alpha Vantage when the key is configured and
+  the deterministic fake otherwise; alphavantage requires a key and refuses
+  ("News data source is not configured") without one, never falling back. Outside
+  development, auto still means no news source and an explicit alphavantage
+  refuses with the same generic detail, so a configured key alone never makes a
+  non-development deployment serve it. production still refuses everywhere.
+- .env.example: documents the new NEWS_SOURCE value, the Alpha Vantage settings
+  and the development/test-only posture (including the redaction measure).
+- tests: tests/test_alphavantage_news.py (provider contract, request shape and
+  bounds, timestamp/window normalization, mapping, id stability, excerpt
+  bounding, malformed envelope/row/JSON, HTTP-200 Information/Note bodies,
+  transport/timeout/non-200 translation, key-absence, redaction, and the
+  NewsService → FundamentalIntelligence → agent-prompt integration); the Alpha
+  Vantage cells in tests/test_news_source_configuration.py (auto/explicit
+  selection, missing key, non-development refusal, value-free logging,
+  constructor wiring); and the settings cases in tests/test_config_settings.py.
+  Every suite pins the key empty unless a test configures a test-only marker, so
+  no automated test can reach the network (verified by running the full suite
+  with outbound networking disabled).
+- verification: focused 423 passed; full suite 1213 passed with 2 pre-existing
+  third-party warnings, run with socket.getaddrinfo/create_connection disabled;
+  compileall clean; pyright 0 errors / 0 warnings on the new provider and all
+  changed files; git diff --check clean; no trading function anywhere in app/; a
+  repository-wide sweep for the configured key value found no file outside .env;
+  and ONE live smoke request (no retry) returned 20 real articles through the
+  real composition-root seam, with aware UTC timestamps inside the requested
+  window, bounded excerpts and no key in any output.
+- unchanged: the NewsProvider contract, NewsService, the relevance layer, the
+  fundamental intelligence service/endpoint, the agent pipeline, tenant
+  isolation, the scope guard, the usage limiter, the egress policy, the LLM
+  router, the run_mt5_call boundary, the QuantGist adapter, database schema and
+  migrations. No caching, retry, scheduler, scraping, article fetch, news pool,
+  MCP or tool/function calling. The AI remains strictly READ-ONLY.
+
 ### Step 47 — News & Fundamental Intelligence (READ-ONLY)
 Status: VERIFIED + COMMITTED (c44953d)
 
@@ -1972,6 +2120,8 @@ EconomicIntelligenceService (the MANDATORY calendar/intelligence path above)
     ↓
 FundamentalIntelligenceService (app/services/fundamental_intelligence/)
     ├── news: NewsService → NewsProvider
+    │       ├── AlphaVantageNewsProvider (development/test source: the free-tier
+    │       │   News & Sentiment feed, selected when its key is configured)
     │       └── FakeNewsProvider (deterministic development/test source)
     │           (no production news vendor; the production slot refuses 503)
     ├── deterministic news relevance (the existing calendar classifier's
@@ -2185,9 +2335,14 @@ fundamental context for the authenticated user:
 - relevance is RELEVANT / POTENTIALLY_RELEVANT / NOT_OBVIOUSLY_RELEVANT; status
   is KNOWN or UNKNOWN. UNKNOWN means the exposure could not be established (with
   the reason stated), never that there is no risk.
-- Both data sources are currently "fake-development-placeholder": deterministic
-  development/test data, NOT live financial data. News has no production vendor
-  (Known Issues item 15).
+- Provenance is always explicit and never production-looking. The calendar's
+  data_source is "fake-development-placeholder" (or "quantgist-free-development"
+  when that development source is selected); the news data_source is
+  "alphavantage-free-development" when the Alpha Vantage development source is
+  configured and "fake-development-placeholder" otherwise. All of them are
+  deterministic or free-tier development/test data, NOT live financial data
+  presented as production, and news has no production vendor (Known Issues
+  items 15 and 16).
 - Tenant identity comes only from the authenticated user; no broker_id/user_id
   parameter exists, and `symbol` labels the relevance computation without
   widening what is read. A blank symbol → 422; unauthenticated → 401; an unusable
@@ -2465,12 +2620,47 @@ DELETE /users/{user_id} (super_admin only):
   slot refuses until a real vendor is registered at that single seam, and every
   unusable selection answers the same generic 503 with the precise reason logged
   server-side and no configuration value disclosed.
-- News (NewsItem/NewsProvider contract, FakeNewsProvider, NewsService,
-  GET /fundamental-intelligence/today) exists and is read-only: bounded factual
-  items with UTC publication times, declared instrument/currency/category tags
-  and an explicit provenance marker, retrieved for a half-open UTC window with a
-  caller-supplied cap. The wired source is the deterministic development/test
-  fake; no production news vendor exists (Known Issues item 15).
+- News (NewsItem/NewsProvider contract, FakeNewsProvider,
+  AlphaVantageNewsProvider, NewsService, GET /fundamental-intelligence/today)
+  exists and is read-only: bounded factual items with UTC publication times,
+  declared instrument/currency/category tags and an explicit provenance marker,
+  retrieved for a half-open UTC window with a caller-supplied cap. The wired
+  sources are development/test sources only (Alpha Vantage's free News &
+  Sentiment feed when its key is configured, otherwise the deterministic fake);
+  no production news vendor exists (Known Issues item 15), and neither source may
+  be presented as live/production news data (its provenance marker travels into
+  every response and prompt).
+- Alpha Vantage is the real development news provider (Step 47A), selected only
+  inside development: NEWS_SOURCE=auto takes it when ALPHA_VANTAGE_API_KEY is
+  configured (otherwise the fake), NEWS_SOURCE=alphavantage names it explicitly,
+  and anywhere else auto still means no news source while an explicit
+  alphavantage refuses with the generic 503 - a configured key never makes a
+  non-development deployment serve it, and a selected source without a key
+  refuses rather than falling back to the fake. The adapter performs one bounded
+  NEWS_SENTIMENT query per call (half-open UTC window sent as the vendor's own
+  time filter and re-applied locally, sort=LATEST, the caller's cap clamped to
+  the vendor maximum), parses only the contract's fields (title, publisher, URL
+  when present, the vendor's own excerpt bounded to 400 characters plus a marker,
+  an aware UTC published_at, the vendor's topic labels as categories, a stable
+  sha256-based article id), and drops the vendor's sentiment scores/labels and
+  ticker tags: relevance is still decided solely by the existing deterministic
+  classifier, so XAUUSD keeps its USD/gold/Fed/inflation/labor mapping.
+- The Alpha Vantage adapter fails closed (generic RuntimeError → the established
+  503) on a missing key, a transport/timeout failure, a non-200 response, invalid
+  JSON, a malformed envelope or row, and on the vendor's HTTP-200
+  "Information"/"Note" bodies (invalid key, exhausted quota); the vendor payload is
+  never echoed and no article page is ever fetched (title plus the vendor's own
+  excerpt only). Its key is never logged: the adapter emits no record itself, and
+  it installs a redaction filter on the httpx logger (once per configured value)
+  so the HTTP client's own INFO-level request line cannot carry the key either.
+- The Alpha Vantage development source was verified LIVE once (Step 47A, a single
+  request, no retry): the composition-root seam selected
+  "alphavantage-free-development", 20 real articles (the service's own cap) parsed
+  into NewsItem with aware UTC publication times inside the requested window,
+  bounded excerpts, populated publishers/URLs/topics, preserved chronological
+  ordering and no key in any output. An offline probe with 20 real-shaped items
+  confirmed the prompt stays inside its existing bound (10,121 of 24,000
+  characters) with both public blocks intact.
 - Fundamental intelligence (FundamentalContext, FundamentalIntelligenceService,
   the news relevance layer and the position exposure records) exists and is
   read-only and deterministic: it composes the MANDATORY calendar context the
@@ -2478,7 +2668,8 @@ DELETE /users/{user_id} (super_admin only):
   MT5 read of its own, and reports facts, provenance, discrete relevance,
   exposure and UNKNOWN only — never a forecast, probability or recommendation.
 - Which news source a deployment serves is an explicit configuration value
-  (Step 47): NEWS_SOURCE (auto | development_fake | production, default auto).
+  (Step 47, extended by Step 47A): NEWS_SOURCE
+  (auto | development_fake | alphavantage | production, default auto).
   Unlike the mandatory calendar, no news source is a supported state: the
   fundamental context reports news as explicitly UNAVAILABLE with its reason
   (never as "no news"), while an explicitly selected but unusable source refuses
@@ -2598,7 +2789,7 @@ DELETE /users/{user_id} (super_admin only):
   setting and never renders its value (in str and full traceback), the dotenv
   file is selected through model_config (the Pylance _env_file diagnostic is
   structurally impossible), and the deprecated class-based Config is gone.
-- Test suite verified 2026-09-16 on this exact tree: pytest tests/ -q → 1134 passed, 2 warnings.
+- Test suite verified 2026-09-16 on this exact tree: pytest tests/ -q → 1213 passed, 2 warnings (run with outbound networking hard-disabled, so no test reaches a network).
 - Live end-to-end verification on the demo MT5 account: GET /account-info,
   GET /positions and GET /trade-history all answer 200 with real data (no
   credential, server or symbol detail is recorded anywhere).
@@ -2692,10 +2883,13 @@ This limitation must be reported rather than hidden.
     one extra serialized MT5 read. Reusing one snapshot would mean changing the
     economic-intelligence service contract and was deliberately out of Step 45's
     scope.
-15. There is no production news source. Fundamental intelligence is wired to the
-    deterministic development/test fake (FakeNewsProvider), which is explicitly
-    NOT a vendor, publishes clearly-marked placeholder items and never reaches a
-    network. A deployment selects the source explicitly (NEWS_SOURCE, default
+15. There is no production news source. Fundamental intelligence is wired to
+    development/test sources only: since Step 47A, the Alpha Vantage free tier
+    when its key is configured in development, and otherwise the deterministic
+    fake (FakeNewsProvider), which is explicitly NOT a vendor, publishes
+    clearly-marked placeholder items and never reaches a network. Alpha Vantage's
+    free tier has a small daily quota and personal-use terms, so it is a
+    development stand-in rather than a production feed. A deployment selects the source explicitly (NEWS_SOURCE, default
     auto) and the production slot refuses (503) until a real, licensed vendor is
     registered at that seam; an unconfigured deployment reports news as
     explicitly unavailable rather than as "no news". Choosing and licensing a
@@ -2703,6 +2897,18 @@ This limitation must be reported rather than hidden.
     is an open architectural/product decision, exactly like the economic-calendar
     vendor in item 9. Nothing in this step may be described as a production news
     capability.
+16. The Alpha Vantage NEWS_SENTIMENT feed is unfiltered, so in development the
+    fundamental context is dominated by equity/position-filing copy: in the one
+    live smoke sample (20 articles) the existing relevance layer could tie none of
+    them to XAUUSD, and they are rendered with an explicit
+    NOT_OBVIOUSLY_RELEVANT label. This is truthful data rather than a defect, and
+    the relevance layer is deliberately conservative, but it means the
+    development feed is not instrument-focused. Narrowing it (a topic/ticker
+    filter pushed to the vendor, or a relevance-based local filter) is a
+    deliberate product decision that Step 47A did not take, because both choices
+    change coverage and could drop a genuinely relevant headline. The adapter's
+    `instruments` argument already maps to the vendor's ticker parameter, so the
+    mechanism exists; choosing the policy does not.
 
 Resolved:
 
@@ -2754,27 +2960,27 @@ Steps 12–44, the role-migration ordering fix, the development user seed and th
 trade-history field fix are complete, committed and pushed (origin/master is
 638f972, Step 44).
 
-Step 47 (news and fundamental intelligence) is committed by the Step 47
-implementation commit plus its checkpoint-status commit, which record the news
-provider contract and its deterministic development source, the explicit
-NEWS_SOURCE selection, the fundamental context and its relevance/exposure layer,
-the GET /fundamental-intelligence/today endpoint and the agent prompt
-composition. Before them, the roadmap commits (94b1858, the authoritative
-roadmap, and c84d334, its reorder that puts fundamental intelligence ahead of
-technical analysis), Step 46 (ebbb86b and its checkpoint-status commit c95ae6c)
-and Step 45 (b9785cb, the implementation, and 9ba0d95, its checkpoint-status
-commit) are local: origin/master remains 638f972 until they are pushed, so the
-working tree is clean.
+Step 47A (the Alpha Vantage development news source) is committed by the Step 47A
+implementation commit plus its checkpoint-status commit, which record the
+provider, the explicit alphavantage NEWS_SOURCE value, the environment matrix,
+the key-redaction measure, the new tests, .env.example and the documentation.
+Before them, Step 47 (news and fundamental intelligence) is committed by its
+implementation commit (c44953d) and its checkpoint-status commit, the roadmap
+commits (94b1858 and c84d334), Step 46 (ebbb86b and c95ae6c) and Step 45
+(b9785cb and 9ba0d95) are local: origin/master remains 638f972 until they are
+pushed, so the working tree is clean.
 
-The immediate next action is deliberately NOT fixed here: Step 47 delivered the
-first half of the roadmap's P1 (news plus the deterministic fundamental context,
-exposure and agent integration), and what remains of P1 — a portfolio/report
-level fundamental view, richer per-instrument mapping and any additional
-channel-facing surface — should be chosen explicitly, as should the three
-standing candidates (a real production economic-calendar vendor, a real licensed
-news vendor behind the existing news seam, and the real free LLM providers).
-Per the roadmap, P2 (instrument catalog and multi-timeframe market data) comes
-after P1's fundamental capability is usable.
+The immediate next action is deliberately NOT fixed here: P1 now has a real
+development news source, so the next stage should be chosen explicitly. The
+current candidates are (a) deciding the development feed's coverage policy —
+narrow the Alpha Vantage request by topic/ticker, or filter locally by relevance
+— which is what would make the fundamental block XAUUSD-focused (known issue 16);
+(b) the remaining P1 surface (a portfolio/report level fundamental view and any
+additional channel-facing surface); (c) a real licensed production news vendor
+behind the existing NEWS_SOURCE production seam (known issue 15); (d) a real
+production economic-calendar vendor (known issue 9); and (e) the real free LLM
+providers. Per the roadmap, P2 (instrument catalog and multi-timeframe market
+data) comes after P1's fundamental capability is usable.
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
@@ -2810,6 +3016,11 @@ none may be started without an explicit instruction:
   news vendor behind the existing NEWS_SOURCE production seam, with the
   redistribution rights a broker product requires — still required before
   fundamental intelligence can carry real news
+- development news coverage policy (known issue 16): decide whether the Alpha
+  Vantage request should be narrowed by topic/ticker, or the local fundamental
+  context should filter by relevance, so the development feed is instrument-
+  focused instead of equity-filing-heavy — a product/coverage decision, not a
+  defect fix
 - the economic calendar production data source (known issue 9) — still required
   before economic intelligence can carry real data
 - prompt safety screening before generation (deterministic refusal of

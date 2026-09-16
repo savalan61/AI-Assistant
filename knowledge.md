@@ -634,6 +634,18 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     only, a production slot that refuses until a real vendor is registered, and
     the same generic 503 for every unusable selection instead of degrading to
     another source (Step 46)
+27. Alpha Vantage as the real development news source (Step 47A): a NewsProvider
+    implementation behind the Step 47 contract (one bounded NEWS_SENTIMENT query
+    per call, the half-open UTC window sent to the vendor and re-applied locally,
+    aware UTC publication times, the vendor's own excerpt bounded below the
+    service's limit, topic labels as categories, sentiment scores and ticker tags
+    dropped), a new explicit NEWS_SOURCE value (alphavantage) served inside
+    development only, a configured-key-only selection in auto, a missing key or a
+    non-development environment refusing with the existing generic 503 instead of
+    falling back to the fake, a redaction filter that keeps the key out of the
+    HTTP client's own log lines, and ONE verified live smoke request; there is
+    still no production news vendor, and the unfiltered development feed is not
+    instrument-focused (CURRENT_CHECKPOINT.md known issues 15 and 16)
 26. News and fundamental intelligence as one vertical slice (Step 47): a
     vendor-neutral NewsProvider contract with a deterministic development/test
     feed (no network, explicit placeholder provenance), an explicit NEWS_SOURCE

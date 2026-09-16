@@ -12,6 +12,7 @@ from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
 from app.db.models import Broker, User, UserRole
 from app.providers import (
+    AlphaVantageNewsProvider,
     EconomicCalendarProvider,
     FakeEconomicCalendarProvider,
     FakeNewsProvider,
@@ -258,6 +259,16 @@ def get_news_service() -> NewsService | None:
     An explicitly selected but unusable source refuses (503) instead of falling
     back; an environment with no news source at all returns None, which the
     fundamental context reports as explicitly unavailable rather than empty.
+
+    Selection matrix (mirrors the calendar seam, with one deliberate difference:
+    no news source is a supported state rather than a refusal):
+
+    * auto in development - Alpha Vantage when ALPHA_VANTAGE_API_KEY is
+      configured, otherwise the deterministic fake;
+    * auto anywhere else - no news source (None);
+    * development_fake / alphavantage - served inside development only, with
+      alphavantage additionally requiring a configured key;
+    * production - refuses everywhere until a real vendor is registered.
     """
     in_development = settings.APP_ENV in _CALENDAR_PLACEHOLDER_ALLOWED_ENVS
     source = settings.NEWS_SOURCE
@@ -265,12 +276,32 @@ def get_news_service() -> NewsService | None:
     if source == NewsSource.AUTO:
         if not in_development:
             return None
-        source = NewsSource.DEVELOPMENT_FAKE
+        # Development: the real development source when it is configured,
+        # otherwise the deterministic fake (the historical behaviour).
+        source = (
+            NewsSource.ALPHAVANTAGE
+            if settings.ALPHA_VANTAGE_API_KEY.strip()
+            else NewsSource.DEVELOPMENT_FAKE
+        )
 
     if source == NewsSource.DEVELOPMENT_FAKE:
         if not in_development:
             _news_source_unavailable("development_fake", "development/test source only")
         return NewsService(FakeNewsProvider(), max_items=settings.NEWS_MAX_ITEMS)
+
+    if source == NewsSource.ALPHAVANTAGE:
+        if not in_development:
+            _news_source_unavailable("alphavantage", "development/test source only")
+        if not settings.ALPHA_VANTAGE_API_KEY.strip():
+            _news_source_unavailable("alphavantage", "ALPHA_VANTAGE_API_KEY is not configured")
+        return NewsService(
+            AlphaVantageNewsProvider(
+                api_key=settings.ALPHA_VANTAGE_API_KEY,
+                base_url=settings.ALPHA_VANTAGE_BASE_URL,
+                timeout_seconds=settings.ALPHA_VANTAGE_TIMEOUT_SECONDS,
+            ),
+            max_items=settings.NEWS_MAX_ITEMS,
+        )
 
     return _news_source_unavailable("production", "no production news provider is implemented")
 

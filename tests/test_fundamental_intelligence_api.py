@@ -156,6 +156,9 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
         app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.AUTO, raising=True
     )
     monkeypatch.setattr(app_settings, "NEWS_SOURCE", NewsSource.AUTO, raising=True)
+    # NEWS_SOURCE=auto selects Alpha Vantage in development when a key is
+    # configured, so the key is cleared: this suite is fully offline.
+    monkeypatch.setattr(app_settings, "ALPHA_VANTAGE_API_KEY", "", raising=True)
 
 
 @pytest.fixture()

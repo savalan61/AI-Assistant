@@ -44,11 +44,14 @@ class NewsSource(StrEnum):
     News is fundamental context for the Agent, so its source is explicit and
     fails closed rather than degrading:
 
-    * AUTO - the environment decides: development uses the deterministic news
-      fake; any other environment has NO news source configured, which the
-      fundamental context reports explicitly as unavailable (never as "no news").
+    * AUTO - the environment decides: development uses Alpha Vantage when
+      ALPHA_VANTAGE_API_KEY is configured and the deterministic fake otherwise;
+      any other environment has NO news source configured, which the fundamental
+      context reports explicitly as unavailable (never as "no news").
     * DEVELOPMENT_FAKE - the deterministic placeholder news items (development
       only).
+    * ALPHAVANTAGE - the Alpha Vantage free-tier News & Sentiment feed
+      (development/test only; a key is required and a missing one refuses).
     * PRODUCTION - the production vendor slot. No production news vendor is
       implemented, so selecting this names the seam a real one is registered
       behind and refuses (503) until then, instead of pretending no news exists.
@@ -58,6 +61,7 @@ class NewsSource(StrEnum):
 
     AUTO = "auto"
     DEVELOPMENT_FAKE = "development_fake"
+    ALPHAVANTAGE = "alphavantage"
     PRODUCTION = "production"
 
 
@@ -114,17 +118,30 @@ class Settings(BaseSettings):
     QUANTGIST_TIMEOUT_SECONDS: float = 15.0
 
     # Which news source this deployment serves (see NewsSource). "auto" keeps the
-    # environment-driven selection: the deterministic fake in development, and no
+    # environment-driven selection: Alpha Vantage when ALPHA_VANTAGE_API_KEY is
+    # configured (development only) and the deterministic fake otherwise, and no
     # news source anywhere else - which the fundamental context reports as
     # explicitly unavailable rather than as "no news", so an unconfigured feed
-    # can never be mistaken for an absence of events. An explicit
-    # "development_fake" outside development, or "production" before a real
-    # vendor is registered, refuses (503) instead of falling back.
+    # can never be mistaken for an absence of events. An explicitly selected
+    # source that cannot be served (development_fake or alphavantage outside
+    # development, alphavantage without a key, or production before a real vendor
+    # is registered) refuses (503) instead of falling back.
     NEWS_SOURCE: NewsSource = NewsSource.AUTO
     # Hard cap on news items retrieved and rendered per request. The news service
     # validates an item and truncates the list deterministically to this cap, so
     # one request can never pull an unbounded amount of outbound context.
     NEWS_MAX_ITEMS: int = 20
+
+    # Alpha Vantage news source (DEVELOPMENT/TEST ONLY). The free tier is a
+    # temporary stand-in for a real news source (small daily quota, personal-use
+    # terms), never this project's commercial vendor, which is why its provenance
+    # marker is carried into every API response and prompt. The key is read only
+    # from configuration/config-file/process environment - it is never committed,
+    # never logged and never returned. An empty key means this source is not
+    # configured (see get_news_service, which fails closed).
+    ALPHA_VANTAGE_API_KEY: str = ""
+    ALPHA_VANTAGE_BASE_URL: str = "https://www.alphavantage.co/query"
+    ALPHA_VANTAGE_TIMEOUT_SECONDS: float = 15.0
 
     # Maximum Agent requests per authenticated user per UTC day. Configurable
     # so deployments can tune it; checked in-process before any MT5 read or

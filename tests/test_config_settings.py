@@ -156,11 +156,51 @@ def test_every_documented_economic_calendar_source_is_accepted(tmp_path: Path, s
 
 
 def test_the_news_source_defaults_to_auto() -> None:
-    # "auto" is what keeps every existing deployment working: the deterministic
-    # development feed in development, and no news source anywhere else (which
-    # the fundamental context reports as explicitly unavailable).
+    # "auto" is what keeps every existing deployment working: Alpha Vantage when
+    # its key is configured (development only), the deterministic development
+    # feed otherwise, and no news source anywhere else (which the fundamental
+    # context reports as explicitly unavailable).
     assert settings.NEWS_SOURCE is NewsSource.AUTO
     assert settings.NEWS_MAX_ITEMS >= 1
+
+
+def test_the_alpha_vantage_settings_have_safe_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No key is committed or defaulted: an unconfigured key means the source is
+    # simply not configured, which fails closed at the composition root. The
+    # declared default and the value read with no env file are both empty, so
+    # this holds regardless of the developer's own .env (whose value is never
+    # read, compared or rendered here).
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+
+    assert Settings.model_fields["ALPHA_VANTAGE_API_KEY"].default == ""
+    assert load_settings(env_file=None).ALPHA_VANTAGE_API_KEY == ""
+    assert settings.ALPHA_VANTAGE_BASE_URL.startswith("https://")
+    assert settings.ALPHA_VANTAGE_TIMEOUT_SECONDS > 0
+
+
+def test_the_alpha_vantage_key_is_read_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The key is read from configuration only (never hard-coded), and the loader
+    # never renders a value in an error message.
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+    path = _env_file(tmp_path, "ALPHA_VANTAGE_API_KEY=av-file-only-placeholder\n")
+
+    loaded = load_settings(env_file=path)
+
+    assert loaded.ALPHA_VANTAGE_API_KEY == "av-file-only-placeholder"
+
+
+def test_an_invalid_alpha_vantage_timeout_is_reported_by_name_only(tmp_path: Path) -> None:
+    path = _env_file(tmp_path, f"ALPHA_VANTAGE_TIMEOUT_SECONDS={FAKE_SECRET}\n")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        load_settings(env_file=path)
+
+    assert "ALPHA_VANTAGE_TIMEOUT_SECONDS" in str(excinfo.value)
+    assert FAKE_SECRET not in str(excinfo.value)
 
 
 def test_invalid_news_source_fails_closed_without_echoing_the_value(tmp_path: Path) -> None:
@@ -179,7 +219,7 @@ def test_invalid_news_source_fails_closed_without_echoing_the_value(tmp_path: Pa
     assert FAKE_SECRET not in message
 
 
-@pytest.mark.parametrize("source", ["auto", "development_fake", "production"])
+@pytest.mark.parametrize("source", ["auto", "development_fake", "alphavantage", "production"])
 def test_every_documented_news_source_is_accepted(tmp_path: Path, source: str) -> None:
     path = _env_file(tmp_path, f"NEWS_SOURCE={source}\n")
 

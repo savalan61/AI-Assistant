@@ -86,11 +86,13 @@ Current implemented provider contracts (not database models):
   vendor is registered; neither development source is a production source, and
   see CURRENT_CHECKPOINT.md Known Issues item 9)
 - the vendor-neutral LLM provider contract (app/providers/llm.py)
-- NewsProvider (app/providers/news.py; the wired implementation is the
-  deterministic development/test fake FakeNewsProvider — no network, explicit
-  placeholder provenance — selected explicitly through NEWS_SOURCE (Step 47),
-  whose production slot refuses until a real vendor is registered; see
-  CURRENT_CHECKPOINT.md Known Issues item 15)
+- NewsProvider (app/providers/news.py; the wired implementations are
+  development/test sources only — AlphaVantageNewsProvider (Step 47A, the free
+  News & Sentiment feed, selected only when its key is configured in
+  development) and the deterministic no-network placeholder FakeNewsProvider —
+  selected explicitly through NEWS_SOURCE (Step 47/47A), whose production slot
+  refuses until a real vendor is registered; see CURRENT_CHECKPOINT.md Known
+  Issues items 15 and 16)
 
 Future/domain entities planned:
 
@@ -362,9 +364,10 @@ Already implemented today:
   receives today's economic calendar alongside the financial context and asks
   the model once; the calendar is mandatory, so a calendar-source failure is the
   existing generic 503 rather than a degraded answer)
-- fundamental intelligence (Step 47): a vendor-neutral news source
-  (deterministic development/test feed; no production vendor), deterministic
-  news relevance built on the existing calendar classifier, today's fundamental
+- fundamental intelligence (Step 47): a vendor-neutral news source (development/
+  test only — Alpha Vantage when its key is configured, otherwise the
+  deterministic placeholder feed; no production vendor), deterministic news
+  relevance built on the existing calendar classifier, today's fundamental
   context combining the mandatory calendar with relevant news and each open
   position's factual exposure (explicit UNKNOWN when it cannot be established),
   a JWT-protected GET /fundamental-intelligence/today endpoint, and that same

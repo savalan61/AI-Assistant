@@ -292,8 +292,11 @@ def test_agent_service_is_built_with_the_fundamental_intelligence_service(
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
     # Pin the news source the same way the calendar source is pinned elsewhere:
     # the deterministic development feed, never a local machine's selection.
+    # The Alpha Vantage key is cleared because NEWS_SOURCE=auto would otherwise
+    # select that development source where a local key is configured.
     monkeypatch.setattr(settings, "APP_ENV", "development", raising=True)
     monkeypatch.setattr(settings, "NEWS_SOURCE", NewsSource.AUTO, raising=True)
+    monkeypatch.setattr(settings, "ALPHA_VANTAGE_API_KEY", "", raising=True)
 
     service = asyncio.run(deps.get_agent_service(make_user(), object()))
 

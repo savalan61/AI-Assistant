@@ -204,8 +204,12 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     # Pin the news source selection the same way (Step 47): POST /agent also
     # composes today's fundamental context, so the deterministic development
-    # feed is described here rather than whatever a local .env selects.
+    # feed is described here rather than whatever a local .env selects. The
+    # Alpha Vantage key is cleared too, because NEWS_SOURCE=auto selects that
+    # development source in development when a key is configured - these tests
+    # must never reach the network.
     monkeypatch.setattr(app_settings, "NEWS_SOURCE", NewsSource.AUTO, raising=True)
+    monkeypatch.setattr(app_settings, "ALPHA_VANTAGE_API_KEY", "", raising=True)
 
 
 @pytest.fixture()
