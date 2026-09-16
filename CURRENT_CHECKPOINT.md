@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 46 — Explicit Economic-Calendar Source Configuration (this checkpoint; not committed)
+Step 46 — Explicit Economic-Calendar Source Configuration (this checkpoint)
 + Step 45 — Economic Intelligence in the Agent Pipeline
 + Step 44 — QuantGist Economic Calendar Source (development/test)
 + Step 43 — Tenant-Safe Login
@@ -18,7 +18,7 @@ Step 46 — Explicit Economic-Calendar Source Configuration (this checkpoint; no
 
 Status:
 
-Step 46: VERIFIED — implemented, deliberately NOT committed (working tree modified; no push)
+Step 46: VERIFIED + COMMITTED (ebbb86b — "feat(calendar): add explicit source configuration")
 Step 45: VERIFIED + COMMITTED (b9785cb + its checkpoint-status commit 9ba0d95; local, not pushed)
 Step 44: VERIFIED + COMMITTED + PUSHED (638f972)
 Step 43: VERIFIED + COMMITTED + PUSHED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9)
@@ -28,16 +28,18 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 Checkpoint commit:
 
 Step 46 (explicit economic-calendar source configuration, with a deliberate
-production seam) — the change set this checkpoint describes — is implemented and
-verified but deliberately NOT committed, so the working tree is modified (see
-its section below and the working-tree note at the end of this block). The last
-commits are Step 45 (economic intelligence in the agent pipeline): b9785cb
-("feat(agent): compose economic intelligence into the agent prompt"), which
-carries the implementation, the tests and the documentation updates
-(PROJECT_CONTEXT.md, knowledge.md and this document), and its checkpoint-status
-commit 9ba0d95, which records that hash here. Both are local: they are NOT
-pushed, so origin/master stays at the Step 44 commit until they are. Before
-them, Step 44 (the QuantGist development/test economic-calendar source) was
+production seam) — the change set this checkpoint describes — is implemented,
+verified and committed by ebbb86b ("feat(calendar): add explicit source
+configuration"), which carries the configuration, the composition-root seam, its
+tests, .env.example and the documentation updates (PROJECT_CONTEXT.md,
+knowledge.md and this document). Before it, Step 45 (economic intelligence in
+the agent pipeline) was committed by b9785cb ("feat(agent): compose economic
+intelligence into the agent prompt"), which carries the implementation, the
+tests and the documentation updates (PROJECT_CONTEXT.md, knowledge.md and this
+document), and its checkpoint-status commit 9ba0d95, which records that hash
+here. All three are local: they are NOT pushed, so origin/master stays at the
+Step 44 commit until they are. Before them, Step 44 (the QuantGist
+development/test economic-calendar source) was
 committed by "feat(calendar): add QuantGist development/test source" (638f972,
 which carries the adapter, its tests, the wiring, the configuration and the
 documentation) and pushed. Step 43 is
@@ -257,21 +259,18 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-MODIFIED — the Step 46 change set (explicit economic-calendar source
+CLEAN — the Step 46 change set (explicit economic-calendar source
 configuration, the deliberate production seam, its tests and .env.example) is
-implemented and verified but deliberately NOT committed, so the working tree
-holds it until a commit is explicitly requested: app/core/config.py,
-app/core/dependencies.py, .env.example,
-tests/test_quantgist_economic_calendar.py, tests/test_config_settings.py,
-tests/test_economic_intelligence_api.py and tests/test_agent_api.py.
+committed by ebbb86b, so nothing from that change set is left modified, staged
+or uncommitted.
 
 The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is two commits ahead of it (b9785cb, the Step 45
-implementation, and 9ba0d95, its checkpoint-status commit), which are not
-pushed.
+638f972, and local HEAD is three commits ahead of it (b9785cb, the Step 45
+implementation, 9ba0d95, its checkpoint-status commit, and ebbb86b, Step 46),
+which are not pushed.
 
 ## Completed Stages
 
@@ -1105,7 +1104,7 @@ Status: VERIFIED + COMMITTED
 
 
 ### Step 46 — Explicit Economic-Calendar Source Configuration (production seam)
-Status: VERIFIED — implemented, deliberately NOT committed (working tree modified; no push)
+Status: VERIFIED + COMMITTED (ebbb86b)
 
 Makes the economic-calendar source an explicit, validated configuration value.
 The calendar is MANDATORY for every agent request, so the source is never chosen
@@ -2272,9 +2271,9 @@ DELETE /users/{user_id} (super_admin only):
   Config warning was eliminated by Step 39A.
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean. The Step 45 checkpoint commit and its
-  checkpoint-status commit are local: they have NOT been pushed, so local HEAD
-  is two commits ahead of origin/master (638f972) until they are.
+- Working tree is clean. The Step 46 checkpoint commit (ebbb86b) and the two
+  Step 45 commits (b9785cb and 9ba0d95) are local: they have NOT been pushed, so
+  local HEAD is three commits ahead of origin/master (638f972) until they are.
 
 Static/type verification:
 
@@ -2407,13 +2406,11 @@ Steps 12–44, the role-migration ordering fix, the development user seed and th
 trade-history field fix are complete, committed and pushed (origin/master is
 638f972, Step 44).
 
-Step 45 (economic intelligence in the agent pipeline) is committed locally
-(b9785cb, the implementation, and 9ba0d95, its checkpoint-status commit) and not
-pushed. Step 46 (explicit economic-calendar source configuration) is implemented
-and verified but deliberately NOT committed, so the working tree holds its change
-set: app/core/config.py, app/core/dependencies.py, .env.example,
-tests/test_quantgist_economic_calendar.py, tests/test_config_settings.py,
-tests/test_economic_intelligence_api.py and tests/test_agent_api.py.
+Step 46 (explicit economic-calendar source configuration) is committed by
+ebbb86b ("feat(calendar): add explicit source configuration"). Together with
+Step 45 (b9785cb, the implementation, and 9ba0d95, its checkpoint-status commit)
+these three commits are local: origin/master remains 638f972 until they are
+pushed, so the working tree is clean.
 
 The immediate next action is deliberately NOT fixed here: Step 46 landed the
 explicit source selection and the production seam, so the next stage should be
