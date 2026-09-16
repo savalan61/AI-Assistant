@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 49 Follow-up — Financial Research in the Agent Pipeline (this checkpoint)
+Step 50 — MT5 Instrument Discovery & Resolution (this checkpoint)
++ Step 49 Follow-up — Financial Research in the Agent Pipeline
 + Step 49 — Graded Financial Research Context
 + Step 48 — Instrument-Aware Fundamental Relevance
 + Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY)
@@ -23,9 +24,11 @@ Step 49 Follow-up — Financial Research in the Agent Pipeline (this checkpoint)
 
 Status:
 
-Step 49 Follow-up: VERIFIED (implementation, tests and documentation; committed
-together by the follow-up commit "feat(agent): integrate financial research
-context"; local, not pushed)
+Step 50: VERIFIED (implementation, tests and documentation; committed together
+by the Step 50 commit "feat(instruments): add MT5 instrument discovery and
+resolution", following the Step 48 single-commit convention; local, not pushed)
+Step 49 Follow-up: VERIFIED + COMMITTED (9081b5f — "feat(agent): integrate
+financial research context"; local, not pushed)
 Step 49: VERIFIED + COMMITTED (df3c4ef — "feat(research): add graded financial
 research context"; local, not pushed)
 Step 48: VERIFIED (implementation, tests and documentation; committed together by the Step 48 commit "feat(fundamental): generalize instrument-aware relevance"; local, not pushed)
@@ -39,6 +42,24 @@ Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
 Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
+
+The Step 50 change set (the vendor-neutral Instrument/InstrumentProvider contract
+with its TradeMode enum, the read-only MT5InstrumentProvider over the existing
+tenant-scoped MT5 session, the deterministic FakeInstrumentProvider catalog, the
+InstrumentService boundary in app/services/instruments with symbol
+normalisation/resolution/searching/ordering and the MAX_INSTRUMENTS bound, the
+get_instrument_service composition seam, the JWT-protected GET /instruments and
+GET /instruments/{symbol} endpoints, the three new test modules and this
+documentation) — the change set this checkpoint describes — is implemented,
+verified and committed as ONE focused commit ("feat(instruments): add MT5
+instrument discovery and resolution") that carries the implementation, the tests
+and this documentation together, following the Step 48 convention of a single
+commit; no separate checkpoint-status commit follows it, so this document
+records the state rather than a hash. No database table, cache, scheduler,
+background job, ingestion path, provider redesign, LLM change or trading path is
+involved, and the XAUUSD/USOIL/NASDAQ relevance profiles remain optional
+intelligence enhancements rather than a prerequisite for resolving an
+instrument (CURRENT_CHECKPOINT.md known issue 20 records the remaining gap).
 
 The Step 49 follow-up (the financial-research context composed into the Agent
 pipeline: the optional financial_research_service constructor parameter, the
@@ -525,15 +546,16 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is thirteen commits ahead of it, none of them pushed:
+638f972, and local HEAD is fourteen commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
 intelligence ahead of technical analysis), the two Step 47 commits (the
 implementation and its checkpoint-status record), the two Step 47A commits (the
 Alpha Vantage development source and its checkpoint-status record), the
-Step 48 commit (instrument-aware fundamental relevance) and the Step 49 commit
-(the graded financial-research context).
+Step 48 commit (instrument-aware fundamental relevance), the Step 49 commit (the
+graded financial-research context) and the Step 49 follow-up commit
+(`9081b5f`, the research context composed into the agent).
 
 ## Completed Stages
 
@@ -1364,6 +1386,106 @@ Status: VERIFIED + COMMITTED
 - Focused tests grew 10 → 14 (override reads the requested file; default path
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
+
+
+### Step 50 — MT5 Instrument Discovery & Resolution (READ-ONLY)
+Status: VERIFIED + COMMITTED (the Step 50 commit "feat(instruments): add MT5
+instrument discovery and resolution"; one focused commit carrying implementation,
+tests and documentation — the Step 48 single-commit convention, so no separate
+hash-recording commit follows)
+
+Makes every instrument a broker's own MT5 account offers discoverable and
+resolvable through a generic contract, so research, relevance and any future
+per-instrument feature can be driven by what the broker actually lists instead of
+by a hardcoded symbol list. XAUUSD remains an important case, not a special one.
+
+Includes:
+
+- app/providers/instrument.py (NEW): the vendor-neutral contract — the
+  seven-field read-only Instrument NamedTuple (symbol, name, asset_class,
+  base_currency, quote_currency, digits, trade_mode) and the InstrumentProvider
+  ABC (get_instrument / list_instruments). The contract carries identity and
+  metadata only: no price, no position, no relevance and no fundamental field.
+  `symbol` is the broker's own spelling and is never re-cased (broker names are
+  case-sensitive and carry suffixes such as XAUUSD.r / US500.cash); every other
+  field is nullable because brokers genuinely omit them, and None means "the
+  broker did not provide it". TradeMode (StrEnum: DISABLED / LONG_ONLY /
+  SHORT_ONLY / CLOSE_ONLY / FULL) is the availability answer, mapped by value
+  from MT5's documented numeric constants so an unrecognised mode fails loudly
+  rather than being guessed.
+- app/providers/mt5_instruments.py (NEW): the read-only MT5 implementation over
+  the EXISTING tenant-scoped MT5SessionManager path (no second credential
+  mechanism), reading inside `acquire` exactly like the account/positions/
+  market-data providers. The only MT5 calls are symbol_info and symbols_get;
+  symbol_select is deliberately NOT called because it mutates terminal state.
+  Mapping rules: name ← MT5's `description`, asset_class ← the broker's own
+  top-level symbol-group path segment, base/quote currency ← MT5's
+  currency_base/currency_profit passed through verbatim (not parsed into an FX
+  pair — MT5 uses them for a security ticker and settlement currency too),
+  whitespace-only vendor text → None, digits → int, malformed records →
+  RuntimeError (never a false "unknown instrument"), unknown symbol
+  (symbol_info → None) → ValueError.
+- app/providers/fake_instrument.py (NEW): the deterministic placeholder catalog
+  (no network, no MT5) spanning forex, metals, energies, an index, shares, crypto
+  and a soft commodity — including a broker-suffix spelling, a restricted trade
+  mode and one record with no metadata at all — delivered in terminal (unsorted)
+  order so the service's ordering is what makes a response reproducible. No
+  example symbol is special-cased anywhere in production logic.
+- app/services/instruments/ (NEW): InstrumentService — the boundary API →
+  service → provider → MT5, holding the deterministic presentation rules:
+  normalize_symbol (trim; reject blank, control characters and >64 characters;
+  never re-case), resolve (exact match first, then a UNIQUE case-insensitive
+  match over the catalog, so "xauusd.r" resolves while the returned symbol is
+  always the broker's spelling; unknown or ambiguous → ValueError; an MT5
+  outage propagates as RuntimeError and never falls back to the catalog), and
+  list_instruments(search) (literal case-insensitive substring over symbol and
+  description — deliberately not MT5's group-mask syntax — ordered by symbol,
+  capped at MAX_INSTRUMENTS = 200, reporting total + truncated so the bound is
+  stated rather than hidden).
+- app/api/instruments_router.py (NEW): GET /instruments/{symbol} → one resolved
+  instrument (200), unknown/blank symbol → 404, MT5 availability failure → the
+  existing generic 503; GET /instruments?search= → the bounded catalog
+  {instruments, total, truncated} (200, never 404 for an empty match), an
+  out-of-bound search → 422. Both routes are JWT-protected and tenant-scoped:
+  the MT5 identity comes from the authenticated database user, and no
+  account/broker parameter is accepted from the client.
+- app/core/dependencies.py: get_instrument_service — the explicit, testable
+  provider seam built from the shared get_mt5_credentials path (no new setting:
+  MT5 is the tenant's own broker connection, exactly as for positions/account).
+- app/main.py: the router is mounted; app/providers/__init__.py exports the new
+  contract, provider and fake.
+- tests/test_mt5_instruments.py (NEW, 28 cases): field-by-field mapping, all five
+  trade modes, unknown mode / malformed record / invalid digits / empty symbol
+  failing closed, missing optional metadata → None, broker-spelling preservation,
+  unknown symbol vs outage, catalog mapping and empty/None catalog handling,
+  tenant-scoped authentication for one and two tenants, fail-closed incomplete
+  credentials (nothing read), and the read-only guarantee (the called-function
+  set is a subset of {initialize, login, last_error, symbol_info, symbols_get}
+  and disjoint from trading AND state-mutating functions).
+- tests/test_instrument_service.py (NEW, 31 cases): normalisation, exact and
+  case-insensitive resolution with broker spelling preserved, unknown/ambiguous/
+  blank/oversized input, an outage NOT being treated as an unknown symbol,
+  deterministic ordering and reproducibility, search by symbol and description,
+  blank search = no search, empty match ≠ error, the catalog cap with total +
+  truncated, and generic coverage of arbitrary symbols (AAPL, LVMH, BTCUSD,
+  NICKEL, COFFEE, XAUUSD.r, USOIL, NAS100).
+- tests/test_instruments_api.py (NEW, 31 cases): resolution contract (exactly
+  seven fields, trade-mode words, null optionals), case-insensitive resolution,
+  generic symbol coverage, raw-MT5/provider-internal leak checks, the catalog
+  contract and its bound, 404/422/503 mapping, 401 for unauthenticated/invalid
+  tokens and unknown users, tenant isolation (two tenants compose their own MT5
+  identity; client-supplied login/broker_id/account_id are ignored), no secret
+  material in any response, the blocking boundary (the provider runs off the
+  event-loop thread), and a roll-call that the new routes and all pre-existing
+  feature routes are still mounted.
+
+Untouched: every existing provider (Alpha Vantage, fake news, QuantGist,
+positions/account/trade-history/market-data), the news, economic and fundamental
+intelligence layers, FinancialResearchService, the agent pipeline and prompt, the
+LLM contract, the API surface of every existing endpoint, the configuration
+matrix, the egress policy and the schema (no migration). The three suites are
+fully offline: all 90 cases pass with every non-loopback connect and all
+non-local DNS resolution blocked.
 
 
 ### Step 49 Follow-up — Financial Research in the Agent Pipeline (READ-ONLY)
@@ -3169,6 +3291,18 @@ This limitation must be reported rather than hidden.
     keyword sets and contract shapes are unchanged — but a consumer that assumed
     "RELEVANT is never emitted" must accept it. The three discrete levels are
     still the only values, and there is still no score anywhere.
+20. Instrument discovery reads the broker's live MT5 catalog on every request and
+    holds nothing: there is no database instrument catalog, no cache, no
+    scheduler and no ingestion (Step 50 deliberately adds none of them), so
+    GET /instruments reads the tenant's terminal each time and its per-request
+    cost is the terminal's own symbols_get cost, serialized process-wide behind
+    the single tenant session like every other MT5 read. A catalog listing is
+    capped at 200 instruments with total/truncated reported, so the API never
+    returns a whole broker catalog at once. A production deployment that wants
+    persistent discovery (and with it a cheaper lookup and a stable per-broker
+    symbol inventory) needs that decision made explicitly; nothing today depends
+    on it, and the three fundamental relevance profiles remain optional
+    enhancements applied on top of a resolved symbol.
 
 Resolved:
 

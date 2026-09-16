@@ -20,6 +20,7 @@ from app.providers import (
     LLMProviderPool,
     LLMRouter,
     MT5AccountInfoProvider,
+    MT5InstrumentProvider,
     MT5MarketDataProvider,
     MT5PositionProvider,
     MT5TradeHistoryProvider,
@@ -41,6 +42,7 @@ from app.services.fundamental_intelligence import (
     FinancialResearchService,
     FundamentalIntelligenceService,
 )
+from app.services.instruments import InstrumentService
 from app.services.market import MarketDataService
 from app.services.news import NewsService
 from app.services.portfolio_intelligence import PortfolioIntelligenceService
@@ -599,6 +601,17 @@ def get_trade_history_service(
 ) -> TradeHistoryService:
     provider = MT5TradeHistoryProvider(session_manager=get_mt5_session_manager(), credentials=credentials)
     return TradeHistoryService(provider)
+
+
+def get_instrument_service(
+    credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
+) -> InstrumentService:
+    # Same tenant-scoped MT5 composition path as the other broker-data services:
+    # the provider is a cheap per-request object holding the authenticated
+    # tenant's credentials, and provider selection is explicit (and therefore
+    # replaceable in tests) rather than hidden behind a factory.
+    provider = MT5InstrumentProvider(session_manager=get_mt5_session_manager(), credentials=credentials)
+    return InstrumentService(provider)
 
 
 def get_economic_intelligence_service(

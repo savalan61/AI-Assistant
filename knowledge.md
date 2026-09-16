@@ -650,6 +650,28 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     no sentiment model, no learned matching, no LLM, no new provider, no schema
     change), and the calendar layer's currency-scoped LEVEL contract is unchanged
     for symbols that have a currency leg (CURRENT_CHECKPOINT.md known issues 17-19)
+30. MT5 instrument discovery and resolution (Step 50): a vendor-neutral
+    Instrument/InstrumentProvider contract under app/providers (identity and
+    metadata only — the broker's own spelling, description, broker-group asset
+    class, base/quote currency, digits and a normalised TradeMode availability —
+    with every optional field nullable because brokers genuinely omit them),
+    implemented read-only over the EXISTING tenant-scoped MT5SessionManager with
+    symbol_info/symbols_get only (symbol_select is never called: it mutates
+    terminal state), plus InstrumentService in app/services/instruments holding
+    the deterministic presentation rules (trim-only normalisation that never
+    re-cases a broker symbol, exact-then-unique-case-insensitive resolution that
+    always returns the broker's spelling, literal substring search over symbol
+    and description, alphabetical ordering, a 200-instrument bound reported as
+    total/truncated), the explicit get_instrument_service composition seam, and
+    the JWT-protected GET /instruments (bounded catalog) and
+    GET /instruments/{symbol} (one resolved instrument; 404 unknown, 503 MT5
+    unavailable). Any broker symbol resolves generically — AAPL, LVMH, BTCUSD,
+    NICKEL, COFFEE, XAUUSD.r, USOIL, NAS100 — and no symbol is special-cased in
+    production logic; the XAUUSD/USOIL/NASDAQ fundamental profiles stay optional
+    intelligence enhancements rather than a prerequisite. No database table,
+    cache, scheduler, ingestion, provider redesign, LLM/tool change or schema
+    migration; the three suites are fully offline (CURRENT_CHECKPOINT.md known
+    issue 20 records the no-persistent-catalog gap)
 29. Financial research in the Agent pipeline (Step 49 follow-up): the graded
     research context composed into AgentService as an OPTIONAL constructor
     parameter, built ONLY when the request names a focus instrument (bounded to

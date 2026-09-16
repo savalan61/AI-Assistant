@@ -204,13 +204,30 @@ The provider pattern is established for four MT5 data flows:
 - AccountInfoProvider: get_account_info() -> AccountInfo (nine fields)
 - PositionProvider: get_positions() -> tuple[Position, ...] (READ-ONLY)
 - TradeHistoryProvider: get_trade_history(from, to) -> tuple[TradeHistoryEntry, ...] (READ-ONLY)
+- InstrumentProvider: get_instrument(symbol) -> Instrument and
+  list_instruments() -> tuple[Instrument, ...] (READ-ONLY, Step 50) — the
+  broker's own symbol catalog, for discovery/resolution rather than trading
 
 Each contract is a typed NamedTuple (Candle, AccountInfo, Position,
-TradeHistoryEntry) so raw MT5 objects never cross the provider boundary.
+TradeHistoryEntry, Instrument, NewsItem) so raw MT5/vendor objects never cross
+the provider boundary.
 
-MT5MarketDataProvider, MT5AccountInfoProvider, MT5PositionProvider and
-MT5TradeHistoryProvider implement the providers; FakeMarketDataProvider,
-FakePositionProvider and FakeTradeHistoryProvider back the tests.
+MT5MarketDataProvider, MT5AccountInfoProvider, MT5PositionProvider,
+MT5TradeHistoryProvider and MT5InstrumentProvider implement the providers;
+FakeMarketDataProvider, FakePositionProvider, FakeTradeHistoryProvider and
+FakeInstrumentProvider back the tests.
+
+The Instrument contract carries identity and metadata only (the broker's own
+symbol spelling, description, broker-group asset class, base/quote currency,
+digits, trade-mode availability): no price, position, relevance or fundamental
+field. Symbol spelling is never re-cased — broker names are case-sensitive and
+broker suffixes such as `XAUUSD.r` are part of the name — and an MT5
+symbol lookup never mutates terminal state (no symbol_select). Resolution and
+ordering are deterministic and belong to `InstrumentService`
+(app/services/instruments), which resolves a symbol exactly first and then by a
+unique case-insensitive match, lists/searches the catalog as a literal
+case-insensitive substring over symbol and description, and caps a listing at
+200 instruments while reporting `total` and `truncated`.
 
 The same inversion is used for the AI layer: LLMProvider (app/providers/llm.py)
 is a vendor-neutral contract whose implementations are FakeLLMProvider,
@@ -277,6 +294,15 @@ authoritative record of every endpoint and contract.
 Current JWT-protected, read-only endpoints:
 
 - GET /market-data/{symbol} → Candle response
+- GET /instruments → bounded instrument catalog from the authenticated tenant's
+  own MT5 terminal; {instruments, total, truncated}, extra optional fields are
+  null when the broker omits them, an empty match is 200 with
+  {"instruments": []}, and the query is a literal substring `search`
+- GET /instruments/{symbol} → one resolved instrument in the broker's own
+  spelling (a "xauusd.r" request resolves to "XAUUSD.r"); unknown or blank
+  symbol → 404, MT5 unavailable → 503, oversized input → 422. Generic for any
+  broker symbol (equities, crypto, soft commodities, indices, suffixed FX/metal
+  spellings); no symbol list is hardcoded.
 - GET /account-info → AccountInfo response (nine fields)
 - GET /positions → wrapped positions response; empty result is 200 with
   {"positions": []}, never 404
@@ -353,6 +379,13 @@ Already implemented today:
 - account information (balance, equity, margin, free margin)
 - open positions
 - trade history
+- instrument discovery (Step 50): every instrument the broker's MT5 account
+  offers is resolvable/discoverable through a vendor-neutral contract and a
+  deterministic service, so no feature has to hardcode a symbol list. The
+  contract is read-only and tenant-scoped, works for arbitrary broker symbols
+  (with or without a broker suffix), and holds no cache, database catalog,
+  scheduler or ingestion. The XAUUSD/USOIL/NASDAQ fundamental relevance profiles
+  remain optional intelligence enhancements layered on top of a resolved symbol.
 - portfolio intelligence (symbol exposure, directional balance, deterministic
   risk classification)
 - financial context (one read-only context for future AI consumption)

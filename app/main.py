@@ -9,6 +9,7 @@ from app.api.auth_router import router as auth_router
 from app.api.broker_llm_config_router import router as broker_llm_config_router
 from app.api.economic_intelligence_router import router as economic_intelligence_router
 from app.api.fundamental_intelligence_router import router as fundamental_intelligence_router
+from app.api.instruments_router import router as instruments_router
 from app.api.market_data_router import router as market_data_router
 from app.api.portfolio_intelligence_router import router as portfolio_intelligence_router
 from app.api.positions_router import router as positions_router
@@ -35,6 +36,7 @@ app.include_router(users_router)
 app.include_router(account_info_router)
 app.include_router(positions_router)
 app.include_router(trade_history_router)
+app.include_router(instruments_router)
 app.include_router(economic_intelligence_router)
 app.include_router(fundamental_intelligence_router)
 app.include_router(portfolio_intelligence_router)

@@ -7,15 +7,18 @@ from app.providers.economic_calendar import (
     impact_meets_minimum,
 )
 from app.providers.fake_economic_calendar import FakeEconomicCalendarProvider
+from app.providers.fake_instrument import FakeInstrumentProvider
 from app.providers.fake_llm import FakeFreeLLMProvider, FakeLLMProvider
 from app.providers.fake_news import FakeNewsProvider
 from app.providers.fake_position import FakePositionProvider
 from app.providers.fake_trade_history import FakeTradeHistoryProvider
+from app.providers.instrument import Instrument, InstrumentProvider, TradeMode
 from app.providers.llm import LLMFallbackError, LLMPrompt, LLMProvider, LLMProviderKind
 from app.providers.llm_pool import LLMProviderPool
 from app.providers.llm_router import LLMRouter
 from app.providers.market_data import Candle, MarketDataProvider
 from app.providers.mt5_account_info import MT5AccountInfoProvider
+from app.providers.mt5_instruments import MT5InstrumentProvider
 from app.providers.mt5_market_data import MT5MarketDataProvider
 from app.providers.mt5_positions import MT5PositionProvider
 from app.providers.mt5_trade_history import MT5TradeHistoryProvider
@@ -35,10 +38,13 @@ __all__ = [
     "EventImpact",
     "FakeEconomicCalendarProvider",
     "FakeFreeLLMProvider",
+    "FakeInstrumentProvider",
     "FakeLLMProvider",
     "FakeNewsProvider",
     "FakePositionProvider",
     "FakeTradeHistoryProvider",
+    "Instrument",
+    "InstrumentProvider",
     "LLMFallbackError",
     "LLMPrompt",
     "LLMProvider",
@@ -47,6 +53,7 @@ __all__ = [
     "LLMRouter",
     "MarketDataProvider",
     "MT5AccountInfoProvider",
+    "MT5InstrumentProvider",
     "MT5MarketDataProvider",
     "MT5PositionProvider",
     "MT5TradeHistoryProvider",
@@ -59,6 +66,7 @@ __all__ = [
     "QuantGistEconomicCalendarProvider",
     "TradeHistoryEntry",
     "TradeHistoryProvider",
+    "TradeMode",
     "TradeType",
     "impact_meets_minimum",
 ]
