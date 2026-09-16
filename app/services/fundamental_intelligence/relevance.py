@@ -6,13 +6,25 @@ tokenizer (``symbol_currencies``), the metal rule (``is_metal_instrument``) and
 the level ranking from app/services/economic_intelligence/relevance.py, and it
 keeps the same deliberate conservatism:
 
-* the strongest level this layer may assert is POTENTIALLY_RELEVANT. A symbol
-  string cannot evidence a direct instrument-level link, so RELEVANT stays
-  reserved for a future instrument catalog;
-* no currency or instrument reference at all is NOT_OBVIOUSLY_RELEVANT with an
-  explicit factual reason — never a guess and never a directional claim;
+* a symbol-string reference alone (a declared tag, or a currency the symbol is
+  exposed to) may not exceed POTENTIALLY_RELEVANT - that is what
+  ``classify_news_relevance`` below documents and still does;
+* an item with no currency or instrument reference at all is
+  NOT_OBVIOUSLY_RELEVANT with an explicit factual reason - never a guess and
+  never a directional claim;
 * relevance is a discrete category. There is no score, no probability, no
   direction and no recommendation anywhere in this module.
+
+Since Step 48 the layer also answers the more useful question: *is this factual
+item about a fundamental factor this instrument is documented to be exposed to?*
+``classify_instrument_relevance`` does that through the shared domain vocabulary
+and the instrument's fundamental profile (app/services/instrument_intelligence),
+so an item that never names the instrument can still be graded - and graded
+differently per instrument. A DIRECT profile match (the instrument's own
+underlying asset or market) is strong enough evidence to assert RELEVANT; a MACRO
+or INDIRECT transmission match is POTENTIALLY_RELEVANT. When the profile has
+nothing to say, the symbol-string view below remains the fallback, so every
+instrument with no profile behaves exactly as it did before.
 
 A news item may declare its own currency/instrument tags (the shape a real
 vendor usually publishes). When it does not, this module infers currency
@@ -30,6 +42,13 @@ from app.services.economic_intelligence import (
     is_metal_instrument,
     relevance_rank,
     symbol_currencies,
+)
+from app.services.instrument_intelligence import (
+    FundamentalDomain,
+    RelevanceKind,
+    factor_reason,
+    match_profile_domains,
+    profile_for,
 )
 
 # Documented keyword -> currency map used only when an item declares no
@@ -177,6 +196,63 @@ def classify_news_relevance(item: NewsItem, symbol: str) -> NewsRelevance:
             f"{', '.join(item_currencies)} is not a currency leg of {upper_symbol}; no relevance "
             "could be established from the item's references."
         ),
+    )
+
+
+class InstrumentRelevance(NamedTuple):
+    """Factual relatedness of one news item to one instrument (graded).
+
+    ``kind``/``domains`` explain *how* the item reaches the instrument and are
+    empty when the profile had nothing to say and the symbol-string view decided
+    instead. Nothing in here is a score, a probability or a direction.
+    """
+
+    symbol: str
+    level: RelevanceLevel
+    kind: RelevanceKind | None
+    domains: tuple[FundamentalDomain, ...]
+    reason: str
+
+
+def classify_instrument_relevance(item: NewsItem, symbol: str) -> InstrumentRelevance:
+    """Classify one item against one instrument through its fundamental profile.
+
+    The instrument-aware view: the item does NOT have to name the instrument. Its
+    title is matched against the instrument's documented factor vocabulary, which
+    yields both the level (DIRECT -> RELEVANT; MACRO/INDIRECT ->
+    POTENTIALLY_RELEVANT) and the transmission kind that explains it. When the
+    instrument has no profile, or its profile matches nothing, the symbol-string
+    view (``classify_news_relevance``) decides, so an instrument without a profile
+    keeps its previous behaviour exactly.
+    """
+    upper_symbol = symbol.strip().upper()
+    profile = profile_for(upper_symbol)
+    if profile is not None:
+        match = match_profile_domains(profile, item.title)
+        if match is not None:
+            level = (
+                RelevanceLevel.RELEVANT
+                if match.kind is RelevanceKind.DIRECT
+                else RelevanceLevel.POTENTIALLY_RELEVANT
+            )
+            return InstrumentRelevance(
+                symbol=upper_symbol,
+                level=level,
+                kind=match.kind,
+                domains=match.domains,
+                reason=factor_reason(
+                    match.kind, match.domains, upper_symbol, subject="The item"
+                ),
+            )
+
+    # No profile (or no documented factor in the item): the symbol-string view.
+    symbol_view = classify_news_relevance(item, upper_symbol)
+    return InstrumentRelevance(
+        symbol=upper_symbol,
+        level=symbol_view.relevance,
+        kind=None,
+        domains=(),
+        reason=symbol_view.reason,
     )
 
 

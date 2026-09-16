@@ -634,6 +634,22 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     only, a production slot that refuses until a real vendor is registered, and
     the same generic 503 for every unusable selection instead of degrading to
     another source (Step 46)
+28. Instrument-aware fundamental relevance (Step 48): one shared domain
+    vocabulary (app/services/instrument_intelligence/domains.py) used by BOTH the
+    calendar and news relevance layers, and static instrument fundamental
+    profiles (profiles.py) stating which factors reach an instrument and how —
+    DIRECT (the instrument's own underlying asset or market), MACRO (a documented
+    broad factor) or INDIRECT (a documented transmission) — for XAUUSD, USOIL/WTI
+    and NASDAQ-100; a DIRECT match is the only route to the strongest level
+    RELEVANT, macro/indirect matches are POTENTIALLY_RELEVANT, and an instrument
+    with no profile keeps the previous symbol-string behaviour exactly. Focus
+    detection gained explicit instrument names (USOIL/WTI/NAS100/NASDAQ/US100/
+    USTEC) while commodity words stay refused, position exposures now name the
+    factors their drivers matched, and the agent prompt states the relationship
+    and factor for a profile-classified item. Still fully deterministic (no score,
+    no sentiment model, no learned matching, no LLM, no new provider, no schema
+    change), and the calendar layer's currency-scoped LEVEL contract is unchanged
+    for symbols that have a currency leg (CURRENT_CHECKPOINT.md known issues 17-19)
 27. Alpha Vantage as the real development news source (Step 47A): a NewsProvider
     implementation behind the Step 47 contract (one bounded NEWS_SENTIMENT query
     per call, the half-open UTC window sent to the vendor and re-applied locally,

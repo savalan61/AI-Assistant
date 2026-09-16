@@ -733,7 +733,11 @@ def test_fundamental_intelligence_uses_the_existing_relevance_for_the_real_feed(
     assert context.news_data_source == "alphavantage-free-development"
     assert len(context.news) == 1
     entry = context.news[0]
-    assert entry.relevance is RelevanceLevel.POTENTIALLY_RELEVANT
+    # Step 48 grades a DIRECT asset match (gold IS XAUUSD's own underlying asset)
+    # as the strongest level, through the same deterministic mapping and still
+    # with no vendor sentiment involved - that graded level is the documented
+    # Step 48 change, not a change to how the item is mapped.
+    assert entry.relevance is RelevanceLevel.RELEVANT
     assert "XAUUSD" in entry.matched_instruments
     assert entry.reason
     # The same contract as before: positions still carry a factual exposure.

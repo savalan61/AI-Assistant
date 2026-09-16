@@ -14,9 +14,16 @@ nothing else. It does NOT guess an instrument from a topic:
   qualify and a suffix variant is never invented;
 * a single-token token such as ``USD`` does not qualify: a currency is not an
   instrument, and matching one would add a currency to the instruments in play;
-* a word like ``gold`` does not qualify either: mapping a commodity name to a
-  specific broker symbol would be a guess, and the calendar/news relevance layer
-  already covers the metal through the XAU/USD legs of the symbols actually held.
+* a word like ``gold`` does not qualify: mapping a commodity name to a specific
+  broker symbol would be a guess, and the relevance layer already covers the
+  metal through the instrument's documented fundamental profile.
+
+Step 48 adds one narrow extension for instruments the currency rule cannot
+express at all, such as an index CFD: a token that IS an explicit instrument name
+(``USOIL``, ``WTI``, ``NAS100``, ``NASDAQ``, declared by an instrument profile) is
+accepted and reported under the profile's canonical symbol. Commodity words and
+bare currencies are still refused, so a topic word can never silently become the
+user's instrument.
 
 Detection is a LABEL, never a scope decision: the caller's tenant identity and
 the positions it may see still come only from the authenticated user, so a
@@ -26,6 +33,7 @@ import re
 from typing import Final
 
 from app.services.economic_intelligence import symbol_currencies
+from app.services.instrument_intelligence import focus_symbol_for_token
 
 # Runs of letters/digits. Punctuation, spaces and symbols separate candidates,
 # so a MT5-style name written as "XAUUSD.r" still yields "XAUUSD".
@@ -46,17 +54,23 @@ def _qualifies(token: str) -> bool:
 def detect_focus_symbols(text: str, limit: int = 1) -> tuple[str, ...]:
     """Instrument tokens named in ``text``, in first-appearance order.
 
-    Deterministic and side-effect free: the same text always yields the same
-    tuple. The result is deduplicated, and ``limit`` bounds it (the agent only
-    ever needs the instrument the question is about).
+    Two deterministic rules, in one pass: a token built entirely from known
+    currency/metal tokens is taken as written (``XAUUSD``), and a token that is an
+    explicit instrument name from an instrument profile is reported under that
+    profile's canonical symbol (``WTI`` -> ``USOIL``). The result is
+    deduplicated, and ``limit`` bounds it (the agent only ever needs the
+    instrument the question is about).
     """
     if limit < 1:
         raise ValueError("limit must be at least 1")
     found: list[str] = []
     for candidate in _TOKEN_RE.findall(text):
-        if not _qualifies(candidate):
-            continue
-        symbol = candidate.upper()
+        if _qualifies(candidate):
+            symbol = candidate.upper()
+        else:
+            symbol = focus_symbol_for_token(candidate)
+            if symbol is None:
+                continue
         if symbol not in found:
             found.append(symbol)
         if len(found) >= limit:

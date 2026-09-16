@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY — this checkpoint)
+Step 48 — Instrument-Aware Fundamental Relevance (this checkpoint)
++ Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY)
 + Step 47 — News & Fundamental Intelligence
 + Step 46 — Explicit Economic-Calendar Source Configuration
 + Step 45 — Economic Intelligence in the Agent Pipeline
@@ -20,6 +21,7 @@ Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY — this checkpoin
 
 Status:
 
+Step 48: VERIFIED (implementation, tests and documentation; committed together by the Step 48 commit "feat(fundamental): generalize instrument-aware relevance"; local, not pushed)
 Step 47A: VERIFIED + COMMITTED (e434659 — "feat(news): add Alpha Vantage development source" + its checkpoint-status commit; local, not pushed)
 Step 47: VERIFIED + COMMITTED (c44953d — "feat(fundamental): add news and fundamental intelligence" + its checkpoint-status commit; local, not pushed)
 Step 46: VERIFIED + COMMITTED (ebbb86b — "feat(calendar): add explicit source configuration")
@@ -31,7 +33,17 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
-Step 47A (the Alpha Vantage development news source: the NewsProvider
+Step 48 (instrument-aware fundamental relevance: the shared domain vocabulary and
+instrument profiles under app/services/instrument_intelligence, the graded
+per-instrument classification in the news and calendar relevance layers, the
+profile-based calendar rule for symbols with no currency leg, the exposure factor
+attribution, the prompt's factor rendering and the new test modules) — the change
+set this checkpoint describes — is implemented, verified and committed as ONE
+focused commit ("feat(fundamental): generalize instrument-aware relevance") that
+carries the implementation, the tests and this documentation together, on the
+instruction that Step 48 be a single commit; no separate checkpoint-status commit
+follows it, so this document records the state rather than a hash.
+Before it, Step 47A (the Alpha Vantage development news source: the NewsProvider
 implementation behind the Step 47 contract, the explicit alphavantage source
 option, the environment matrix, the key-redaction measure and the single live
 smoke request) — the change set this checkpoint describes — is implemented,
@@ -401,12 +413,14 @@ No database migration was needed — these values are not persisted.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 1213 passed, 2 warnings (both pre-existing third-party
+pytest tests/ -q → 1341 passed, 2 warnings (both pre-existing third-party
 deprecation warnings: the anyio BlockingPortal alias and the starlette
-testclient httpx notice); verified 2026-09-16 on this exact tree, after the
-Step 44, Step 45, Step 46, Step 47 and Step 47A work — and run with outbound
-networking hard-disabled, so the number also proves the suite reaches no network
-(neither Alpha Vantage nor anything else). Step 44 rewrote the QuantGist cases
+testclient httpx notice); the Step 47A figure of 1213 was re-verified on the
+tree BEFORE Step 48 with outbound networking hard-disabled, so it also proved
+the suite reached no network (neither Alpha Vantage nor anything else), and the
+Step 48 run was taken on this exact tree. Step 48 added the profile/vocabulary,
+instrument-relevance and multi-instrument-context modules (1213 → 1341) and made
+NO live API request of any kind. Step 44 rewrote the QuantGist cases
 against the verified live API and took the suite to 897; Step 45 added the
 agent/calendar composition (924); Step 46 added the source x environment matrix
 and the production-seam cases (948); Step 47 added the news provider/service,
@@ -437,11 +451,15 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-CLEAN — the Step 47A change set (the Alpha Vantage news provider, the
-alphavantage NEWS_SOURCE value and its matrix, the key-redaction measure, the new
-and extended tests, .env.example and the documentation) is committed by the Step
-47A commit and its checkpoint-status commit, so nothing from that change set is
-left modified, staged or uncommitted. The Step 47 change set (the news provider
+CLEAN — the Step 48 change set (the shared domain vocabulary and instrument
+profiles, the graded per-instrument news and calendar relevance, the
+no-currency-leg profile rule, the exposure factors, the prompt rendering and the
+three new test modules) is committed by the Step 48 commit, so nothing from that
+change set is left modified, staged or uncommitted. The Step 47A change set (the
+Alpha Vantage news provider, the alphavantage NEWS_SOURCE value and its matrix,
+the key-redaction measure, the new and extended tests, .env.example and the
+documentation) is committed by the Step 47A commit and its checkpoint-status
+commit. The Step 47 change set (the news provider
 contract, the deterministic development news source, the explicit NEWS_SOURCE
 selection, the fundamental intelligence service and its relevance/exposure layer,
 the GET /fundamental-intelligence/today endpoint, the agent prompt composition,
@@ -454,13 +472,14 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is ten commits ahead of it, none of them pushed:
+638f972, and local HEAD is eleven commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
 intelligence ahead of technical analysis), the two Step 47 commits (the
-implementation and its checkpoint-status record) and the two Step 47A commits
-(the Alpha Vantage development source and this checkpoint-status record).
+implementation and its checkpoint-status record), the two Step 47A commits (the
+Alpha Vantage development source and its checkpoint-status record) and the
+Step 48 commit (instrument-aware fundamental relevance).
 
 ## Completed Stages
 
@@ -1293,6 +1312,91 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
+### Step 48 — Instrument-Aware Fundamental Relevance (READ-ONLY)
+Status: VERIFIED + COMMITTED (the Step 48 commit "feat(fundamental): generalize
+instrument-aware relevance"; one focused commit per instruction, so no separate
+hash-recording commit follows it)
+
+Answers the question the product actually needs — not "is this article about
+XAUUSD?" but "is this factual item/event about a fundamental factor that can
+reach this instrument?" — without a numeric score, a sentiment model, a learning
+step, a new provider, a database table or an LLM call.
+
+Includes:
+
+- app/services/instrument_intelligence/ (NEW, a leaf package: it imports nothing
+  from the intelligence layers, so both can depend on one vocabulary without an
+  import cycle):
+  - domains.py — the shared fundamental-factor vocabulary. Twelve domains
+    (precious metals, crude oil, energy supply, the US dollar, monetary policy,
+    inflation, labor market and growth, rates and yields, geopolitical risk,
+    technology sector, major technology companies, trade and tariffs), each with
+    a human label and a whole-word/phrase keyword list; text is normalized
+    (lower-case, hyphens treated as spaces) before matching, results come back in
+    table order, and a match reports which keyword matched.
+  - profiles.py — RelevanceKind (DIRECT / MACRO / INDIRECT) and the static
+    instrument profiles: XAUUSD (direct: precious metals; macro: monetary policy,
+    inflation, labor/growth, rates/yields, the dollar; indirect: geopolitical
+    risk, crude oil, energy supply, trade/tariffs), USOIL/WTI (direct: crude oil,
+    energy supply, geopolitical risk; macro: growth, policy, inflation, the
+    dollar; indirect: rates/yields, trade/tariffs) and NASDAQ-100 (direct:
+    technology sector, major technology companies, trade/tariffs; macro: policy,
+    inflation, growth, rates/yields; indirect: energy supply, crude oil,
+    geopolitical risk, the dollar). Each profile declares its symbol roots
+    (prefix match, so XAUUSD.r / USOIL.cash / NAS100.i resolve), its canonical
+    label and the explicit instrument names a question may contain.
+- app/services/fundamental_intelligence/relevance.py: ``classify_instrument_relevance``
+  grades one item against one instrument through its profile — a DIRECT match is
+  RELEVANT, a MACRO or INDIRECT transmission is POTENTIALLY_RELEVANT — and
+  returns the kind, the matched domains and a factual reason naming both. With no
+  profile, or when the profile matches nothing, the Step 47 symbol-string
+  classifier decides, so EURUSD/US30/any unprofiled instrument behaves exactly as
+  before (the declared-tag path deliberately keeps its conservative level: a
+  vendor tag is a labelling claim, not evidence about the underlying asset).
+- app/services/economic_intelligence/relevance.py: the calendar layer now uses the
+  SAME vocabulary. For a symbol with a currency leg the currency-scoped level
+  contract is untouched and the profile only attributes the factor ("FOMC Rate
+  Decision" and "Fed officials signal fewer rate cuts" resolve to the same
+  monetary-policy domain); for a symbol with NO currency leg (an index CFD) the
+  profile decides instead of the old "cannot be established" verdict, which is the
+  only route by which a calendar classification may assert RELEVANT.
+- app/services/fundamental_intelligence/fundamental_intelligence_service.py: each
+  news item carries its per-instrument classification (so one item can be
+  RELEVANT to USOIL and POTENTIALLY_RELEVANT to XAUUSD), matched instruments are
+  derived from the per-instrument levels, and each position exposure gains
+  ``factors`` — the documented subject areas its own drivers matched, in
+  vocabulary order — stated in the human-readable reason. Exposure for a symbol
+  with no currency leg is now KNOWN when its profile found drivers (and still
+  UNKNOWN with the unchanged reason when the symbol has neither a currency leg nor
+  a profile, or when nothing could be assessed).
+- app/services/fundamental_intelligence/focus.py: focus detection gains explicit
+  instrument names (USOIL, WTI, XTIUSD, OILUSD, NASDAQ, NAS100, US100, USTEC,
+  reported under the profile's canonical symbol). Commodity words and bare
+  currencies are still refused, so "what is happening with gold/oil/USD" never
+  becomes an instrument by accident.
+- app/services/agent/prompt.py: a news line whose relevance came from a profile
+  states the relationship, scope and factor — "(direct factor for XAUUSD:
+  precious metals)" — so the model can explain WHY an item matters instead of
+  guessing from keywords; an item classified by the symbol view renders exactly as
+  before. No contract field was added to any HTTP response.
+- tests: tests/test_instrument_profiles.py (58), tests/test_instrument_relevance.py
+  (43) and tests/test_fundamental_multi_instrument.py (27) — the 22-scenario matrix
+  (XAUUSD, USOIL, NASDAQ), the cross-instrument negatives, multi-domain matches,
+  whole-word/hyphen determinism, the direction-free vocabulary, the shared
+  calendar/news domain, the no-currency-leg rule, one item at different levels per
+  instrument, the integrated multi-instrument context with driver ids and
+  provenance, the realistic user questions and the prompt's factor rendering.
+- ONE pre-existing assertion updated (tests/test_alphavantage_news.py): the Step
+  47A test that pinned the real feed's gold headline at POTENTIALLY_RELEVANT now
+  expects RELEVANT, because Step 48 deliberately grades a DIRECT asset match as
+  the strongest level. The test's intent (the deterministic mapping reaches
+  XAUUSD, with no sentiment involved) is unchanged.
+
+No provider, API, dependency, configuration, schema, migration or trading file
+changed: this step is purely the intelligence/relevance layer, so Alpha Vantage
+and every other provider is untouched and no live API request was made.
+
+
 ### Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY)
 Status: VERIFIED + COMMITTED (e434659)
 
@@ -2123,8 +2227,10 @@ FundamentalIntelligenceService (app/services/fundamental_intelligence/)
     │       └── FakeNewsProvider (deterministic development/test source)
     │           (no production news vendor; the production slot refuses 503)
     ├── deterministic news relevance (the existing calendar classifier's
-    │   vocabulary and metal/currency-leg rules — not a parallel mechanism)
+    │   symbol-string rules, extended since Step 48 by the shared domain
+    │   vocabulary + the instrument's fundamental profile — one mechanism)
     └── position exposure from the positions the calendar context already read
+        (since Step 48 each exposure names the fundamental factors it matched)
     ↓
 FundamentalContext (facts + provenance + relevance + exposure + UNKNOWN)
 
@@ -2741,6 +2847,23 @@ DELETE /users/{user_id} (super_admin only):
   with Decimal(str(...)); account margin_level and candle tick volume
   intentionally remain float. API JSON still exposes numbers, not strings, via
   the shared DecimalAsNumber serializer.
+- Instrument-aware fundamental relevance (Step 48) exists and is deterministic:
+  one shared domain vocabulary (app/services/instrument_intelligence/domains.py)
+  is used by BOTH the calendar and news relevance layers, and a static,
+  vendor-independent instrument profile states which factors reach an instrument
+  and how (direct / macro / indirect transmission). Profiles exist for XAUUSD,
+  USOIL/WTI and NASDAQ-100 (NAS100/NASDAQ/US100/USTEC/NDX); an instrument without
+  a profile keeps the previous symbol-string behaviour exactly. A DIRECT profile
+  match (the instrument's own underlying asset or market) is the only route to
+  the strongest level RELEVANT; macro and indirect matches are
+  POTENTIALLY_RELEVANT; nothing matched stays NOT_OBVIOUSLY_RELEVANT. Relevance is
+  still a discrete category with a factual explanation (factor + relationship),
+  never a score, a direction or a probability, and the LLM never decides it.
+- The calendar layer's currency scoping is unchanged for symbols that have a
+  currency leg (a JPY event is still not escalated against a gold position); the
+  profile explains which factor such an event concerns. For a symbol with NO
+  currency leg (an index CFD), the profile is used instead of the previous
+  "cannot be established" verdict, so US CPI now reaches NAS100.
 - Steps 18–47, the role-migration ordering fix, the development user seed and
   the trade-history field fix are committed (latest: the Step 47 implementation
   and its checkpoint-status commit, which follow the roadmap commits 94b1858 and
@@ -2906,7 +3029,31 @@ This limitation must be reported rather than hidden.
     deliberate product decision that Step 47A did not take, because both choices
     change coverage and could drop a genuinely relevant headline. The adapter's
     `instruments` argument already maps to the vendor's ticker parameter, so the
-    mechanism exists; choosing the policy does not.
+    mechanism exists; choosing the policy does not. Step 48 does not change this:
+    relevance is never used to filter the feed, and an unrelated article is still
+    returned and labelled NOT_OBVIOUSLY_RELEVANT rather than dropped.
+17. Calendar relevance LEVELS remain currency-scoped for symbols that have a
+    currency leg. A JPY central-bank event is still NOT_OBVIOUSLY_RELEVANT to a
+    gold position even though monetary policy is a documented factor for gold;
+    Step 48 attributes the factor for events that already qualified but does not
+    broaden the escalation, because that contract is what the calendar layer's
+    tests pin. Only a symbol with NO currency leg (an index CFD) is now assessed
+    through its profile. Broadening the currency-scoped escalation is a
+    deliberate future product decision, not an oversight.
+18. The domain vocabulary and the instrument profiles are static, hand-maintained
+    tables: there is no learned or statistical matching, no synonym expansion
+    beyond the listed keywords, and the "major technology companies" list is a
+    fixed sample of large listed technology companies. An unusually phrased
+    headline can therefore miss a factor (a documented false-negative risk, never
+    a false positive by design). Extending coverage is a data edit in
+    app/services/instrument_intelligence/, not a code change, and no profile or
+    vocabulary value is customer-specific or persisted.
+19. Relevance levels are now graded by evidence strength, so RELEVANT can appear
+    on GET /fundamental-intelligence/today and GET /economic-intelligence/today
+    (it never did in Steps 45-47). No response field was added or removed — the
+    keyword sets and contract shapes are unchanged — but a consumer that assumed
+    "RELEVANT is never emitted" must accept it. The three discrete levels are
+    still the only values, and there is still no score anywhere.
 
 Resolved:
 
@@ -2958,27 +3105,35 @@ Steps 12–44, the role-migration ordering fix, the development user seed and th
 trade-history field fix are complete, committed and pushed (origin/master is
 638f972, Step 44).
 
-Step 47A (the Alpha Vantage development news source) is committed by the Step 47A
-implementation commit plus its checkpoint-status commit, which record the
-provider, the explicit alphavantage NEWS_SOURCE value, the environment matrix,
-the key-redaction measure, the new tests, .env.example and the documentation.
-Before them, Step 47 (news and fundamental intelligence) is committed by its
-implementation commit (c44953d) and its checkpoint-status commit, the roadmap
-commits (94b1858 and c84d334), Step 46 (ebbb86b and c95ae6c) and Step 45
-(b9785cb and 9ba0d95) are local: origin/master remains 638f972 until they are
-pushed, so the working tree is clean.
+Step 48 (instrument-aware fundamental relevance) is committed as one focused
+commit, which records the shared domain vocabulary, the three instrument
+profiles, the graded relevance in both intelligence layers, the no-currency-leg
+rule, the exposure factors, the prompt rendering, the new test modules and this
+documentation.
+Before it, Step 47A (the Alpha Vantage development news source) is committed by
+the Step 47A implementation commit plus its checkpoint-status commit, which
+record the provider, the explicit alphavantage NEWS_SOURCE value, the environment
+matrix, the key-redaction measure, the new tests, .env.example and the
+documentation. Before them, Step 47 (news and fundamental intelligence) is
+committed by its implementation commit (c44953d) and its checkpoint-status
+commit, the roadmap commits (94b1858 and c84d334), Step 46 (ebbb86b and c95ae6c)
+and Step 45 (b9785cb and 9ba0d95) are local: origin/master remains 638f972 until
+they are pushed, so the working tree is clean.
 
-The immediate next action is deliberately NOT fixed here: P1 now has a real
-development news source, so the next stage should be chosen explicitly. The
-current candidates are (a) deciding the development feed's coverage policy —
-narrow the Alpha Vantage request by topic/ticker, or filter locally by relevance
-— which is what would make the fundamental block XAUUSD-focused (known issue 16);
-(b) the remaining P1 surface (a portfolio/report level fundamental view and any
-additional channel-facing surface); (c) a real licensed production news vendor
-behind the existing NEWS_SOURCE production seam (known issue 15); (d) a real
-production economic-calendar vendor (known issue 9); and (e) the real free LLM
-providers. Per the roadmap, P2 (instrument catalog and multi-timeframe market
-data) comes after P1's fundamental capability is usable.
+The immediate next action is deliberately NOT fixed here. The current candidates
+are (a) deciding the development feed's coverage policy — narrow the Alpha
+Vantage request by topic/ticker, or filter locally by relevance, now that the
+profile layer can say which articles matter — which is what would make the
+fundamental block XAUUSD-focused (known issue 16); (b) the remaining P1 surface (a
+portfolio/report level fundamental view and any additional channel-facing
+surface, both of which the factor attribution now makes more useful); (c) a real
+licensed production news vendor behind the existing NEWS_SOURCE production seam
+(known issue 15); (d) a real production economic-calendar vendor (known issue 9);
+(e) broadening the currency-scoped calendar escalation to profile factors (known
+issue 17); and (f) the real free LLM providers. Per the roadmap, P2 (instrument
+catalog and multi-timeframe market data) comes after P1's fundamental capability
+is usable — note that the static profiles here are deliberately NOT that catalog:
+P2 adds the traded-instrument catalog, this step adds the relevance vocabulary.
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:

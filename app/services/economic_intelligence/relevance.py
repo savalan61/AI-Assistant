@@ -19,19 +19,35 @@ How relevance is decided (pure symbol-string analysis, no market data call):
    funding currency, so major US data can affect broader FX conditions. Lower
    impact USD events are deliberately not escalated.
 4. NOT_OBVIOUSLY_RELEVANT otherwise (including symbols with no identifiable
-   currency leg, such as index products).
+   currency leg AND no profile, such as a broker's own index alias).
 
-RELEVANT is intentionally never asserted by this mechanism: a symbol string
-alone cannot evidence a direct instrument-level link. That level exists in the
-contract for a future instrument catalog that names the exact traded asset; the
-current classifier caps its assertions at POTENTIALLY_RELEVANT rather than
-overstating certainty.
+Step 48 adds one deliberate extension for symbols the currency rule cannot reach
+at all (an index CFD has no currency leg, so "no relevance can be established"
+was the previous verdict for every event, including US CPI). When a symbol has no
+currency leg, its **instrument fundamental profile** is used instead: an event
+whose title resolves to a factor the instrument is documented to be exposed to
+is classified through the same shared domain vocabulary the news layer uses, with
+a DIRECT factor able to reach RELEVANT. For a symbol that DOES have a currency
+leg, the currency-scoped contract above stays authoritative and the profile only
+*explains* the match (domain attribution), because a symbol string plus an event
+currency is evidence of a currency relationship, not of a direct asset link.
+
+RELEVANT is therefore only ever asserted from a documented profile factor match,
+never from a symbol string alone; the currency-only path still caps its
+assertions at POTENTIALLY_RELEVANT rather than overstating certainty.
 """
 from enum import StrEnum
 from typing import NamedTuple
 
 from app.providers.economic_calendar import EconomicEvent, EventImpact
 from app.providers.position import Position, PositionType
+from app.services.instrument_intelligence import (
+    FundamentalDomain,
+    RelevanceKind,
+    factor_reason,
+    match_profile_domains,
+    profile_for,
+)
 
 
 class RelevanceLevel(StrEnum):
@@ -95,13 +111,21 @@ _METAL_TOKENS = frozenset({"XAU", "XAG", "XPT", "XPD"})
 
 
 class PositionRelevance(NamedTuple):
-    """Factual relatedness of one economic event to one open position."""
+    """Factual relatedness of one economic event to one open position.
+
+    ``kind``/``domains`` (Step 48) carry the fundamental-factor attribution when
+    the event's title matched the position's documented profile. Both are
+    defaulted, so every existing construction keeps working and the HTTP contract
+    of GET /economic-intelligence/today is unchanged.
+    """
 
     ticket: int
     symbol: str
     type: PositionType
     relevance: RelevanceLevel
     reason: str
+    kind: RelevanceKind | None = None
+    domains: tuple[FundamentalDomain, ...] = ()
 
 
 def symbol_currencies(symbol: str) -> tuple[str, ...]:
@@ -128,13 +152,66 @@ def is_metal_instrument(symbol: str) -> bool:
     return bool(currencies) and currencies[0] in _METAL_TOKENS
 
 
-def _result(position: Position, level: RelevanceLevel, reason: str) -> PositionRelevance:
+def _result(
+    position: Position,
+    level: RelevanceLevel,
+    reason: str,
+    kind: RelevanceKind | None = None,
+    domains: tuple[FundamentalDomain, ...] = (),
+) -> PositionRelevance:
     return PositionRelevance(
         ticket=position.ticket,
         symbol=position.symbol,
         type=position.type,
         relevance=level,
         reason=reason,
+        kind=kind,
+        domains=domains,
+    )
+
+
+def _profile_match(
+    symbol: str, event: EconomicEvent
+) -> tuple[RelevanceKind, tuple[FundamentalDomain, ...]] | None:
+    """How this event reaches ``symbol`` through its documented profile, if at all.
+
+    Attribution only: it says WHICH fundamental factor the event concerns for this
+    instrument, using the same domain vocabulary the news layer uses. It never
+    creates a relevance level on the currency path (see the module docstring).
+    """
+    profile = profile_for(symbol)
+    if profile is None:
+        return None
+    match = match_profile_domains(profile, event.title)
+    return None if match is None else (match.kind, match.domains)
+
+
+def _profile_factor_sentence(
+    symbol: str, kind: RelevanceKind, domains: tuple[FundamentalDomain, ...]
+) -> str:
+    """The factual domain attribution appended to a currency-leg reason."""
+    return " " + factor_reason(kind, domains, symbol, subject="The event")
+
+
+def _currency_qualified(
+    position: Position, event: EconomicEvent, reason: str
+) -> PositionRelevance:
+    """A currency-qualified match, plus its documented factor when one applies.
+
+    The level is the currency contract's POTENTIALLY_RELEVANT either way: the
+    profile only adds the factual attribution that says WHICH factor the event
+    concerns for this instrument.
+    """
+    match = _profile_match(position.symbol, event)
+    if match is None:
+        return _result(position, RelevanceLevel.POTENTIALLY_RELEVANT, reason)
+    kind, domains = match
+    return _result(
+        position,
+        RelevanceLevel.POTENTIALLY_RELEVANT,
+        reason + _profile_factor_sentence(position.symbol, kind, domains),
+        kind,
+        domains,
     )
 
 
@@ -144,6 +221,22 @@ def classify_relevance(event: EconomicEvent, position: Position) -> PositionRele
     event_currency = event.currency.upper()
 
     if not currencies:
+        # No currency leg at all: the instrument's documented fundamental profile
+        # is the only evidence available, so it decides instead of a verdict that
+        # no instrument-level link can exist.
+        match = _profile_match(position.symbol, event)
+        if match is not None:
+            kind, domains = match
+            level = (
+                RelevanceLevel.RELEVANT
+                if kind is RelevanceKind.DIRECT
+                else RelevanceLevel.POTENTIALLY_RELEVANT
+            )
+            reason = (
+                f"No currency leg could be identified in {position.symbol}, so its documented "
+                "fundamental profile is used instead: "
+            ) + factor_reason(kind, domains, position.symbol, subject="the event")
+            return _result(position, level, reason, kind, domains)
         return _result(
             position,
             RelevanceLevel.NOT_OBVIOUSLY_RELEVANT,
@@ -152,6 +245,7 @@ def classify_relevance(event: EconomicEvent, position: Position) -> PositionRele
         )
 
     base = currencies[0]
+
     if event_currency in currencies:
         if event_currency == base and base in _METAL_TOKENS:
             reason = (
@@ -173,7 +267,7 @@ def classify_relevance(event: EconomicEvent, position: Position) -> PositionRele
                 f"{event_currency} is the quote currency of {position.symbol}; the event is tied to "
                 "the instrument's quote-currency exposure."
             )
-        return _result(position, RelevanceLevel.POTENTIALLY_RELEVANT, reason)
+        return _currency_qualified(position, event, reason)
 
     if event_currency == "USD" and event.impact is EventImpact.HIGH:
         reason = (
@@ -181,7 +275,7 @@ def classify_relevance(event: EconomicEvent, position: Position) -> PositionRele
             f"broader FX conditions even though USD is not a leg of {position.symbol} "
             "(potential linkage only)."
         )
-        return _result(position, RelevanceLevel.POTENTIALLY_RELEVANT, reason)
+        return _currency_qualified(position, event, reason)
 
     reason = (
         f"{event_currency} is not a currency leg of {position.symbol}; no relevance could be "

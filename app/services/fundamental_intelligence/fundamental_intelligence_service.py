@@ -11,12 +11,20 @@ can reason over:
   "unavailable" state when a deployment has no news source);
 * the caller's own open positions, taken from that same economic context.
 
+Relevance is decided per instrument through that instrument's documented
+fundamental profile (Step 48, app/services/instrument_intelligence), so an item
+that never names the instrument can still be related to it — and can be related
+at different levels to different instruments in play. Each item therefore carries
+its per-instrument classification, and each exposure names the factors today's
+drivers matched for it.
+
 Everything it produces is a FACT: timestamps, source, publisher, provenance,
-discrete relevance levels and factual exposure. It never produces a forecast, a
-probability, a direction, a target or a recommendation, and it never interprets
-missing data as an absence of risk — an exposure that cannot be established is
-reported as ``UNKNOWN`` with the reason. Interpretation is the LLM answer
-layer's job, on top of this labelled context (see the agent prompt builder).
+discrete relevance levels, matched subject areas and factual exposure. It never
+produces a forecast, a probability, a direction, a target or a recommendation,
+and it never interprets missing data as an absence of risk — an exposure that
+cannot be established is reported as ``UNKNOWN`` with the reason. Interpretation
+is the LLM answer layer's job, on top of this labelled context (see the agent
+prompt builder).
 
 Window semantics: the context reuses the calendar context's ``as_of`` and
 half-open ``[window_from, window_to)`` window, so "today" can never differ
@@ -35,8 +43,16 @@ from app.services.economic_intelligence import (
     symbol_currencies,
 )
 from app.services.fundamental_intelligence.relevance import (
-    classify_news_relevance,
+    InstrumentRelevance,
+    classify_instrument_relevance,
     strongest_level,
+)
+from app.services.instrument_intelligence import (
+    FundamentalDomain,
+    RelevanceKind,
+    domain_labels,
+    order_domains,
+    profile_for,
 )
 from app.services.news import NewsService
 
@@ -56,16 +72,34 @@ class ExposureStatus(StrEnum):
 
 
 class FundamentalNewsItem(NamedTuple):
-    """One news item plus its deterministic relevance to the instruments in play."""
+    """One news item plus its deterministic relevance to the instruments in play.
+
+    ``relevance``/``reason``/``kind``/``domains`` describe the STRONGEST match
+    across the instruments in play; ``matches`` carries the per-instrument
+    classification, so the same item can be RELEVANT to one instrument and only
+    POTENTIALLY_RELEVANT (or not obviously relevant) to another. The last three
+    fields are defaulted so existing constructions keep working.
+    """
 
     item: NewsItem
     relevance: RelevanceLevel
     reason: str
     matched_instruments: tuple[str, ...]
+    kind: RelevanceKind | None = None
+    domains: tuple[FundamentalDomain, ...] = ()
+    matches: tuple[InstrumentRelevance, ...] = ()
 
 
 class PositionFundamentalExposure(NamedTuple):
-    """Factual fundamental exposure of one open position (never advice)."""
+    """Factual fundamental exposure of one open position (never advice).
+
+    ``factors`` (Step 48) names the documented fundamental factors today's
+    calendar events and news items matched for this position, in the shared
+    vocabulary's order. It is a list of subject areas, never a direction, and it
+    is defaulted so existing constructions keep working; the HTTP contract of
+    GET /fundamental-intelligence/today is unchanged (the factors are stated in
+    ``reason``).
+    """
 
     ticket: int
     symbol: str
@@ -76,6 +110,7 @@ class PositionFundamentalExposure(NamedTuple):
     reason: str
     calendar_event_ids: tuple[str, ...]
     news_item_ids: tuple[str, ...]
+    factors: tuple[str, ...] = ()
 
 
 class FundamentalContext(NamedTuple):
@@ -105,24 +140,39 @@ def _normalize_symbol(symbol: str | None) -> str | None:
 
 
 def _news_intelligence(item: NewsItem, instruments: tuple[str, ...]) -> FundamentalNewsItem:
-    """Classify one item against every instrument in play."""
-    relevances = tuple(classify_news_relevance(item, symbol) for symbol in instruments)
-    levels = tuple(relevance.relevance for relevance in relevances)
-    level = strongest_level(levels)
+    """Classify one item against every instrument in play.
+
+    Each instrument is classified through its own documented fundamental profile,
+    so an item that never names an instrument can still be relevant - and can be
+    relevant at different levels to different instruments.
+    """
+    matches = tuple(classify_instrument_relevance(item, symbol) for symbol in instruments)
+    level = strongest_level(tuple(match.level for match in matches))
+    # Every instrument an item is related to at all (the strongest match may be
+    # "not obviously relevant", in which case nothing matched).
     matched = tuple(
-        symbol
-        for symbol, relevance in zip(instruments, relevances, strict=True)
-        if relevance.relevance is RelevanceLevel.POTENTIALLY_RELEVANT
+        match.symbol for match in matches if match.level is not RelevanceLevel.NOT_OBVIOUSLY_RELEVANT
     )
-    reason = next(
-        (relevance.reason for relevance in relevances if relevance.relevance is level),
-        "No instrument in play is referenced by this item.",
-    )
+    strongest = next((match for match in matches if match.level is level), None)
+    if not matched:
+        # Nothing anywhere: state that once, instead of reporting one arbitrary
+        # instrument's per-instrument verdict as if it were the item's summary.
+        reason = (
+            "No documented fundamental factor or instrument reference was found for any "
+            "instrument in play."
+        )
+    elif strongest is not None:
+        reason = strongest.reason
+    else:  # pragma: no cover - defensive: a related item always has a strongest match
+        reason = "No instrument in play is referenced by this item."
     return FundamentalNewsItem(
         item=item,
         relevance=level,
         reason=reason,
         matched_instruments=matched,
+        kind=strongest.kind if strongest is not None else None,
+        domains=strongest.domains if strongest is not None else (),
+        matches=matches,
     )
 
 
@@ -151,16 +201,59 @@ def _calendar_level(calendar: EconomicIntelligenceContext, ticket: int) -> Relev
     )
 
 
+def _symbol_match(entry: FundamentalNewsItem, symbol: str) -> InstrumentRelevance | None:
+    """This instrument's own classification of one item, if it has one."""
+    return next((match for match in entry.matches if match.symbol == symbol), None)
+
+
 def _news_driver_ids(news: tuple[FundamentalNewsItem, ...], symbol: str) -> tuple[str, ...]:
-    """News item ids this instrument's symbol is matched to."""
-    return tuple(sorted(entry.item.item_id for entry in news if symbol in entry.matched_instruments))
+    """News item ids this instrument's symbol is related to."""
+    return tuple(
+        sorted(
+            entry.item.item_id
+            for entry in news
+            if (match := _symbol_match(entry, symbol)) is not None
+            and match.level is not RelevanceLevel.NOT_OBVIOUSLY_RELEVANT
+        )
+    )
 
 
 def _news_level(news: tuple[FundamentalNewsItem, ...], symbol: str) -> RelevanceLevel:
     """Strongest news relevance for this symbol (nothing matched: not obvious)."""
     return strongest_level(
-        tuple(entry.relevance for entry in news if symbol in entry.matched_instruments)
+        tuple(
+            match.level
+            for entry in news
+            if (match := _symbol_match(entry, symbol)) is not None
+        )
     )
+
+
+def _exposure_factors(
+    calendar: EconomicIntelligenceContext,
+    news: tuple[FundamentalNewsItem, ...],
+    position: Position,
+) -> tuple[str, ...]:
+    """The documented fundamental factors today's drivers matched for a position.
+
+    Calendar attribution comes from the position's own relevance records (which
+    carry the domains the shared vocabulary matched), news attribution from the
+    instrument's own per-instrument match. Only factors from drivers that were
+    actually related are reported, and they are returned in the vocabulary's
+    order, so the same inputs always produce the same list.
+    """
+    domains: tuple[FundamentalDomain, ...] = ()
+    for item in calendar.events:
+        for relevance in item.positions:
+            if relevance.ticket == position.ticket and (
+                relevance.relevance is not RelevanceLevel.NOT_OBVIOUSLY_RELEVANT
+            ):
+                domains += relevance.domains
+    for entry in news:
+        match = _symbol_match(entry, position.symbol)
+        if match is not None and match.level is not RelevanceLevel.NOT_OBVIOUSLY_RELEVANT:
+            domains += match.domains
+    return domain_labels(order_domains(domains))
 
 
 def _exposure(
@@ -172,14 +265,16 @@ def _exposure(
     """Factual exposure of one position; UNKNOWN whenever it cannot be established."""
     calendar_ids = _calendar_driver_ids(calendar, position.ticket)
     news_ids = _news_driver_ids(news, position.symbol)
+    factors = _exposure_factors(calendar, news, position)
     relevance = strongest_level(
         (_calendar_level(calendar, position.ticket), _news_level(news, position.symbol))
     )
 
-    if not symbol_currencies(position.symbol):
-        # A symbol with no identifiable currency leg cannot be related to
-        # currency/commodity drivers at all: that is missing information, not
-        # an absence of risk.
+    if not symbol_currencies(position.symbol) and profile_for(position.symbol) is None:
+        # No currency leg AND no documented fundamental profile: nothing this
+        # layer can relate the symbol to at all. That is missing information, not
+        # an absence of risk. (A symbol whose profile is known is assessed
+        # through it instead - see the reason below.)
         return PositionFundamentalExposure(
             ticket=position.ticket,
             symbol=position.symbol,
@@ -220,6 +315,15 @@ def _exposure(
     )
     if not news_available:
         reason += " No news source is configured, so news drivers could not be assessed."
+    if not symbol_currencies(position.symbol):
+        reason += (
+            " The symbol has no currency leg, so its documented fundamental profile was used "
+            "to identify them."
+        )
+    if factors:
+        # Names the subject areas the drivers matched, never a direction: this is
+        # what makes the classification explainable to a reader and to the model.
+        reason += f" Relevant fundamental factors: {', '.join(factors)}."
     return PositionFundamentalExposure(
         ticket=position.ticket,
         symbol=position.symbol,
@@ -230,6 +334,7 @@ def _exposure(
         reason=reason,
         calendar_event_ids=calendar_ids,
         news_item_ids=news_ids,
+        factors=factors,
     )
 
 

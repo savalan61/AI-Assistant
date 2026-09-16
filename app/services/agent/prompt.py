@@ -23,7 +23,12 @@ Six deliberate restrictions on what is sent:
   block is labelled as source facts so the model can see where material ends and
   its own interpretation begins, an unavailable news source is stated as
   unavailable rather than as "no news", and UNKNOWN exposure is rendered as
-  UNKNOWN (missing information is never presented as an absence of risk);
+  UNKNOWN (missing information is never presented as an absence of risk). Since
+  Step 48 an item whose relevance came from the instrument's documented
+  fundamental profile also states the relationship and the factor ("direct
+  factor: precious metals"), so the model can explain WHY an item matters to an
+  instrument instead of guessing from keywords; items classified by the older
+  symbol-string view render exactly as before;
 * account identity is omitted (login, holder name, server, account number).
   The model needs the numbers, not the identifiers, so unnecessary personal
   data is not shipped to an external service. This is structural, not a switch;
@@ -45,7 +50,8 @@ from app.providers.trade_history import TradeHistoryEntry
 from app.services.agent.egress import OutboundDataPolicy
 from app.services.economic_intelligence import EconomicIntelligenceContext
 from app.services.financial_context import FinancialContext
-from app.services.fundamental_intelligence import FundamentalContext
+from app.services.fundamental_intelligence import FundamentalContext, FundamentalNewsItem
+from app.services.instrument_intelligence import domain_labels
 from app.services.portfolio_intelligence import SymbolExposure
 
 # System-side framing. Read-only and conservative by construction: the model is
@@ -208,6 +214,26 @@ def _bounded_summary(summary: str) -> str:
     return summary[:_PROMPT_SUMMARY_CHARS] + _TRUNCATED
 
 
+def _factor_note(entry: FundamentalNewsItem) -> str:
+    """The matched relationship, scope and factor for an item, when there is one.
+
+    Only items classified through an instrument's documented fundamental profile
+    carry a kind and domains (Step 48); an item classified by the older
+    symbol-string view renders exactly as it did before, and the note is bounded
+    by the vocabulary's own label list rather than by any free text. The scope
+    names the instrument the strongest match belongs to, so a reader (or the
+    model) cannot mistake the factor for a claim about every instrument listed.
+    """
+    if entry.kind is None or not entry.domains:
+        return ""
+    strongest = next(
+        (match.symbol for match in entry.matches if match.level is entry.relevance), None
+    )
+    scope = f" for {strongest}" if strongest is not None else ""
+    labels = ", ".join(domain_labels(entry.domains))
+    return f" ({entry.kind.value.lower()} factor{scope}: {labels})"
+
+
 def _fundamental_block(fundamental: FundamentalContext) -> list[str]:
     """Render today's fundamental context: labelled source facts, no analysis.
 
@@ -243,7 +269,8 @@ def _fundamental_block(fundamental: FundamentalContext) -> list[str]:
                 else "no instrument in play"
             )
             lines.append(
-                f"- {entry.item.published_at.isoformat()} relevance {entry.relevance.value} for "
+                f"- {entry.item.published_at.isoformat()} relevance {entry.relevance.value}"
+                f"{_factor_note(entry)} for "
                 f"{matched} | {entry.item.publisher} | {entry.item.title} | "
                 f"{_bounded_summary(entry.item.summary)}"
             )

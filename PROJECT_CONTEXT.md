@@ -367,7 +367,10 @@ Already implemented today:
 - fundamental intelligence (Step 47): a vendor-neutral news source (development/
   test only — Alpha Vantage when its key is configured, otherwise the
   deterministic placeholder feed; no production vendor), deterministic news
-  relevance built on the existing calendar classifier, today's fundamental
+  relevance built on the existing calendar classifier and, since Step 48,
+  extended into instrument-aware relevance (a shared domain vocabulary plus
+  static fundamental profiles for XAUUSD, USOIL/WTI and NASDAQ-100 that grade a
+  match as direct, macro or indirect), today's fundamental
   context combining the mandatory calendar with relevant news and each open
   position's factual exposure (explicit UNKNOWN when it cannot be established),
   a JWT-protected GET /fundamental-intelligence/today endpoint, and that same
