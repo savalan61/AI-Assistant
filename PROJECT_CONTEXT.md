@@ -1,5 +1,27 @@
 # PROJECT_CONTEXT.md
 
+## Documents and how to use them
+
+`PROJECT_ROADMAP.md` is the **authoritative full project roadmap**: current
+verified state, infrastructure gaps, MVP phases (P0–P8), post-MVP phases
+(P9–P14), the MVP boundary, explicit out-of-MVP scope, the permanent
+constraints and the standing risks. This document is the current project context
+and points to it. `CURRENT_CHECKPOINT.md` records the exact latest
+implementation/checkpoint status, verification results and commit state.
+
+The full roadmap is not duplicated here.
+
+Before planning or implementing a new phase:
+
+1. read this file;
+2. read the relevant section of `PROJECT_ROADMAP.md`;
+3. inspect the actual codebase;
+4. never assume a roadmap item is implemented — verify it in the code.
+
+A roadmap phase is a plan, not a status: nothing in `PROJECT_ROADMAP.md` may be
+treated as implemented until the code (and, for the recorded verification,
+`CURRENT_CHECKPOINT.md`) confirms it.
+
 ## Project
 
 AI Financial Assistant / AI Broker Assistant
