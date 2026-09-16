@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 49 — Graded Financial Research Context (this checkpoint)
+Step 49 Follow-up — Financial Research in the Agent Pipeline (this checkpoint)
++ Step 49 — Graded Financial Research Context
 + Step 48 — Instrument-Aware Fundamental Relevance
 + Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY)
 + Step 47 — News & Fundamental Intelligence
@@ -22,7 +23,11 @@ Step 49 — Graded Financial Research Context (this checkpoint)
 
 Status:
 
-Step 49: VERIFIED (implementation, tests and documentation; committed together by the Step 49 commit "feat(research): add graded financial research context"; local, not pushed)
+Step 49 Follow-up: VERIFIED (implementation, tests and documentation; committed
+together by the follow-up commit "feat(agent): integrate financial research
+context"; local, not pushed)
+Step 49: VERIFIED + COMMITTED (df3c4ef — "feat(research): add graded financial
+research context"; local, not pushed)
 Step 48: VERIFIED (implementation, tests and documentation; committed together by the Step 48 commit "feat(fundamental): generalize instrument-aware relevance"; local, not pushed)
 Step 47A: VERIFIED + COMMITTED (e434659 — "feat(news): add Alpha Vantage development source" + its checkpoint-status commit; local, not pushed)
 Step 47: VERIFIED + COMMITTED (c44953d — "feat(fundamental): add news and fundamental intelligence" + its checkpoint-status commit; local, not pushed)
@@ -35,17 +40,34 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
-Step 49 (the graded financial-research context: FinancialResearchService and
+The Step 49 follow-up (the financial-research context composed into the Agent
+pipeline: the optional financial_research_service constructor parameter, the
+research composition in AgentService.handle — built ONLY when the request names
+a focus instrument and AGENT_RESEARCH_LOOKBACK_DAYS is positive, for the
+half-open look-back span immediately BEFORE the calendar window so research and
+fundamental news never overlap — the bounded research block and its reduction-
+ladder rung in the prompt builder, the single shared _news_line renderer both
+blocks use, the get_financial_research_service wiring in the composition root,
+and the 23-case focused suite) — the change set this checkpoint describes — is
+implemented, verified and committed as ONE focused commit ("feat(agent):
+integrate financial research context"). No calendar was added to
+FinancialResearchContext, FundamentalContext is unchanged, no second relevance
+mechanism exists (the research block renders the SAME graded
+FundamentalNewsItem values the Step 48 news_intelligence classification
+produces), and no provider, API endpoint, schema or trading path changed. No
+live API request was made: provider behaviour is untouched.
+
+Before it, Step 49 (the graded financial-research context: FinancialResearchService and
 FinancialResearchContext in app/services/fundamental_intelligence/research.py, the
 public news_intelligence classification shared with the fundamental context, the
 get_financial_research_service composition seam reusing the existing news seam
 unchanged, and the JWT-protected GET /financial-research/today endpoint with the
 explicit UTC window and focus-symbol parameters) — the change set this checkpoint
 describes — is implemented, verified and committed as ONE focused commit
-("feat(research): add graded financial research context") that carries the
+df3c4ef ("feat(research): add graded financial research context") that carries the
 implementation, the tests and this documentation together, following the Step 48
 convention of a single commit; no separate checkpoint-status commit follows it, so
-this document records the state rather than a hash. The service is a reusable slice
+this document records that hash here. The service is a reusable slice
 of the fundamental-intelligence layer: graded published-source news for an explicit
 half-open UTC window and explicit focus instruments, with NO account, position or
 tenant data (it holds no MT5 provider, reads no positions and accepts no tenant
@@ -473,7 +495,12 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-CLEAN — the Step 49 change set (the research service and context, the shared
+CLEAN — the Step 49 follow-up change set (the agent research composition, the
+research prompt block and its reduction rung, the shared news-line renderer, the
+AGENT_RESEARCH_LOOKBACK_DAYS setting, the composition-root wiring, the new test
+module and the wiring test, and this documentation) is committed by the follow-up
+commit, so nothing from that change set is left modified, staged or uncommitted.
+The Step 49 change set (the research service and context, the shared
 news_intelligence classification, the composition seam and the
 GET /financial-research/today endpoint, the two new test modules and this
 documentation) is committed by the Step 49 commit, so nothing from that change
@@ -498,7 +525,7 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is twelve commits ahead of it, none of them pushed:
+638f972, and local HEAD is thirteen commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
@@ -1337,6 +1364,67 @@ Status: VERIFIED + COMMITTED
 - Focused tests grew 10 → 14 (override reads the requested file; default path
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
+
+
+### Step 49 Follow-up — Financial Research in the Agent Pipeline (READ-ONLY)
+Status: VERIFIED + COMMITTED (the follow-up commit "feat(agent): integrate
+financial research context"; one focused commit, implementation + tests +
+documentation)
+
+Composes the Step 49 graded research context into the Agent WITHOUT duplicating
+anything: one relevance mechanism (the SAME news_intelligence grading renders in
+both blocks), one news fetch per window per request, and the mandatory
+calendar/fundamental path untouched.
+
+Includes:
+
+- app/services/agent/agent_service.py: an optional financial_research_service
+  constructor parameter (None keeps the previous behaviour exactly). In
+  handle() the research context is composed ONLY when it adds information the
+  mandatory contexts do not already carry: the request must name a focus
+  instrument (detect_focus_symbols, bounded to 3 per request), the fundamental
+  block must actually be in the prompt, and AGENT_RESEARCH_LOOKBACK_DAYS must
+  be positive. The window is the half-open span immediately BEFORE the
+  calendar window, [window_from - lookback, window_from): research and
+  fundamental news can never overlap, so no item is fetched twice. The same
+  `now` drives every context as before.
+- app/core/config.py: AGENT_RESEARCH_LOOKBACK_DAYS (default 2, 0 disables the
+  block entirely — no news fetch, no prompt block).
+- app/services/agent/prompt.py: the research block ("Financial research
+  (published source facts, not analysis; look-back window ... BEFORE the
+  calendar window above; news source: ...; focus: ...)") renders the graded
+  items through the NEW single _news_line renderer that the fundamental block
+  also uses, so one item can never render differently in the two blocks. The
+  empty and unavailable states are stated exactly as the fundamental block
+  states them, and the window is stated in the header so look-back facts can
+  never be read as belonging to today. The reduction ladder gains one rung:
+  trades → fundamental → RESEARCH → calendar → PromptTooLargeError, so the
+  mandatory calendar and the exposure it feeds survive longer than the
+  look-back.
+- app/core/dependencies.py: get_agent_service passes
+  get_financial_research_service() — the same news seam GET
+  /financial-research/today uses (one source selection, one failure
+  behaviour); the service holds no MT5 provider and no tenant identity.
+- tests/test_agent_research_context.py (NEW, 23 cases): research facts,
+  Step 48 grading (RELEVANT direct / POTENTIALLY_RELEVANT macro /
+  NOT_OBVIOUSLY_RELEVANT) and provenance in the prompt; facts-not-analysis
+  labelling; the look-back window statement; no account/position/tenant data
+  in the research block; built only for the request's own focus instruments,
+  not built without one, not built when the look-back is 0; the exact
+  half-open look-back span; multiple focus instruments graded together; the
+  focus bound; empty vs unavailable; bounded excerpts; the research reduction
+  rung (research goes BEFORE the mandatory calendar); failure propagation
+  (LLM never asked); build order fundamental → research; unchanged prompt and
+  envelope without a research service; determinism; the full real-source
+  pipeline.
+- tests/test_agent_wiring.py: the composition-root wiring test for the new
+  parameter over the development fake source.
+
+Untouched: every provider (Alpha Vantage, fake, QuantGist),
+FinancialResearchService/FinancialResearchContext themselves, the
+FundamentalContext contract, the fundamental/economic services, the API
+surface, NEWS_SOURCE/NEWS_MAX_ITEMS, the egress policy, the scope guard, the
+usage limiter, the LLM contract and the schema. No live API request was made.
 
 
 ### Step 48 — Instrument-Aware Fundamental Relevance (READ-ONLY)

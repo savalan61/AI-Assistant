@@ -668,4 +668,11 @@ async def get_agent_service(
         # unusable news source still fails closed here, exactly as it does for
         # GET /fundamental-intelligence/today.
         fundamental_intelligence_service=get_fundamental_intelligence_service(),
+        # Step 49: the graded research context shares the news seam above (one
+        # source selection, one failure behaviour) and is composed per request
+        # ONLY when the request names a focus instrument, for the look-back span
+        # immediately before the calendar window — so it adds news the fundamental
+        # block does not already carry without fetching any window twice. It holds
+        # no MT5 provider and no tenant identity.
+        financial_research_service=get_financial_research_service(),
     )

@@ -650,6 +650,22 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     no sentiment model, no learned matching, no LLM, no new provider, no schema
     change), and the calendar layer's currency-scoped LEVEL contract is unchanged
     for symbols that have a currency leg (CURRENT_CHECKPOINT.md known issues 17-19)
+29. Financial research in the Agent pipeline (Step 49 follow-up): the graded
+    research context composed into AgentService as an OPTIONAL constructor
+    parameter, built ONLY when the request names a focus instrument (bounded to
+    3) and AGENT_RESEARCH_LOOKBACK_DAYS > 0 (default 2 UTC days; 0 disables),
+    covering the half-open look-back span immediately BEFORE the calendar
+    window so research and fundamental news never overlap and no item is
+    fetched twice. The prompt's research block renders the SAME graded items
+    through ONE shared news-line renderer (one relevance mechanism, Step 48
+    profiles), labels them published source facts rather than analysis, states
+    the look-back window explicitly, keeps provenance, carries no
+    account/position/tenant data, and is dropped by a new reduction-ladder rung
+    BEFORE the mandatory calendar. Research failure propagates through the
+    existing error boundary (LLM never asked); without a research service (or
+    without a focus instrument) the prompt is byte-identical to before; no
+    provider, API endpoint, schema or trading path changed (no live API
+    request; the research service itself holds no calendar by design)
 28. Graded financial research context (Step 49): a reusable slice of the
     fundamental-intelligence layer — FinancialResearchService composing graded
     published-source news for an EXPLICIT half-open UTC window and explicit

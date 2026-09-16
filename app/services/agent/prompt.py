@@ -29,6 +29,13 @@ Six deliberate restrictions on what is sent:
   factor: precious metals"), so the model can explain WHY an item matters to an
   instrument instead of guessing from keywords; items classified by the older
   symbol-string view render exactly as before;
+* financial research (Step 49) is rendered as a third public-data block when the
+  agent composed one: the same graded news — SAME item renderer, SAME discrete
+  relevance levels, SAME factor notes — for the explicit look-back window that
+  precedes the calendar window and the instruments the request names. It carries
+  no account, position or tenant data by construction. Its window is stated in
+  the header so the model can never read look-back facts as belonging to today,
+  and its provenance marker travels exactly as the other blocks' does;
 * account identity is omitted (login, holder name, server, account number).
   The model needs the numbers, not the identifiers, so unnecessary personal
   data is not shipped to an external service. This is structural, not a switch;
@@ -50,7 +57,11 @@ from app.providers.trade_history import TradeHistoryEntry
 from app.services.agent.egress import OutboundDataPolicy
 from app.services.economic_intelligence import EconomicIntelligenceContext
 from app.services.financial_context import FinancialContext
-from app.services.fundamental_intelligence import FundamentalContext, FundamentalNewsItem
+from app.services.fundamental_intelligence import (
+    FinancialResearchContext,
+    FundamentalContext,
+    FundamentalNewsItem,
+)
 from app.services.instrument_intelligence import domain_labels
 from app.services.portfolio_intelligence import SymbolExposure
 
@@ -87,6 +98,14 @@ _NO_NEWS = "- none (this source published no news items for today)"
 _NO_EXPOSURE = "- none (no open positions)"
 _FUNDAMENTAL_OMITTED_NOTE = (
     "Fundamental intelligence: omitted because the financial context exceeded the prompt size limit."
+)
+
+# Research block: its empty and unavailable states and its size-reduction note.
+# Wording mirrors the fundamental block's so the model reads both the same way;
+# the research window is not "today", so its empty case is stated per-window.
+_RESEARCH_NO_NEWS = "- none (this source published no research items in the look-back window)"
+_RESEARCH_OMITTED_NOTE = (
+    "Financial research: omitted because the financial context exceeded the prompt size limit."
 )
 
 # Bound on the news excerpt rendered into the prompt. The provider boundary
@@ -263,17 +282,7 @@ def _fundamental_block(fundamental: FundamentalContext) -> list[str]:
         lines.append(_NO_NEWS)
     else:
         for entry in fundamental.news:
-            matched = (
-                ", ".join(entry.matched_instruments)
-                if entry.matched_instruments
-                else "no instrument in play"
-            )
-            lines.append(
-                f"- {entry.item.published_at.isoformat()} relevance {entry.relevance.value}"
-                f"{_factor_note(entry)} for "
-                f"{matched} | {entry.item.publisher} | {entry.item.title} | "
-                f"{_bounded_summary(entry.item.summary)}"
-            )
+            lines.append(_news_line(entry))
     lines.append("Position fundamental exposure (factual status, not advice):")
     if not fundamental.positions:
         lines.append(_NO_EXPOSURE)
@@ -283,6 +292,52 @@ def _fundamental_block(fundamental: FundamentalContext) -> list[str]:
                 f"- {exposure.symbol} {exposure.type.value} {exposure.volume:.2f}: "
                 f"{exposure.status.value} {exposure.relevance.value} - {exposure.reason}"
             )
+    return lines
+
+
+def _news_line(entry: FundamentalNewsItem) -> str:
+    """One graded news item as a bounded, provenance-carrying prompt line.
+
+    The SINGLE renderer for graded news: the fundamental block and the research
+    block both call this, so the same item can never render differently (or
+    carry different information) depending on which block it appears in.
+    """
+    matched = (
+        ", ".join(entry.matched_instruments)
+        if entry.matched_instruments
+        else "no instrument in play"
+    )
+    return (
+        f"- {entry.item.published_at.isoformat()} relevance {entry.relevance.value}"
+        f"{_factor_note(entry)} for "
+        f"{matched} | {entry.item.publisher} | {entry.item.title} | "
+        f"{_bounded_summary(entry.item.summary)}"
+    )
+
+
+def _research_block(research: FinancialResearchContext) -> list[str]:
+    """Render the financial-research context: labelled look-back source facts.
+
+    Same discipline as the fundamental block — published source facts, not
+    analysis, with the provenance marker — plus an explicit window statement so
+    look-back items can never be read as belonging to today. No account, no
+    position and no tenant data exists in this context by construction.
+    """
+    news_source = research.news_data_source if research.news_available else "unavailable"
+    lines = [
+        f"Financial research (published source facts, not analysis; look-back window "
+        f"{research.window_from.isoformat()} .. {research.window_to.isoformat()} — "
+        f"BEFORE the calendar window above; news source: {news_source}; "
+        f"focus: {', '.join(research.focus_symbols) if research.focus_symbols else 'none'}):"
+    ]
+    if not research.news_available:
+        lines.append(f"- news unavailable ({research.news_unavailable_reason})")
+    elif not research.news:
+        lines.append(_RESEARCH_NO_NEWS)
+    else:
+        # The same renderer the fundamental block uses: one line format for all
+        # graded news, whatever block carries it.
+        lines.extend(_news_line(entry) for entry in research.news)
     return lines
 
 
@@ -296,6 +351,8 @@ def _render_content(
     economic_omitted: bool = False,
     fundamental: FundamentalContext | None = None,
     fundamental_omitted: bool = False,
+    research: FinancialResearchContext | None = None,
+    research_omitted: bool = False,
 ) -> str:
     """Render the prompt body deterministically for the given inclusion mode."""
     portfolio = context.portfolio_intelligence
@@ -373,6 +430,15 @@ def _render_content(
     elif fundamental_omitted:
         lines.append("")
         lines.append(_FUNDAMENTAL_OMITTED_NOTE)
+
+    # Research is rendered last (its window precedes the calendar window, and
+    # its lines refer to the focus named in the header above).
+    if research is not None:
+        lines.append("")
+        lines.extend(_research_block(research))
+    elif research_omitted:
+        lines.append("")
+        lines.append(_RESEARCH_OMITTED_NOTE)
     return "\n".join(lines)
 
 
@@ -382,15 +448,16 @@ def build_prompt(
     policy: OutboundDataPolicy | None = None,
     economic: EconomicIntelligenceContext | None = None,
     fundamental: FundamentalContext | None = None,
+    research: FinancialResearchContext | None = None,
 ) -> LLMPrompt:
-    """Render ``request``, ``context``, today's calendar and the fundamental
-    context into one prompt.
+    """Render ``request``, ``context``, today's calendar, the fundamental and the
+    research contexts into one prompt.
 
     Pure and deterministic: the same request, context, policy and contexts
     always produce the same prompt, so a provider sees a stable, reproducible
-    input. ``economic`` and ``fundamental`` are optional: without them (a
-    deployment with no such capability, or an existing caller) the prompt is
-    exactly what it was before the corresponding block existed.
+    input. ``economic``, ``fundamental`` and ``research`` are optional: without
+    them (a deployment with no such capability, or an existing caller) the
+    prompt is exactly what it was before the corresponding block existed.
 
     Size handling is an ordered, stated rule rather than silent truncation:
 
@@ -400,9 +467,11 @@ def build_prompt(
        trade block is dropped entirely and the body says so (unchanged);
     3. if it still exceeds the limit, the fundamental block is dropped and the
        body says so (bounded public context before the mandatory calendar);
-    4. if it still exceeds the limit, the economic-calendar block is dropped too
+    4. if it still exceeds the limit, the research block is dropped and the
+       body says so (the mandatory calendar and the exposure it feeds survive);
+    5. if it still exceeds the limit, the economic-calendar block is dropped too
        and the body says so;
-    5. if the remainder alone still exceeds the limit, ``PromptTooLargeError``
+    6. if the remainder alone still exceeds the limit, ``PromptTooLargeError``
        is raised so the caller fails cleanly instead of sending a payload of
        unbounded size.
     """
@@ -415,6 +484,7 @@ def build_prompt(
         include_trades=True,
         economic=economic,
         fundamental=fundamental,
+        research=research,
     )
     if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
         content = _render_content(
@@ -424,6 +494,7 @@ def build_prompt(
             include_trades=False,
             economic=economic,
             fundamental=fundamental,
+            research=research,
         )
         if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
             content = _render_content(
@@ -433,19 +504,33 @@ def build_prompt(
                 include_trades=False,
                 economic=economic,
                 fundamental_omitted=fundamental is not None,
+                research=research,
             )
             if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
+                # The research block (look-back news) goes before the mandatory
+                # calendar context, which stays until the final rung.
                 content = _render_content(
                     request,
                     context,
                     effective_policy,
                     include_trades=False,
-                    economic_omitted=economic is not None,
+                    economic=economic,
                     fundamental_omitted=fundamental is not None,
+                    research_omitted=research is not None,
                 )
                 if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
-                    raise PromptTooLargeError(
-                        "financial context is too large to render a bounded prompt"
+                    content = _render_content(
+                        request,
+                        context,
+                        effective_policy,
+                        include_trades=False,
+                        economic_omitted=economic is not None,
+                        fundamental_omitted=fundamental is not None,
+                        research_omitted=research is not None,
                     )
+                    if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
+                        raise PromptTooLargeError(
+                            "financial context is too large to render a bounded prompt"
+                        )
 
     return LLMPrompt(instructions=ASSISTANT_INSTRUCTIONS, content=content)

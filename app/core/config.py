@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     AGENT_MAX_PROMPT_TRADES: int = 50
     AGENT_MAX_PROMPT_CHARS: int = 24000
 
+    # How many UTC days BEFORE the mandatory calendar window the agent's
+    # financial-research block looks back when the request names a focus
+    # instrument (Step 49 follow-up). The research context covers exactly this
+    # look-back span, so it adds published news the fundamental context (today
+    # only) does not already carry, and one request never fetches the same news
+    # window twice. 0 disables the research block entirely (no news fetch, no
+    # prompt block).
+    AGENT_RESEARCH_LOOKBACK_DAYS: int = 2
+
     # Outbound LLM data policy: what may be rendered into an external model
     # prompt. All True reproduces the original behaviour; each flag removes a
     # specific data class from the prompt (see app/services/agent/egress.py).

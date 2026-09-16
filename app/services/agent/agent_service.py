@@ -23,14 +23,20 @@ Design notes:
   and one position read. It adds relevant news, deterministic relevance and each
   position's factual exposure — facts, provenance and UNKNOWN only, never a
   forecast, a probability or a recommendation;
+* the financial-research component (Step 49) is composed ONLY when it adds
+  information the contexts above do not already carry: the request names a focus
+  instrument and the look-back is enabled. Its window is the half-open span
+  immediately BEFORE the calendar window, so research news and fundamental news
+  can never overlap — one request still fetches each news window at most once;
 * no HTTP endpoint — this is an internal service/domain boundary;
 * no agent framework (LangChain, LangGraph, ...) and no tool use;
 * read-only by construction: the only capabilities held here are reading a
   context and asking for text, so there is no trading tool and no mutation.
 """
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
+from app.core.config import settings
 from app.providers.llm import LLMProvider
 from app.services.agent.egress import OutboundDataPolicy
 from app.services.agent.prompt import build_prompt
@@ -41,8 +47,10 @@ from app.services.financial_context import (
     FinancialContextService,
 )
 from app.services.fundamental_intelligence import (
+    FinancialResearchService,
     FundamentalIntelligenceService,
     detect_focus_symbol,
+    detect_focus_symbols,
 )
 
 
@@ -59,6 +67,11 @@ class AgentResponse(NamedTuple):
     broker_id: int
     context: FinancialContext
     answer: str
+
+
+# Focus instruments the research block is graded against per request. The first
+# instrument the request names matters most; the set stays small and bounded.
+_MAX_FOCUS_SYMBOLS = 3
 
 
 class AgentService:
@@ -80,6 +93,7 @@ class AgentService:
         data_policy: OutboundDataPolicy | None = None,
         economic_intelligence_service: EconomicIntelligenceService | None = None,
         fundamental_intelligence_service: FundamentalIntelligenceService | None = None,
+        financial_research_service: FinancialResearchService | None = None,
     ):
         self._context = financial_context_service
         self._llm = llm_provider
@@ -98,6 +112,14 @@ class AgentService:
         # None means the prompt carries no fundamental block, and it can only be
         # built when a calendar context exists — it never fetches one itself.
         self._fundamental = fundamental_intelligence_service
+        # Financial research (Step 49) is composed only when it adds information
+        # the fundamental context does not already carry: the request names a
+        # focus instrument AND the look-back is enabled. Its window is the
+        # half-open span immediately before the calendar window, so the two news
+        # windows never overlap and no item is fetched twice. None means the
+        # prompt carries no research block, and existing construction keeps
+        # working unchanged.
+        self._research = financial_research_service
 
     def handle(
         self,
@@ -151,8 +173,30 @@ class AgentService:
             if self._fundamental is not None and economic is not None
             else None
         )
+        # Research context (Step 49) is composed only when it ADDS information:
+        # the request must name a focus instrument (the research block is graded
+        # per instrument; without one the fundamental block already covers the
+        # window), the fundamental block must actually be in the prompt, and the
+        # configured look-back must be positive. The window is the half-open span
+        # immediately BEFORE the calendar window, so research and fundamental
+        # news never overlap and the same item is never fetched twice.
+        research = None
+        lookback_days = settings.AGENT_RESEARCH_LOOKBACK_DAYS
+        if (
+            self._research is not None
+            and economic is not None
+            and fundamental is not None
+            and lookback_days > 0
+        ):
+            focus_symbols = detect_focus_symbols(request, limit=_MAX_FOCUS_SYMBOLS)
+            if focus_symbols:
+                research = self._research.build_research(
+                    economic.window_from - timedelta(days=lookback_days),
+                    economic.window_from,
+                    focus_symbols=focus_symbols,
+                )
         answer = self._llm.complete(
-            build_prompt(request, context, self._data_policy, economic, fundamental)
+            build_prompt(request, context, self._data_policy, economic, fundamental, research)
         )
         return AgentResponse(
             request=request,

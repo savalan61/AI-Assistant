@@ -26,7 +26,10 @@ from app.providers.openai_compatible_llm import OpenAICompatibleLLMProvider
 from app.services.agent import AgentService, OutboundDataPolicy
 from app.services.broker_llm_config import BrokerLLMConfigurationError
 from app.services.economic_intelligence import EconomicIntelligenceService
-from app.services.fundamental_intelligence import FundamentalIntelligenceService
+from app.services.fundamental_intelligence import (
+    FinancialResearchService,
+    FundamentalIntelligenceService,
+)
 
 
 # The "cipher" value is a test-only marker; it is never a real secret.
@@ -305,6 +308,29 @@ def test_agent_service_is_built_with_the_fundamental_intelligence_service(
     # and position exposure. It adds no calendar read and no MT5 read of its own.
     assert isinstance(service._fundamental, FundamentalIntelligenceService)
     assert service._fundamental.news_source == "fake-development-placeholder"
+
+
+def test_agent_service_is_built_with_the_financial_research_service(
+    monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
+) -> None:
+    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+        return None
+
+    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
+    # Pin the source the same way the fundamental wiring test above does: the
+    # deterministic development feed, never a local machine's selection.
+    monkeypatch.setattr(settings, "APP_ENV", "development", raising=True)
+    monkeypatch.setattr(settings, "NEWS_SOURCE", NewsSource.AUTO, raising=True)
+    monkeypatch.setattr(settings, "ALPHA_VANTAGE_API_KEY", "", raising=True)
+
+    service = asyncio.run(deps.get_agent_service(make_user(), object()))
+
+    # Step 49 follow-up: the agent receives the research service, which shares
+    # the SAME news seam as the fundamental service (one source selection, one
+    # failure behaviour) and holds no MT5 provider and no tenant identity.
+    assert isinstance(service._research, FinancialResearchService)
+    assert service._research.news_source == "fake-development-placeholder"
 
 
 def test_openai_adapter_is_a_provider_the_pool_accepts() -> None:

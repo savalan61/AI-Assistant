@@ -375,7 +375,11 @@ Already implemented today:
   context combining the mandatory calendar with relevant news and each open
   position's factual exposure (explicit UNKNOWN when it cannot be established),
   a JWT-protected GET /fundamental-intelligence/today endpoint, and that same
-  context composed into every agent prompt
+  context composed into every agent prompt; since the Step 49 follow-up the
+  agent also receives the graded research context for the request's named
+  instruments when one is present — the look-back window immediately before
+  the calendar window, one shared relevance mechanism, bounded and provenance-
+  labelled published facts
 - graded financial research (Step 49): the same news/relevance architecture
   exposed as a reusable windowed context — a JWT-protected
   GET /financial-research/today endpoint taking an explicit UTC window and
