@@ -20,7 +20,7 @@ Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY — this checkpoin
 
 Status:
 
-Step 47A: VERIFIED (implementation, tests, .env.example and documentation; committed by the Step 47A commit, whose hash the following checkpoint-status commit records here; local, not pushed)
+Step 47A: VERIFIED + COMMITTED (e434659 — "feat(news): add Alpha Vantage development source" + its checkpoint-status commit; local, not pushed)
 Step 47: VERIFIED + COMMITTED (c44953d — "feat(fundamental): add news and fundamental intelligence" + its checkpoint-status commit; local, not pushed)
 Step 46: VERIFIED + COMMITTED (ebbb86b — "feat(calendar): add explicit source configuration")
 Step 45: VERIFIED + COMMITTED (b9785cb + its checkpoint-status commit 9ba0d95; local, not pushed)
@@ -35,10 +35,10 @@ Step 47A (the Alpha Vantage development news source: the NewsProvider
 implementation behind the Step 47 contract, the explicit alphavantage source
 option, the environment matrix, the key-redaction measure and the single live
 smoke request) — the change set this checkpoint describes — is implemented,
-verified and committed by the Step 47A commit ("feat(news): add Alpha Vantage
-development source"), which carries the implementation, the tests, .env.example
-and the documentation updates (PROJECT_CONTEXT.md, knowledge.md and this
-document); the follow-up checkpoint-status commit records that hash here.
+verified and committed by e434659 ("feat(news): add Alpha Vantage development
+source"), which carries the implementation, the tests, .env.example and the
+documentation updates (PROJECT_CONTEXT.md, knowledge.md and this document); this
+checkpoint-status commit records that hash here.
 Before it, Step 47 (news and fundamental intelligence: the NewsProvider contract and its
 deterministic development/test source, the explicit NEWS_SOURCE selection, the
 deterministic news relevance, the FundamentalIntelligenceService context, the
@@ -1294,9 +1294,7 @@ Status: VERIFIED + COMMITTED
 
 
 ### Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY)
-Status: VERIFIED (committed by the Step 47A commit "feat(news): add Alpha Vantage
-development source"; its hash is recorded by the follow-up checkpoint-status
-commit)
+Status: VERIFIED + COMMITTED (e434659)
 
 Makes the news source real for development: Alpha Vantage's free-tier News &
 Sentiment feed becomes the provider the Step 47 contract is served by, with the
