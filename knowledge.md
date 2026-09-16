@@ -650,6 +650,27 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     no sentiment model, no learned matching, no LLM, no new provider, no schema
     change), and the calendar layer's currency-scoped LEVEL contract is unchanged
     for symbols that have a currency leg (CURRENT_CHECKPOINT.md known issues 17-19)
+31. Instrument resolution inside financial research (Step 51): a requested
+    instrument is resolved through the Step 50 broker catalog BEFORE anything is
+    researched, and only the broker's own canonical spelling is graded. The
+    research service takes an OPTIONAL InstrumentService (None = exact Step 49
+    behaviour, so nothing existing changes), exposes resolve_focus_symbols()
+    returning FocusResolution(requested, resolved, unresolved), and reports
+    unresolved_symbols on the context: a name the catalog cannot identify
+    (unknown, ambiguous or unusable) is never graded as if it were a real
+    instrument, while an MT5/catalog outage still propagates as RuntimeError and
+    the existing generic 503. GET /financial-research/today resolves first (off
+    the event loop) and fails closed with 404 "Instrument unavailable for the
+    requested symbol" — the instruments/market-data contract — when any named
+    instrument is not offered, echoing the broker's spelling in focus_symbols;
+    the agent resolves the detected focus through the same single mechanism and
+    builds no research at all (no look-back fetch) when nothing resolves, so an
+    unconfirmed label never reaches the prompt and the mandatory calendar/
+    fundamental context still answers. No catalog logic is duplicated, no
+    provider changed, no schema/cache/scheduler, and the Step 48 profiles stay
+    optional enhancements applied after resolution — any broker symbol (AAPL,
+    LVMH, BTCUSD, NICKEL, COFFEE, XAUUSD.r, USOIL, NAS100) is researchable with
+    no profile at all (CURRENT_CHECKPOINT.md known issues 21-23)
 30. MT5 instrument discovery and resolution (Step 50): a vendor-neutral
     Instrument/InstrumentProvider contract under app/providers (identity and
     metadata only — the broker's own spelling, description, broker-group asset

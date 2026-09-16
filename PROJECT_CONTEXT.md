@@ -317,7 +317,12 @@ Current JWT-protected, read-only endpoints:
   update and delete inside the caller's broker
 - POST /agent, GET /economic-intelligence/today,
   GET /fundamental-intelligence/today?symbol=<optional instrument>,
-  GET /financial-research/today?from=<UTC ISO>&to=<UTC ISO>&symbol=<instruments>,
+  GET /financial-research/today?from=<UTC ISO>&to=<UTC ISO>&symbol=<instruments>
+  (resolved against the caller's own broker catalog since Step 51: the broker's
+  canonical symbols are echoed, an instrument the broker does not offer is a 404,
+  an unavailable catalog or news source is a 503),
+  GET /instruments and GET /instruments/{symbol} → the tenant's own MT5
+  instrument catalog,
   GET /portfolio-intelligence, GET/PUT /broker-llm-config → the read-only AI
   surface and broker LLM settings
 - PUT /users/{user_id}/mt5-credentials → provision a user's MT5 investor
@@ -379,6 +384,12 @@ Already implemented today:
 - account information (balance, equity, margin, free margin)
 - open positions
 - trade history
+- instrument-resolved financial research (Step 51): research and the agent's
+  research block grade only broker-confirmed instruments, in the broker's own
+  spelling, through the same InstrumentService GET /instruments uses — one
+  resolution architecture, no catalog logic in the research or agent layers, and
+  no MT5 read by the research service itself (it holds the instrument service,
+  not a provider)
 - instrument discovery (Step 50): every instrument the broker's MT5 account
   offers is resolvable/discoverable through a vendor-neutral contract and a
   deterministic service, so no feature has to hardcode a symbol list. The
@@ -419,7 +430,18 @@ Already implemented today:
   explicit focus instruments (for example XAUUSD,USOIL) and returning graded
   published-source news with provenance; unlike the fundamental context it
   holds no account, position or tenant data, and it reuses the exact same
-  classification so the two surfaces can never disagree
+  classification so the two surfaces can never disagree. Since Step 51 every
+  requested instrument is resolved against the authenticated tenant's own MT5
+  catalog first and only the broker's canonical spelling is graded — a name the
+  broker does not offer is a deterministic 404 (`Instrument unavailable for the
+  requested symbol`), never an unverified spelling researched anyway — and an
+  instrument needs no fundamental profile to be researchable.
+- instrument-resolved research in the agent (Step 51): when a request names a
+  focus instrument, the agent resolves it through the same instrument service
+  GET /instruments uses and researches only what the broker confirmed; if
+  nothing resolves, no look-back research is fetched and the prompt is identical
+  to a request without one, so the mandatory calendar/fundamental answer is
+  never lost to an unconfirmed label.
 
 Eventually the system may support:
 

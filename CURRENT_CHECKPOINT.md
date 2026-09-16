@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 50 — MT5 Instrument Discovery & Resolution (this checkpoint)
+Step 51 — Instrument Resolution in Financial Research (this checkpoint)
++ Step 50 — MT5 Instrument Discovery & Resolution
 + Step 49 Follow-up — Financial Research in the Agent Pipeline
 + Step 49 — Graded Financial Research Context
 + Step 48 — Instrument-Aware Fundamental Relevance
@@ -24,9 +25,11 @@ Step 50 — MT5 Instrument Discovery & Resolution (this checkpoint)
 
 Status:
 
-Step 50: VERIFIED (implementation, tests and documentation; committed together
-by the Step 50 commit "feat(instruments): add MT5 instrument discovery and
-resolution", following the Step 48 single-commit convention; local, not pushed)
+Step 51: VERIFIED (implementation, tests and documentation; committed together
+by the Step 51 commit "feat(research): resolve instruments through MT5
+catalog"; local, not pushed)
+Step 50: VERIFIED + COMMITTED (6c2df3e — "feat(instruments): add MT5 instrument
+discovery and resolution"; local, not pushed)
 Step 49 Follow-up: VERIFIED + COMMITTED (9081b5f — "feat(agent): integrate
 financial research context"; local, not pushed)
 Step 49: VERIFIED + COMMITTED (df3c4ef — "feat(research): add graded financial
@@ -42,6 +45,21 @@ Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
 Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
+
+The Step 51 change set (the optional InstrumentService on
+FinancialResearchService, the FocusResolution step and the context's
+unresolved_symbols field, the research API's resolve-then-research flow with its
+deterministic 404, the agent's resolve-before-research composition, the
+composition-root wiring of the existing instrument service into the research
+service, the extended offline tests and this documentation) — the change set
+this checkpoint describes — is implemented, verified and committed as ONE
+focused commit ("feat(research): resolve instruments through MT5 catalog") that
+carries the implementation, the tests and this documentation together,
+following the Step 48/50 convention of a single commit; no separate
+checkpoint-status commit follows it. No database table, cache, scheduler,
+ingestion, provider redesign, LLM change, prompt-semantics change or trading path
+is involved, and the Step 48 profiles remain optional enhancements applied to an
+already-resolved symbol.
 
 The Step 50 change set (the vendor-neutral Instrument/InstrumentProvider contract
 with its TradeMode enum, the read-only MT5InstrumentProvider over the existing
@@ -546,7 +564,7 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is fourteen commits ahead of it, none of them pushed:
+638f972, and local HEAD is fifteen commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
@@ -554,8 +572,9 @@ intelligence ahead of technical analysis), the two Step 47 commits (the
 implementation and its checkpoint-status record), the two Step 47A commits (the
 Alpha Vantage development source and its checkpoint-status record), the
 Step 48 commit (instrument-aware fundamental relevance), the Step 49 commit (the
-graded financial-research context) and the Step 49 follow-up commit
-(`9081b5f`, the research context composed into the agent).
+graded financial-research context), the Step 49 follow-up commit (`9081b5f`, the
+research context composed into the agent) and the Step 50 commit (`6c2df3e`,
+MT5 instrument discovery and resolution).
 
 ## Completed Stages
 
@@ -1386,6 +1405,91 @@ Status: VERIFIED + COMMITTED
 - Focused tests grew 10 → 14 (override reads the requested file; default path
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
+
+
+### Step 51 — Instrument Resolution in Financial Research (READ-ONLY)
+Status: VERIFIED + COMMITTED (the Step 51 commit "feat(research): resolve
+instruments through MT5 catalog"; one focused commit carrying implementation,
+tests and documentation — the Step 48/50 single-commit convention, so no
+separate hash-recording commit follows)
+
+Makes financial research work for any instrument the tenant's broker actually
+offers: requested symbols are resolved through the Step 50 instrument boundary
+before anything is researched, and the broker's own canonical spelling is what
+travels. Existing code paths keep working unchanged, because resolution is a
+pass-through when no instrument service is wired.
+
+Includes:
+
+- app/services/fundamental_intelligence/research.py: an OPTIONAL
+  `instrument_service` on FinancialResearchService (default None = the exact
+  Step 49 behaviour), a FocusResolution NamedTuple (requested / resolved /
+  unresolved) and the public `resolve_focus_symbols()` step that produces it,
+  and `unresolved_symbols` on FinancialResearchContext. build_research() now
+  grades only broker-confirmed spellings: a requested name the catalog cannot
+  identify (unknown, ambiguous or unusable) is reported as unresolved and is
+  never graded or presented as a real instrument, while an MT5/catalog
+  availability failure still propagates as RuntimeError (the established 503).
+  No catalog or provider logic is duplicated here: resolution goes only through
+  the instrument service, which owns the tenant-scoped session and the
+  deterministic presentation rules.
+- app/services/fundamental_intelligence/__init__.py: exports FocusResolution.
+- app/api/fundamental_intelligence_router.py: the research endpoint resolves the
+  requested symbols first (off the event loop, through the consolidated MT5
+  blocking boundary), returns the deterministic 404
+  ("Instrument unavailable for the requested symbol", the same contract
+  GET /instruments/{symbol} and GET /market-data/{symbol} use) when any name is
+  not offered, and then researches only the resolved canonical symbols — which
+  build_research verifies again, so no caller can bypass resolution. 422 (blank
+  symbol list / unusable window) and the generic 503 (catalog or news failure)
+  are unchanged, and `focus_symbols` in the response is documented as the
+  broker's canonical spelling.
+- app/services/agent/agent_service.py: when the request names a focus
+  instrument, the agent resolves it through the research service FIRST and
+  researches only what the broker confirmed; if nothing resolves, no research is
+  built at all (no look-back news is fetched) and the prompt is byte-identical
+  to the same request without a research service — the mandatory calendar and
+  fundamental context still answer it. The agent owns no catalog logic.
+- app/core/dependencies.py: get_financial_research_service now lives below the
+  authentication boundary (it needs this tenant's MT5 identity) and composes the
+  SAME instrument service GET /instruments uses, so there is one resolution
+  architecture and one credential path; get_agent_service passes the credentials
+  it already resolved. It still reads no positions and holds no tenant identity.
+- tests/test_financial_research.py (11 new cases): resolution to the broker's
+  canonical spelling, unresolved reporting (alone and beside a resolved symbol),
+  case-only differences resolving to the broker's spelling, a case collision the
+  broker lists twice staying unresolved, deterministic normalization, the
+  no-catalog pass-through (unverified ≠ unresolved), an unprofiled symbol
+  staying researchable, profile grading after resolution, and catalog failure
+  failing closed with no fabricated result.
+- tests/test_financial_research_api.py (12 new cases): the broker-canonical
+  spelling echoed, profile grading after resolution, arbitrary broker symbols
+  (AAPL/LVMH/BTCUSD/COFFEE/NICKEL) researchable without a profile, 404 for an
+  unknown instrument and for one unknown among several (no partial result), the
+  generic 503 for a failing catalog and for a tenant without a usable MT5
+  session, and per-tenant credential binding of the catalog read; the suite now
+  patches the instrument provider CLASS seam so the real resolution runs offline.
+- tests/test_agent_research_context.py (7 new cases): the detected instrument
+  resolved before research, no research for a name the broker does not offer
+  (with the mandatory context still answering), the byte-identical prompt when
+  nothing resolves, catalog failure propagation with the LLM never asked, no
+  catalog read for a request naming nothing, the Step 49 pass-through without a
+  catalog, and profile grading on a resolved broker spelling.
+- tests/test_agent_api.py (3 new cases + the catalog seam in its fixture): the
+  named instrument is resolved off the event loop for the request's own tenant,
+  a catalog failure is the generic 503 with no LLM call, and a request naming no
+  instrument never consults the catalog.
+- tests/test_agent_wiring.py: the research wiring assertion now also proves the
+  research service resolves through a broker catalog.
+
+Untouched: the Instrument contract, InstrumentService, MT5InstrumentProvider and
+FakeInstrumentProvider (Step 50 is unchanged — no new exception type, no changed
+resolution rule), NewsProvider/Alpha Vantage/QuantGist/fake news, the news
+service, FundamentalIntelligenceService, EconomicIntelligenceService, the
+fundamental endpoint, the LLM contract, the prompt-rendering semantics, the
+configuration matrix, egress, schema and migrations. The affected suites are
+fully offline: 246 cases pass with every non-loopback connect and all non-local
+DNS resolution blocked.
 
 
 ### Step 50 — MT5 Instrument Discovery & Resolution (READ-ONLY)
@@ -3303,6 +3407,33 @@ This limitation must be reported rather than hidden.
     symbol inventory) needs that decision made explicitly; nothing today depends
     on it, and the three fundamental relevance profiles remain optional
     enhancements applied on top of a resolved symbol.
+21. The relevance layer labels a matched item with the instrument name it
+    compared under UPPER CASE (`matched_instruments`), while the research
+    context reports the broker's own spelling in `focus_symbols`. Step 51 makes
+    those two spellings diverge for the first time when a broker lists its own
+    casing (a request for `xauusd.r` is researched as `XAUUSD.r` and the graded
+    item is labelled `XAUUSD.R`). Matching is case-insensitive and no relevance
+    level changed, so this is presentation only, but a client comparing the two
+    strings by equality must normalise case first. The labelling contract itself
+    is pre-existing (a broker-spelled position symbol already matched under
+    upper case in Steps 47-48, and the fundamental endpoint's output is
+    unchanged), which is why Step 51 leaves it alone deliberately.
+22. A focus instrument the broker's catalog does not confirm is simply not
+    researched: the agent still answers from the mandatory calendar/fundamental
+    context, but the request loses its look-back research block (the resolution
+    reports the name as unresolved instead of guessing). Step 50's resolution
+    matches a broker symbol exactly or case-insensitively-equal only, so a
+    broker that lists `XAUUSD.r` where focus detection produced `XAUUSD` is the
+    concrete case. Fuzzy or suffix-aware matching is deliberately NOT added:
+    inventing a broker symbol would be worse than researching nothing, and the
+    resolution contract is the instruments endpoint's contract too.
+23. A research request naming several instruments fails closed (404) when ANY
+    of them is not offered by the tenant's broker: there is no partial research
+    response, and the caller is expected to re-ask with the instrument the
+    broker actually lists (GET /instruments resolves the spelling). The
+    alternative — researching the confirmed subset and reporting the rest — was
+    rejected deliberately so a response can never look complete while a named
+    instrument was silently dropped.
 
 Resolved:
 

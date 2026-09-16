@@ -30,6 +30,7 @@ from app.db.base import Base
 from app.db.database import get_db
 from app.db.models import Broker, User, UserRole
 from app.providers.account_info import AccountInfo
+from app.providers.fake_instrument import FakeInstrumentProvider
 from app.providers.fake_llm import DEFAULT_FAKE_RESPONSE, FakeLLMProvider
 from app.providers.mt5_account_info import MT5AccountInfoProvider
 from app.providers.position import Position, PositionType
@@ -212,23 +213,65 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_settings, "ALPHA_VANTAGE_API_KEY", "", raising=True)
 
 
+def make_fake_instrument_provider_class():
+    """Instrument-provider class at the composition-root seam.
+
+    Step 51 makes the agent resolve a detected focus instrument through the
+    tenant's own broker catalog, so the seam is replaced with the deterministic
+    in-memory catalog: the real InstrumentService and the real resolution rules
+    run, with no terminal, no credentials and no network.
+    """
+    call_threads: list[int] = []
+
+    class FakeMT5InstrumentProvider:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            self._inner = FakeInstrumentProvider()
+
+        def get_instrument(self, symbol: str):
+            call_threads.append(threading.get_ident())
+            return self._inner.get_instrument(symbol)
+
+        def list_instruments(self):
+            call_threads.append(threading.get_ident())
+            return self._inner.list_instruments()
+
+    return FakeMT5InstrumentProvider, call_threads
+
+
 @pytest.fixture()
 def patched_providers(monkeypatch):
-    """Patch the three MT5 provider seams and the LLM seam; returns records."""
+    """Patch the four MT5 provider seams and the LLM seam; returns records."""
 
     def _install(
         *,
         account_error: Exception | None = None,
         position_error: Exception | None = None,
         trade_error: Exception | None = None,
+        instrument_error: Exception | None = None,
         llm_error: Exception | None = None,
     ) -> dict[str, object]:
         account_cls, account_threads = make_fake_account_provider_class(ACCOUNT, account_error)
         position_cls, position_threads = make_fake_position_provider_class((XAUUSD_BUY,), position_error)
         trade_cls, trade_threads, trade_windows = make_fake_trade_provider_class((TRADE,), trade_error)
+        instrument_cls, instrument_threads = make_fake_instrument_provider_class()
+        catalog_error = instrument_error
+        if catalog_error is not None:
+
+            class FailingInstrumentProvider:
+                def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+                    pass
+
+                def get_instrument(self, symbol: str):
+                    raise catalog_error
+
+                def list_instruments(self):
+                    raise catalog_error
+
+            instrument_cls = FailingInstrumentProvider
         monkeypatch.setattr(deps, "MT5AccountInfoProvider", account_cls)
         monkeypatch.setattr(deps, "MT5PositionProvider", position_cls)
         monkeypatch.setattr(deps, "MT5TradeHistoryProvider", trade_cls)
+        monkeypatch.setattr(deps, "MT5InstrumentProvider", instrument_cls)
         llm: FakeLLMProvider = FakeLLMProvider() if llm_error is None else FailingLLMProvider(llm_error)
 
         # The production seam is the broker-aware router (async, per-broker).
@@ -244,6 +287,7 @@ def patched_providers(monkeypatch):
             "position_threads": position_threads,
             "trade_threads": trade_threads,
             "trade_windows": trade_windows,
+            "instrument_threads": instrument_threads,
             "llm": llm,
         }
 
@@ -1023,6 +1067,57 @@ def test_news_source_failure_maps_to_the_existing_503(
     assert status == 503
     assert body == {"detail": "Agent service temporarily unavailable"}
     assert records["llm"].call_count == 0
+
+
+def test_the_named_instrument_is_resolved_through_the_tenants_own_catalog(
+    agent_env, patched_providers
+) -> None:
+    records = patched_providers()
+
+    status, _ = post_agent(
+        agent_env, agent_env["customer_a_id"], {"message": "What news matters for XAUUSD today?"}
+    )
+
+    assert status == 200
+    # The catalog was actually consulted for the request's own instrument (Step
+    # 51), off the event loop like every other MT5 read.
+    assert records["instrument_threads"]
+    prompt = records["llm"].prompts[0].content
+    assert "Financial research (published source facts" in prompt
+    assert "focus: XAUUSD" in prompt
+
+
+def test_a_broker_catalog_failure_is_the_generic_503(
+    agent_env, patched_providers
+) -> None:
+    records = patched_providers(instrument_error=RuntimeError("MT5 catalog unavailable"))
+
+    status, body = post_agent(
+        agent_env, agent_env["customer_a_id"], {"message": "What news matters for XAUUSD today?"}
+    )
+
+    assert status == 503
+    assert body == {"detail": "Agent service temporarily unavailable"}
+    # Fail closed: no answer is fabricated from a broker catalog that could not
+    # confirm the instrument.
+    assert records["llm"].call_count == 0
+
+
+def test_a_request_naming_no_instrument_never_consults_the_catalog(
+    agent_env, patched_providers
+) -> None:
+    """Resolution is reached only when a focus instrument actually exists.
+
+    A failing catalog therefore does not break questions that name nothing: the
+    mandatory calendar/fundamental path answers them exactly as before.
+    """
+    records = patched_providers(instrument_error=RuntimeError("MT5 catalog unavailable"))
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "My balance?"})
+
+    assert status == 200
+    assert records["instrument_threads"] == []
+    assert records["llm"].call_count == 1
 
 
 def test_response_contract_is_unchanged_by_the_fundamental_composition(

@@ -33,6 +33,7 @@ from app.services.economic_intelligence import EconomicIntelligenceService
 from app.services.fundamental_intelligence import (
     FinancialResearchContext,
     FinancialResearchService,
+    FocusResolution,
     FundamentalContext,
     FundamentalIntelligenceService,
 )
@@ -140,7 +141,10 @@ class FinancialResearchResponse(BaseModel):
     as_of: datetime
     window_from: datetime
     window_to: datetime
-    # The instruments the request asked about (uppercased, sorted).
+    # The instruments actually researched, in the BROKER's own canonical
+    # spelling (Step 51): a request for "xauusd.r" is answered with "XAUUSD.r".
+    # A requested name this tenant's broker does not offer is never echoed here
+    # because the request fails closed with 404 instead.
     focus_symbols: list[str]
     # The set everything was graded against: the focus symbols themselves
     # (research holds no positions, so nothing else is in play here).
@@ -288,22 +292,53 @@ async def get_todays_financial_research(
     Read-only research context: no account, no positions, no tenant data beyond
     the broker_id echo. The window must be UTC-aware and half-open; the focus
     symbols are labels for relevance grading only and never widen what is read.
+
+    Step 51: every requested instrument is resolved against the authenticated
+    tenant's own MT5 catalog before anything is researched. A name this broker
+    does not offer fails closed (404) instead of being researched as an
+    unverified spelling, and the response echoes the broker's canonical symbols.
     """
     from_time = _require_utc(from_time, "from")
     to_time = _require_utc(to_time, "to")
     if from_time >= to_time:
         raise HTTPException(status_code=400, detail="'from' must be earlier than 'to'")
-    focus_symbols = tuple(
+    requested_symbols = tuple(
         part.strip() for part in symbol.split(",") if part.strip()
     )
-    if not focus_symbols:
+    if not requested_symbols:
         raise HTTPException(status_code=422, detail="symbol must name at least one instrument")
+
+    # Resolution and research both read MT5/the news source, so each blocking
+    # call is offloaded through the consolidated MT5 blocking boundary. The
+    # resolved symbols are then handed to build_research, which verifies them
+    # again against the same catalog: the research context can only ever grade
+    # broker-confirmed spellings, whatever its caller does.
+    try:
+        resolution: FocusResolution = await run_mt5_call(
+            research_service.resolve_focus_symbols, requested_symbols
+        )
+    except ValueError:
+        # A blank focus symbol or an unusable window is a client input problem.
+        raise HTTPException(status_code=422, detail="Invalid research window or symbol")
+    except RuntimeError:
+        # Catalog/MT5 infrastructure failure: the established generic 503, with
+        # no provider internals in the detail.
+        raise HTTPException(
+            status_code=503, detail="Financial research service temporarily unavailable"
+        )
+
+    if resolution.unresolved:
+        # Deterministic client error, the same contract GET /instruments/{symbol}
+        # and GET /market-data/{symbol} use for a symbol this broker does not
+        # offer. No partial result is returned and no unverified spelling is
+        # researched or echoed.
+        raise HTTPException(status_code=404, detail="Instrument unavailable for the requested symbol")
 
     def compose() -> FinancialResearchContext:
         return research_service.build_research(
             from_time,
             to_time,
-            focus_symbols=focus_symbols,
+            focus_symbols=resolution.resolved,
         )
 
     try:

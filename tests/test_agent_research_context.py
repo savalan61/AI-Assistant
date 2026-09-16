@@ -22,11 +22,13 @@ import pytest
 from app.core.config import settings as app_settings
 from app.providers.account_info import AccountInfo, AccountInfoProvider
 from app.providers.economic_calendar import EconomicEvent, EventImpact
+from app.providers.fake_instrument import FakeInstrumentProvider
 from app.providers.fake_llm import FakeLLMProvider
 from app.providers.fake_news import FakeNewsProvider
 from app.providers.fake_position import FakePositionProvider
 from app.providers.fake_trade_history import FakeTradeHistoryProvider
 from app.providers.llm import LLMProvider
+from app.providers.instrument import Instrument, InstrumentProvider, TradeMode
 from app.providers.news import NewsItem
 from app.providers.position import Position, PositionType
 from app.providers.trade_history import TradeCloseReason, TradeHistoryEntry, TradeType
@@ -47,9 +49,11 @@ from app.services.financial_context import (
 from app.services.fundamental_intelligence import (
     FinancialResearchContext,
     FinancialResearchService,
+    FocusResolution,
     FundamentalContext,
     FundamentalIntelligenceService,
 )
+from app.services.instruments import InstrumentService
 from app.services.news import NewsService
 from app.services.portfolio_intelligence import build_portfolio_intelligence
 from app.services.positions import PositionService
@@ -163,11 +167,22 @@ class _RecordingResearchService(FinancialResearchService):
         self,
         context: FinancialResearchContext | None = None,
         error: Exception | None = None,
+        instrument_service: InstrumentService | None = None,
     ) -> None:
-        super().__init__(news_service=None)
+        super().__init__(news_service=None, instrument_service=instrument_service)
         self.context = context
         self.error = error
         self.calls: list[tuple[datetime, datetime, tuple[str, ...]]] = []
+        # Resolution is the REAL implementation (Step 51), so what the agent
+        # asked the catalog for can be asserted.
+        self.resolutions: list[FocusResolution] = []
+
+    def resolve_focus_symbols(
+        self, focus_symbols: tuple[str, ...] | list[str]
+    ) -> FocusResolution:
+        resolution = super().resolve_focus_symbols(focus_symbols)
+        self.resolutions.append(resolution)
+        return resolution
 
     def build_research(
         self,
@@ -241,18 +256,54 @@ class _RecordingFundamentalService(FundamentalIntelligenceService):
         return self.context
 
 
+def broker_catalog(*symbols: str) -> InstrumentService:
+    """An instrument service over a broker catalog holding exactly ``symbols``.
+
+    The real InstrumentService runs (real resolution rules); only the vendor
+    side is a deterministic in-memory catalog, so the agent's resolution step is
+    exercised without a terminal, credentials, database or network.
+    """
+    return InstrumentService(
+        FakeInstrumentProvider(
+            instruments=tuple(
+                Instrument(
+                    symbol=symbol,
+                    name=None,
+                    asset_class=None,
+                    base_currency=None,
+                    quote_currency=None,
+                    digits=2,
+                    trade_mode=TradeMode.FULL,
+                )
+                for symbol in symbols
+            )
+        )
+    )
+
+
+class _FailingInstrumentProvider(InstrumentProvider):
+    """Catalog whose terminal is unavailable (infrastructure failure)."""
+
+    def get_instrument(self, symbol: str) -> Instrument:
+        raise RuntimeError("MT5 instrument lookup failed")
+
+    def list_instruments(self) -> tuple[Instrument, ...]:
+        raise RuntimeError("MT5 instrument catalog request failed")
+
+
 def real_research_context(
     *,
     items: tuple[NewsItem, ...] | None = None,
     news_service: NewsService | None = None,
     focus_symbols: tuple[str, ...] = ("XAUUSD",),
+    instrument_service: InstrumentService | None = None,
 ) -> FinancialResearchContext:
     """The real research service over the deterministic placeholder feed."""
     service = news_service if news_service is not None else NewsService(
         FakeNewsProvider(items=items) if items is not None else FakeNewsProvider(),
         max_items=20,
     )
-    return FinancialResearchService(service).build_research(
+    return FinancialResearchService(service, instrument_service).build_research(
         RESEARCH_FROM, WINDOW_FROM, focus_symbols=focus_symbols
     )
 
@@ -515,7 +566,12 @@ def test_multiple_focus_instruments_are_graded_together() -> None:
 
     agent.handle("What is happening with XAUUSD and USOIL today?", broker_id=1, now=AS_OF)
 
-    assert research.calls[0][2] == ("XAUUSD", "USOIL")
+    # Step 51 changed WHERE the focus set comes from, not how it is normalized:
+    # the agent now hands over the resolved symbols, which the resolution step
+    # reports deterministically (upper-cased, sorted, deduplicated) exactly as
+    # the research context's own focus list always was. The order the request
+    # happens to name instruments in was never part of the contract.
+    assert research.calls[0][2] == ("USOIL", "XAUUSD")
 
 
 def test_focus_symbols_are_bounded_per_request() -> None:
@@ -775,6 +831,155 @@ def test_the_research_rendering_is_deterministic() -> None:
         return provider.prompts[0].content
 
     assert content_once() == content_once()
+
+
+# --- Step 51: the focus instrument is resolved through the tenant's catalog --------------------
+
+
+def test_the_detected_focus_instrument_is_resolved_before_it_is_researched() -> None:
+    # The broker lists the instrument under its own spelling, so research is
+    # built for the BROKER's symbol rather than for the label the request text
+    # produced. The agent owns no catalog logic: it asks the research service.
+    # The double is built WITH the same catalog, so it resolves for real.
+    research = _RecordingResearchService(
+        real_research_context(), instrument_service=broker_catalog("xauusd")
+    )
+    agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        research=research,
+    )
+
+    agent.handle("What is happening with XAUUSD today?", broker_id=1, now=AS_OF)
+
+    assert research.resolutions[0].requested == ("XAUUSD",)
+    assert research.resolutions[0].resolved == ("xauusd",)
+    assert research.calls[0][2] == ("xauusd",)
+
+
+def test_a_focus_instrument_the_broker_does_not_offer_builds_no_research() -> None:
+    # The request names XAUUSD but this broker offers only XAUUSD.r. The label is
+    # never treated as a real instrument: nothing is researched for it, and the
+    # question is still answered from the mandatory context rather than failing.
+    research = _RecordingResearchService(
+        real_research_context(), instrument_service=broker_catalog("XAUUSD.r")
+    )
+    provider = FakeLLMProvider()
+    agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        research=research,
+        llm=provider,
+    )
+
+    agent.handle("What is happening with XAUUSD today?", broker_id=1, now=AS_OF)
+
+    assert research.resolutions[0].unresolved == ("XAUUSD",)
+    assert research.calls == []  # no research built, so no look-back news fetched
+    content = provider.prompts[0].content
+    assert "Financial research" not in content
+    assert "Economic calendar for today" in content
+    assert "Fundamental intelligence" in content
+
+
+def test_an_unconfirmed_focus_instrument_never_reaches_the_prompt() -> None:
+    # Structural: the prompt for an unresolvable focus instrument is byte-identical
+    # to the prompt of the same request with no research service wired at all.
+    request = "What is happening with XAUUSD today?"
+    provider = FakeLLMProvider()
+    agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        research=_RecordingResearchService(
+            real_research_context(), instrument_service=broker_catalog("XAUUSD.r")
+        ),
+        llm=provider,
+    )
+    agent.handle(request, broker_id=1, now=AS_OF)
+    unconfirmed = provider.prompts[0].content
+
+    baseline_provider = FakeLLMProvider()
+    baseline_agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        llm=baseline_provider,
+    )
+    baseline_agent.handle(request, broker_id=1, now=AS_OF)
+
+    assert unconfirmed == baseline_provider.prompts[0].content
+
+
+def test_a_catalog_failure_propagates_and_the_llm_is_never_asked() -> None:
+    research = _RecordingResearchService(
+        real_research_context(),
+        instrument_service=InstrumentService(_FailingInstrumentProvider()),
+    )
+    provider = FakeLLMProvider()
+    agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        research=research,
+        llm=provider,
+    )
+
+    with pytest.raises(RuntimeError):
+        agent.handle("What is happening with XAUUSD today?", broker_id=1, now=AS_OF)
+
+    assert provider.call_count == 0  # the existing error boundary: no answer is invented
+    assert research.calls == []
+
+
+def test_a_request_without_a_focus_instrument_never_touches_the_catalog() -> None:
+    research = _RecordingResearchService(
+        real_research_context(instrument_service=broker_catalog("XAUUSD"))
+    )
+    provider = FakeLLMProvider()
+    agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        research=research,
+        llm=provider,
+    )
+
+    agent.handle("What is happening today?", broker_id=1, now=AS_OF)
+
+    assert research.resolutions == []  # no catalog read, no research fetch
+    assert research.calls == []
+    assert provider.call_count == 1
+
+
+def test_research_without_a_broker_catalog_keeps_the_step_49_behaviour() -> None:
+    # A deployment with no instrument service cannot verify a name, so the names
+    # are used as given: unverified, which is exactly what Step 49 did.
+    research = _RecordingResearchService(real_research_context())
+    agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        research=research,
+    )
+
+    agent.handle("What is happening with XAUUSD today?", broker_id=1, now=AS_OF)
+
+    assert research.resolutions[0].resolved == ("XAUUSD",)
+    assert research.resolutions[0].unresolved == ()
+    assert research.calls[0][2] == ("XAUUSD",)
+
+
+def test_the_profile_grading_still_works_on_a_resolved_broker_spelling() -> None:
+    # Step 48 profiles remain optional enhancements applied AFTER resolution: the
+    # resolved spelling still grades a direct gold item as the strongest level,
+    # and an unprofiled symbol stays researchable beside it.
+    context = real_research_context(
+        focus_symbols=("XAUUSD.r", "COFFEE"),
+        instrument_service=broker_catalog("XAUUSD.r", "COFFEE"),
+    )
+
+    assert context.focus_symbols == ("COFFEE", "XAUUSD.r")
+    assert context.unresolved_symbols == ()
+    gold = next(entry for entry in context.news if "Gold ETF flows" in entry.item.title)
+    assert gold.relevance.value == "RELEVANT"
+    assert gold.matched_instruments == ("XAUUSD.R",)
+    assert context.instruments == ("COFFEE", "XAUUSD.r")
 
 
 def test_the_real_sources_flow_through_the_whole_agent_pipeline() -> None:

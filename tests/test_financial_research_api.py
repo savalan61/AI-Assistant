@@ -8,13 +8,19 @@ pinned to the deterministic development sources (calendar AUTO with the
 QuantGist key cleared, news AUTO with the Alpha Vantage key cleared), so no
 request leaves the process.
 
-The research endpoint needs no MT5 seam at all — the service holds no
-credentials and reads no positions — so the suite pins the HTTP boundary
-guarantees: authentication, the explicit UTC window contract (naive 400,
-inverted 400), focus-symbol validation (422), the response contract with
-provenance, the explicit unavailable state when a deployment has no news
-source, the generic fail-closed 503 on a failing news source, and the fact
-that the only tenant fact in a response is the caller's own broker_id echo.
+Step 51 gives the research endpoint its instrument-resolution step, so the suite
+replaces the composition-root MT5 provider CLASS seam with the deterministic
+instrument fake: the real InstrumentService, the real resolution rules and the
+real research service run, with no terminal, no credentials and no network.
+
+The suite pins the HTTP boundary guarantees: authentication, the explicit UTC
+window contract (naive 400, inverted 400), focus-symbol validation (422), the
+broker-canonical spelling echoed for a resolved instrument, the deterministic
+404 for an instrument this broker does not offer, the generic fail-closed 503
+on a failing catalog or news source, the response contract with provenance, the
+explicit unavailable state when a deployment has no news source, tenant
+isolation, and the fact that the only tenant fact in a response is the caller's
+own broker_id echo.
 """
 import asyncio
 from datetime import UTC, datetime
@@ -32,6 +38,7 @@ from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
 from app.db.models import Broker, User, UserRole
+from app.providers.fake_instrument import FakeInstrumentProvider
 from app.providers.news import NewsItem, NewsProvider
 
 TEST_SECRET = "unit-test-secret-not-a-real-credential"
@@ -96,6 +103,32 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # reproducible) regardless of what a developer's local .env holds.
     monkeypatch.setattr(app_settings, "NEWS_SOURCE", NewsSource.AUTO, raising=True)
     monkeypatch.setattr(app_settings, "ALPHA_VANTAGE_API_KEY", "", raising=True)
+
+
+@pytest.fixture(autouse=True)
+def patched_trade_catalog(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Resolve research instruments over the deterministic fake catalog.
+
+    The composition root builds the instrument provider from the authenticated
+    tenant's credentials; the class seam is replaced here so the SAME resolution
+    architecture runs without a terminal. The tenant credentials each provider
+    was built with are recorded, so tenant binding can be asserted.
+    """
+    constructions: list[Any] = []
+
+    class FakeMT5InstrumentProvider:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            constructions.append(credentials)
+            self._inner = FakeInstrumentProvider()
+
+        def get_instrument(self, symbol: str):
+            return self._inner.get_instrument(symbol)
+
+        def list_instruments(self):
+            return self._inner.list_instruments()
+
+    monkeypatch.setattr(deps, "MT5InstrumentProvider", FakeMT5InstrumentProvider)
+    return constructions
 
 
 @pytest.fixture()
@@ -374,6 +407,168 @@ def test_a_failing_news_source_fails_closed_with_the_generic_503(
 
     assert status == 503
     assert body["detail"] == "Financial research service temporarily unavailable"
+
+
+# --- Step 51: instrument resolution against the tenant's own broker catalog -------------------
+
+
+def test_a_requested_spelling_is_answered_with_the_brokers_canonical_symbol(
+    research_env,
+) -> None:
+    # The caller's case is not the broker's: the broker lists XAUUSD.r, so that
+    # is the spelling research is graded against and the spelling echoed back.
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=xauusd.r",
+    )
+
+    assert status == 200
+    assert body["focus_symbols"] == ["XAUUSD.r"]
+    assert body["instruments"] == ["XAUUSD.r"]
+
+
+def test_the_brokers_canonical_spelling_still_reaches_the_relevance_profiles(
+    research_env,
+) -> None:
+    # Step 48 profiles stay optional enhancements ON TOP of a resolved symbol:
+    # XAUUSD.r resolves the XAUUSD profile, so a direct gold item is still the
+    # strongest level, now graded against the broker's own spelling.
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=xauusd.r",
+    )
+
+    gold = next(
+        (
+            wrapper
+            for wrapper in body["news"]["items"]
+            if "Gold ETF flows" in wrapper["item"]["title"]
+        ),
+        None,
+    )
+    assert status == 200
+    assert gold is not None
+    assert gold["overall_relevance"] == "RELEVANT"
+    # The context reports the broker's own spelling, while the classification
+    # labels an item with the upper-cased instrument name it matched — the
+    # labelling contract the relevance layer has always used (it upper-cases the
+    # labels it compares, which is why a broker-spelled position already matched
+    # under upper case). The match itself is case-insensitive; only the echoed
+    # label differs (CURRENT_CHECKPOINT.md known issue 21).
+    assert gold["matched_instruments"] == ["XAUUSD.R"]
+    assert body["focus_symbols"] == ["XAUUSD.r"]
+
+
+@pytest.mark.parametrize("symbol", ["AAPL", "LVMH", "BTCUSD", "COFFEE", "NICKEL"])
+def test_an_arbitrary_broker_symbol_is_researchable_without_a_profile(
+    research_env, symbol: str
+) -> None:
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol={symbol}",
+    )
+
+    assert status == 200
+    assert body["focus_symbols"] == [symbol]
+    # Researchable does not mean "relevant": every item is still graded against
+    # this symbol and may legitimately be NOT_OBVIOUSLY_RELEVANT.
+    for wrapper in body["news"]["items"]:
+        assert wrapper["overall_relevance"] in RELEVANCE_LEVELS
+        assert symbol in wrapper["matched_instruments"] or not wrapper["matched_instruments"]
+
+
+def test_an_instrument_the_broker_does_not_offer_is_a_404(research_env) -> None:
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=NOSUCHSYMBOL",
+    )
+
+    assert status == 404
+    # The same deterministic client error the instrument endpoints use: no
+    # provider internals, no broker identity, nothing about the catalog.
+    assert body == {"detail": "Instrument unavailable for the requested symbol"}
+
+
+def test_one_unknown_instrument_fails_the_whole_request(research_env) -> None:
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=XAUUSD,NOSUCHSYMBOL",
+    )
+
+    assert status == 404
+    # Fail closed: no partial result, and the known symbol is never echoed as if
+    # the request had succeeded.
+    assert body == {"detail": "Instrument unavailable for the requested symbol"}
+    assert "focus_symbols" not in body
+
+
+def test_a_catalog_failure_is_the_generic_503(research_env, monkeypatch) -> None:
+    class FailingInstrumentProvider:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            pass
+
+        def get_instrument(self, symbol: str):
+            raise RuntimeError("MT5 instrument lookup failed")
+
+        def list_instruments(self):
+            raise RuntimeError("MT5 instrument catalog request failed")
+
+    monkeypatch.setattr(deps, "MT5InstrumentProvider", FailingInstrumentProvider)
+
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=XAUUSD",
+    )
+
+    assert status == 503
+    assert body == {"detail": "Financial research service temporarily unavailable"}
+
+
+def test_a_tenant_without_a_usable_mt5_session_gets_the_generic_503(research_env, monkeypatch) -> None:
+    """The real provider runs here: no credentials means the session refuses.
+
+    Resolution is broker infrastructure, so an unavailable MT5 catalog is a
+    503 (never an empty or invented instrument set), exactly as for every other
+    MT5-backed endpoint.
+    """
+    monkeypatch.undo()  # drop the catalog fake for this test: the real seam runs
+
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=XAUUSD",
+    )
+
+    assert status == 503
+    assert body == {"detail": "Financial research service temporarily unavailable"}
+
+
+def test_each_request_resolves_against_the_authenticated_tenants_own_catalog(
+    research_env, patched_trade_catalog
+) -> None:
+    get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=XAUUSD",
+    )
+    get_research(
+        research_env,
+        research_env["customer_b_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=XAUUSD",
+    )
+
+    # Each request composed its own provider from the authenticated user's own
+    # MT5 identity: a caller cannot choose whose broker catalog is read.
+    assert [getattr(credentials, "login", None) for credentials in patched_trade_catalog] == [
+        20001,
+        20002,
+    ]
 
 
 # --- tenant isolation / secret safety -------------------------------------------------------

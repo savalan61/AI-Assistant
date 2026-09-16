@@ -28,6 +28,11 @@ Design notes:
   instrument and the look-back is enabled. Its window is the half-open span
   immediately BEFORE the calendar window, so research news and fundamental news
   can never overlap — one request still fetches each news window at most once;
+* the focused instrument is resolved through the tenant's own broker catalog
+  before it is researched (Step 51). The agent owns no catalog logic: it asks
+  the research service to resolve the detected names and researches only the
+  ones the broker actually confirmed, so a label the broker does not offer is
+  never presented to the model as a real instrument;
 * no HTTP endpoint — this is an internal service/domain boundary;
 * no agent framework (LangChain, LangGraph, ...) and no tool use;
 * read-only by construction: the only capabilities held here are reading a
@@ -180,6 +185,12 @@ class AgentService:
         # configured look-back must be positive. The window is the half-open span
         # immediately BEFORE the calendar window, so research and fundamental
         # news never overlap and the same item is never fetched twice.
+        #
+        # Step 51: the detected name is resolved through the research service's
+        # broker catalog FIRST, so a label this broker does not offer is never
+        # researched (no news is fetched for it, and no unconfirmed spelling
+        # reaches the prompt). Resolution is the same single mechanism the
+        # research API uses; the agent performs no catalog read of its own.
         research = None
         lookback_days = settings.AGENT_RESEARCH_LOOKBACK_DAYS
         if (
@@ -190,11 +201,13 @@ class AgentService:
         ):
             focus_symbols = detect_focus_symbols(request, limit=_MAX_FOCUS_SYMBOLS)
             if focus_symbols:
-                research = self._research.build_research(
-                    economic.window_from - timedelta(days=lookback_days),
-                    economic.window_from,
-                    focus_symbols=focus_symbols,
-                )
+                resolution = self._research.resolve_focus_symbols(focus_symbols)
+                if resolution.resolved:
+                    research = self._research.build_research(
+                        economic.window_from - timedelta(days=lookback_days),
+                        economic.window_from,
+                        focus_symbols=resolution.resolved,
+                    )
         answer = self._llm.complete(
             build_prompt(request, context, self._data_policy, economic, fundamental, research)
         )

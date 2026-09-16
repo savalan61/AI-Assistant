@@ -10,6 +10,7 @@ from app.services.fundamental_intelligence.focus import detect_focus_symbol, det
 from app.services.fundamental_intelligence.research import (
     FinancialResearchContext,
     FinancialResearchService,
+    FocusResolution,
 )
 from app.services.fundamental_intelligence.relevance import (
     InstrumentRelevance,
@@ -26,6 +27,7 @@ __all__ = [
     "ExposureStatus",
     "FinancialResearchContext",
     "FinancialResearchService",
+    "FocusResolution",
     "FundamentalContext",
     "FundamentalIntelligenceService",
     "FundamentalNewsItem",

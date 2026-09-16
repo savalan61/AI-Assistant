@@ -8,6 +8,11 @@ suite pins the vertical slice's boundary guarantees:
   boundaries are half-open);
 * focus instruments are explicit parameters (upper-cased, sorted, deduplicated,
   a blank one is a caller error) and are labels for grading only;
+* since Step 51 each requested instrument is resolved through an injected
+  broker catalog first: only the broker's OWN canonical spelling is graded, a
+  requested name the catalog does not confirm is reported as unresolved rather
+  than used as a real instrument, and a catalog/infrastructure failure
+  propagates instead of producing a fabricated result;
 * grading goes through the SAME classification the fundamental context uses
   (one relevance mechanism — an item graded here matches what
   FundamentalIntelligenceService would say about the same item);
@@ -22,11 +27,14 @@ from decimal import Decimal
 
 import pytest
 
+from app.providers.fake_instrument import FakeInstrumentProvider
+from app.providers.instrument import Instrument, InstrumentProvider, TradeMode
 from app.providers.news import NewsItem, NewsProvider
 from app.services.fundamental_intelligence import (
     FinancialResearchService,
     FundamentalIntelligenceService,
 )
+from app.services.instruments import InstrumentService
 from app.services.news import NewsService
 
 WINDOW_FROM = datetime(2026, 9, 16, 0, 0, tzinfo=UTC)
@@ -81,10 +89,50 @@ class StubNewsProvider(NewsProvider):
         return self._items
 
 
-def make_service(items: tuple[NewsItem, ...] = (), max_items: int = 20) -> FinancialResearchService:
+def make_service(
+    items: tuple[NewsItem, ...] = (),
+    max_items: int = 20,
+    *,
+    catalog: tuple[str, ...] | None = None,
+) -> FinancialResearchService:
+    """A research service over the stub feed, optionally over a broker catalog.
+
+    ``catalog`` is the set of symbols the fake broker offers; the real
+    InstrumentService and its resolution rules run, so the Step 51 behaviour is
+    exercised without a terminal, credentials or a network.
+    """
+    instrument_service = None
+    if catalog is not None:
+        instrument_service = InstrumentService(
+            FakeInstrumentProvider(
+                instruments=tuple(
+                    Instrument(
+                        symbol=symbol,
+                        name=None,
+                        asset_class=None,
+                        base_currency=None,
+                        quote_currency=None,
+                        digits=2,
+                        trade_mode=TradeMode.FULL,
+                    )
+                    for symbol in catalog
+                )
+            )
+        )
     return FinancialResearchService(
-        news_service=NewsService(StubNewsProvider(items), max_items=max_items)
+        news_service=NewsService(StubNewsProvider(items), max_items=max_items),
+        instrument_service=instrument_service,
     )
+
+
+class FailingInstrumentProvider(InstrumentProvider):
+    """Broker catalog whose terminal is unavailable (infrastructure failure)."""
+
+    def get_instrument(self, symbol: str) -> Instrument:
+        raise RuntimeError("MT5 instrument lookup failed")
+
+    def list_instruments(self) -> tuple[Instrument, ...]:
+        raise RuntimeError("MT5 instrument catalog request failed")
 
 
 # --- window validation ------------------------------------------------------------------
@@ -141,6 +189,143 @@ def test_focus_symbols_may_be_passed_as_a_list() -> None:
     context = make_service().build_research(WINDOW_FROM, WINDOW_TO, focus_symbols=["XAUUSD"])
 
     assert context.focus_symbols == ("XAUUSD",)
+
+
+# --- Step 51: resolution against the broker catalog ---------------------------------------
+
+
+def test_a_requested_spelling_resolves_to_the_brokers_own_canonical_symbol() -> None:
+    context = make_service(catalog=("XAUUSD.r",)).build_research(
+        WINDOW_FROM, WINDOW_TO, focus_symbols=("xauusd.r",)
+    )
+
+    # The broker lists XAUUSD.r, so that — not the caller's case — is what is
+    # researched and echoed.
+    assert context.focus_symbols == ("XAUUSD.r",)
+    assert context.instruments == ("XAUUSD.r",)
+    assert context.unresolved_symbols == ()
+
+
+def test_a_requested_spelling_the_broker_does_not_offer_is_unresolved() -> None:
+    context = make_service(
+        (item("gold-1", WINDOW_FROM, "Gold demand rises as central banks increase purchases"),),
+        catalog=("XAUUSD.r",),
+    ).build_research(WINDOW_FROM, WINDOW_TO, focus_symbols=("XAUUSD",))
+
+    # The name is reported as unresolved, is not graded against, and is never
+    # presented as an instrument the broker offers.
+    assert context.unresolved_symbols == ("XAUUSD",)
+    assert context.focus_symbols == ()
+    assert context.instruments == ()
+    assert context.news[0].matched_instruments == ()
+    assert context.news[0].relevance.value == "NOT_OBVIOUSLY_RELEVANT"
+
+
+def test_resolved_and_unresolved_symbols_are_reported_together() -> None:
+    context = make_service(catalog=("XAUUSD",)).build_research(
+        WINDOW_FROM, WINDOW_TO, focus_symbols=("XAUUSD", "NOSUCHSYMBOL")
+    )
+
+    assert context.focus_symbols == ("XAUUSD",)
+    assert context.unresolved_symbols == ("NOSUCHSYMBOL",)
+
+
+def test_a_case_difference_resolves_to_the_brokers_own_spelling() -> None:
+    context = make_service(catalog=("xauusd",)).build_research(
+        WINDOW_FROM, WINDOW_TO, focus_symbols=("XAUUSD",)
+    )
+
+    assert context.focus_symbols == ("xauusd",)
+
+
+def test_a_case_collision_the_broker_lists_twice_is_unresolved() -> None:
+    # Two distinct broker symbols differing only by case: guessing one would
+    # silently research the wrong instrument.
+    context = make_service(catalog=("Gold", "gold")).build_research(
+        WINDOW_FROM, WINDOW_TO, focus_symbols=("GOLD",)
+    )
+
+    assert context.unresolved_symbols == ("GOLD",)
+    assert context.focus_symbols == ()
+
+
+def test_the_resolution_is_deterministic_and_normalized() -> None:
+    service = make_service(catalog=("XAUUSD", "usoil"))
+
+    first = service.resolve_focus_symbols(("USOIL", "xauusd", "USOIL"))
+    second = service.resolve_focus_symbols(("usoil ", "XAUUSD"))
+
+    assert first.requested == ("USOIL", "XAUUSD")
+    # The broker's own spellings, deterministically ordered ("XAUUSD" is the
+    # catalog's exact spelling; "USOIL" resolves to the catalog's "usoil").
+    assert first.resolved == ("XAUUSD", "usoil")
+    assert first.unresolved == ()
+    assert first == second  # the same request always resolves the same way
+
+
+def test_without_a_catalog_names_are_unverified_not_unresolved() -> None:
+    # A deployment with no broker catalog cannot check a name; "not verified" is
+    # a different statement from "known to be absent", and Step 49 behaviour is
+    # preserved exactly.
+    service = make_service()
+
+    resolution = service.resolve_focus_symbols(("xauusd.r",))
+    context = service.build_research(WINDOW_FROM, WINDOW_TO, focus_symbols=("xauusd.r",))
+
+    assert resolution.resolved == ("XAUUSD.R",)
+    assert resolution.unresolved == ()
+    assert context.unresolved_symbols == ()
+
+
+def test_a_symbol_without_a_profile_is_researchable_and_graded_generically() -> None:
+    context = make_service(
+        (item("eq-1", WINDOW_FROM, "LVMH reports quarterly revenue"),), catalog=("LVMH",)
+    ).build_research(WINDOW_FROM, WINDOW_TO, focus_symbols=("LVMH",))
+
+    # Researchable without a Step 48 profile: the item is graded, not refused.
+    assert context.focus_symbols == ("LVMH",)
+    assert context.unresolved_symbols == ()
+    assert context.news[0].relevance.value in {
+        "RELEVANT",
+        "POTENTIALLY_RELEVANT",
+        "NOT_OBVIOUSLY_RELEVANT",
+    }
+
+
+def test_grading_uses_the_resolved_spelling_and_keeps_the_profiles_working() -> None:
+    context = make_service(
+        (item("gold-1", WINDOW_FROM, "Gold demand rises as central banks increase purchases"),),
+        catalog=("XAUUSD.r",),
+    ).build_research(WINDOW_FROM, WINDOW_TO, focus_symbols=("xauusd.r",))
+
+    entry = context.news[0]
+    # The XAUUSD profile still reaches a suffixed broker spelling, so the direct
+    # match is still the strongest level; the label echoed by the relevance
+    # layer is upper-cased, as it always has been (known issue 21).
+    assert entry.relevance.value == "RELEVANT"
+    assert entry.kind is not None and entry.kind.value == "DIRECT"
+    assert entry.matched_instruments == ("XAUUSD.R",)
+    assert context.focus_symbols == ("XAUUSD.r",)
+
+
+def test_a_catalog_failure_fails_closed_without_a_fabricated_result() -> None:
+    service = FinancialResearchService(
+        news_service=NewsService(StubNewsProvider(()), max_items=20),
+        instrument_service=InstrumentService(FailingInstrumentProvider()),
+    )
+
+    with pytest.raises(RuntimeError):
+        service.build_research(WINDOW_FROM, WINDOW_TO, focus_symbols=("XAUUSD",))
+
+    with pytest.raises(RuntimeError):
+        service.resolve_focus_symbols(("XAUUSD",))
+
+
+def test_a_blank_focus_symbol_is_still_rejected_with_a_catalog() -> None:
+    service = make_service(catalog=("XAUUSD",))
+
+    with pytest.raises(ValueError, match="empty instrument name"):
+        service.resolve_focus_symbols(("  ",))
 
 
 # --- window filtering -------------------------------------------------------------------

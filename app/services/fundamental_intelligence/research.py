@@ -18,11 +18,19 @@ Deliberate properties:
   window ``[from_time, to_time)`` from its caller; nothing in this module reads
   the current time, so the result is reproducible and testable. A naive
   boundary or an inverted window is a caller error and fails loudly.
-* **Focus instruments are explicit parameters.** The caller names the
-  instruments (for example ``XAUUSD``); they are labels for relevance grading
-  only. This service reads no positions, accepts no broker/user identity and
-  performs no MT5 read, so its output carries no tenant-sensitive data by
-  construction.
+* **Focus instruments are explicit parameters, resolved against the broker.**
+  The caller names the instruments (for example ``XAUUSD``); when an
+  ``InstrumentService`` is wired (Step 51), every name is resolved through the
+  tenant's own MT5 catalog first and grading uses the broker's canonical
+  spelling — a requested spelling the broker does not offer is reported as
+  unresolved and never used as if it were a real instrument. This service holds
+  no MT5 provider, no credentials, no positions and no broker/user identity: it
+  asks the instrument layer for a symbol, which is the same read-only boundary
+  every other resolver uses.
+* **Generic by construction.** A profile is never required to research a
+  symbol: AAPL, LVMH, BTCUSD, NICKEL, COFFEE, XAUUSD.r, USOIL, NAS100 and any
+  other broker symbol follow the identical path. The Step 48 instrument profiles
+  only decide relevance strength once a symbol is known.
 * **Provenance and boundedness travel.** Items come from the configured
   ``NewsService`` (window-filtered, validated, deterministically ordered and
   hard-capped), and the context reports the source's provenance marker — or the
@@ -40,6 +48,7 @@ from app.services.fundamental_intelligence.fundamental_intelligence_service impo
     FundamentalNewsItem,
     news_intelligence,
 )
+from app.services.instruments import InstrumentService
 from app.services.news import NewsService
 
 
@@ -73,12 +82,32 @@ def _normalize_focus_symbols(
     return tuple(sorted(normalized))
 
 
+class FocusResolution(NamedTuple):
+    """The outcome of resolving requested instrument names to broker symbols.
+
+    ``requested`` is the normalized caller input (upper-cased, sorted,
+    deduplicated). ``resolved`` holds the broker's OWN canonical spelling for
+    each name it confirmed — never a spelling this service invented — and
+    ``unresolved`` holds the requested names the broker's catalog did not offer
+    (or offered ambiguously). ``requested`` is always the disjoint union of the
+    other two.
+    """
+
+    requested: tuple[str, ...]
+    resolved: tuple[str, ...]
+    unresolved: tuple[str, ...]
+
+
 class FinancialResearchContext(NamedTuple):
     """Graded published-source news for one explicit window and instrument set.
 
-    ``focus_symbols`` are the instruments the caller asked about (normalized);
-    ``instruments`` is the set everything was graded against — the focus
-    symbols themselves, because this surface holds no positions to add. When
+    ``focus_symbols`` are the instruments actually researched — the broker's
+    canonical spellings when resolution is wired (Step 51), otherwise the
+    normalized caller input. ``unresolved_symbols`` names the requested
+    instruments the broker's catalog did not confirm: they are deliberately
+    absent from ``focus_symbols`` rather than graded as if they existed.
+    ``instruments`` is the set everything was graded against — the focus symbols
+    themselves, because this surface holds no positions to add. When
     ``news_available`` is False the deployment has no news source configured
     and ``news_unavailable_reason`` says so; that is a different statement from
     an available source that published nothing in the window.
@@ -88,6 +117,7 @@ class FinancialResearchContext(NamedTuple):
     window_from: datetime
     window_to: datetime
     focus_symbols: tuple[str, ...]
+    unresolved_symbols: tuple[str, ...]
     instruments: tuple[str, ...]
     news_available: bool
     news_data_source: str | None
@@ -107,17 +137,76 @@ class FinancialResearchService:
 
     ``news_service`` is optional: ``None`` means this deployment has no news
     source configured, which is reported explicitly rather than treated as an
-    empty feed. The service holds no MT5 provider, reads no positions and
-    accepts no tenant identity.
+    empty feed.
+
+    ``instrument_service`` is the optional broker-catalog boundary (Step 51).
+    When it is wired, caller-supplied instrument names are resolved through the
+    authenticated tenant's own MT5 catalog before they are graded, and the
+    broker's canonical spelling is what travels into the context. When it is
+    not wired, names are used as given — a deployment with no broker catalog
+    cannot verify them — which is exactly the Step 49 behaviour.
+
+    The service still holds no MT5 provider, no credentials, no positions and
+    no tenant identity: it depends on the instrument *service*, which owns the
+    tenant-scoped session, the provider and the deterministic presentation
+    rules. Resolution is reached only through that boundary, so no catalog or
+    provider logic is duplicated here.
     """
 
-    def __init__(self, news_service: NewsService | None):
+    def __init__(
+        self,
+        news_service: NewsService | None,
+        instrument_service: InstrumentService | None = None,
+    ):
         self._news = news_service
+        self._instruments = instrument_service
 
     @property
     def news_source(self) -> str | None:
         """Provenance marker of the configured news source, or None when absent."""
         return self._news.source if self._news is not None else None
+
+    def resolve_focus_symbols(
+        self,
+        focus_symbols: tuple[str, ...] | list[str],
+    ) -> FocusResolution:
+        """Resolve requested instrument names to the broker's canonical symbols.
+
+        A blank name is a caller input error (``ValueError``). A name the
+        broker's catalog cannot resolve to exactly one instrument — unknown,
+        ambiguous or unusable as a symbol — is reported in ``unresolved`` rather
+        than guessed at or silently accepted, so a caller decides what an
+        unresolvable instrument means for it (the research API fails closed,
+        the agent simply researches nothing for it).
+
+        An MT5/catalog availability failure is NOT an unresolved instrument: it
+        propagates as ``RuntimeError``, which every caller already maps to the
+        established generic 503.
+        """
+        requested = _normalize_focus_symbols(focus_symbols)
+        if self._instruments is None:
+            # No broker catalog is wired: the names cannot be verified, so they
+            # are reported as requested rather than as unresolved ("unverified"
+            # and "known to be absent" are different statements).
+            return FocusResolution(requested=requested, resolved=requested, unresolved=())
+
+        resolved: set[str] = set()
+        unresolved: list[str] = []
+        for symbol in requested:
+            try:
+                instrument = self._instruments.resolve(symbol)
+            except ValueError:
+                # resolve() raises ValueError exactly when the broker's catalog
+                # cannot identify one instrument for this name; the requested
+                # names are already normalized above, so nothing else lands here.
+                unresolved.append(symbol)
+                continue
+            resolved.add(instrument.symbol)
+        return FocusResolution(
+            requested=requested,
+            resolved=tuple(sorted(resolved)),
+            unresolved=tuple(unresolved),
+        )
 
     def build_research(
         self,
@@ -136,6 +225,10 @@ class FinancialResearchService:
         facts gets them, with an honest "no instrument in play" reason rather
         than a discarded feed.
 
+        Each requested instrument is resolved through the broker catalog first
+        when one is wired (Step 51), and only the resolved canonical spellings
+        are graded; the rest are reported in ``unresolved_symbols``.
+
         ``as_of`` echoes the caller's (already validated) window start so the
         context is reproducible; no clock is read here.
         """
@@ -144,7 +237,8 @@ class FinancialResearchService:
         if window_from >= window_to:
             raise ValueError("from_time must be earlier than to_time")
 
-        focus = _normalize_focus_symbols(focus_symbols)
+        resolution = self.resolve_focus_symbols(focus_symbols)
+        focus = resolution.resolved
         instruments = focus
 
         if self._news is None:
@@ -169,6 +263,7 @@ class FinancialResearchService:
             window_from=window_from,
             window_to=window_to,
             focus_symbols=focus,
+            unresolved_symbols=resolution.unresolved,
             instruments=instruments,
             news_available=news_available,
             news_data_source=news_data_source,

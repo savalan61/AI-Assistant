@@ -321,18 +321,6 @@ def get_fundamental_intelligence_service() -> FundamentalIntelligenceService:
     return FundamentalIntelligenceService(news_service=get_news_service())
 
 
-def get_financial_research_service() -> FinancialResearchService:
-    """Compose the graded research context from the same resolved news source.
-
-    Reuses the news seam above unchanged: the same explicit NEWS_SOURCE
-    selection, the same development-only posture, the same failure behaviour.
-    Like the fundamental service, the research service holds no MT5 provider,
-    reads no positions and accepts no tenant identity — it is a windowed news
-    context only — so it carries nothing tenant-sensitive by construction.
-    """
-    return FinancialResearchService(news_service=get_news_service())
-
-
 # Agent LLM wiring. The production seam is the broker-aware router: a broker
 # with an active configuration uses its own provider, and a broker without one
 # uses the shared free pool. The router is built per request because the tenant
@@ -614,6 +602,28 @@ def get_instrument_service(
     return InstrumentService(provider)
 
 
+def get_financial_research_service(
+    credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
+) -> FinancialResearchService:
+    """Compose the graded research context from the news seam and the catalog.
+
+    Declared below the authentication boundary because it now needs this
+    tenant's own MT5 identity: it reuses the news seam unchanged (same
+    NEWS_SOURCE selection, same development-only posture, same failure
+    behaviour) AND the same instrument service GET /instruments uses, so a
+    caller-named instrument is resolved against the authenticated tenant's own
+    broker catalog before anything is researched — one resolution architecture,
+    one credential path, no duplicate lookup.
+
+    The research service itself still reads no positions and holds no tenant
+    identity, so it carries nothing tenant-sensitive by construction.
+    """
+    return FinancialResearchService(
+        news_service=get_news_service(),
+        instrument_service=get_instrument_service(credentials),
+    )
+
+
 def get_economic_intelligence_service(
     credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
 ) -> EconomicIntelligenceService:
@@ -685,7 +695,8 @@ async def get_agent_service(
         # source selection, one failure behaviour) and is composed per request
         # ONLY when the request names a focus instrument, for the look-back span
         # immediately before the calendar window — so it adds news the fundamental
-        # block does not already carry without fetching any window twice. It holds
-        # no MT5 provider and no tenant identity.
-        financial_research_service=get_financial_research_service(),
+        # block does not already carry without fetching any window twice. Since
+        # Step 51 it also resolves that focus instrument through this tenant's own
+        # broker catalog before researching it.
+        financial_research_service=get_financial_research_service(credentials),
     )

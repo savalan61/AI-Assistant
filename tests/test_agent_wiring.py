@@ -59,6 +59,18 @@ def inert_mt5_providers(monkeypatch: pytest.MonkeyPatch):
         def __init__(self, session_manager: object = None, credentials: object = None) -> None:
             pass
 
+    class InertInstrumentProvider:
+        """Inert terminal: every name is unknown, so resolution is observable."""
+
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            pass
+
+        def get_instrument(self, symbol: str) -> object:
+            raise ValueError(f"MT5 does not offer instrument {symbol}")
+
+        def list_instruments(self) -> tuple[object, ...]:
+            return ()
+
     async def stub_credentials(user: User, session: object) -> MT5AccountCredentials:
         # Stands in for the DB-backed resolution: get_agent_service receives the
         # tenant identity from the caller, never from a request.
@@ -67,6 +79,7 @@ def inert_mt5_providers(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(deps, "MT5AccountInfoProvider", InertAccountProvider)
     monkeypatch.setattr(deps, "MT5PositionProvider", InertPositionsProvider)
     monkeypatch.setattr(deps, "MT5TradeHistoryProvider", InertTradeProvider)
+    monkeypatch.setattr(deps, "MT5InstrumentProvider", InertInstrumentProvider)
     monkeypatch.setattr(deps, "get_mt5_credentials", stub_credentials)
     return {"account_constructions": account_constructions}
 
@@ -331,6 +344,14 @@ def test_agent_service_is_built_with_the_financial_research_service(
     # failure behaviour) and holds no MT5 provider and no tenant identity.
     assert isinstance(service._research, FinancialResearchService)
     assert service._research.news_source == "fake-development-placeholder"
+
+    # Step 51: it also resolves requested instruments through a broker catalog —
+    # the SAME tenant-scoped instrument service GET /instruments uses (inert
+    # here, so nothing reaches a terminal).
+    resolution = service._research.resolve_focus_symbols(("XAUUSD",))
+    assert resolution.requested == ("XAUUSD",)
+    assert resolution.resolved == ()
+    assert resolution.unresolved == ("XAUUSD",)
 
 
 def test_openai_adapter_is_a_provider_the_pool_accepts() -> None:
