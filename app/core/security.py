@@ -2,8 +2,11 @@
 
 Boundary module: translates expected bcrypt/PyJWT failures into the
 application-level SecurityError so higher layers never depend on the
-third-party libraries or see their low-level details.
+third-party libraries or see their low-level details. It also holds the
+timing-equalizing dummy verification the login endpoint uses on rejection paths
+that have no stored hash to check.
 """
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -36,6 +39,35 @@ def verify_password(password: str, password_hash: str) -> bool:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("ascii"))
     except (TypeError, ValueError) as exc:
         raise RuntimeError("Password verification failed") from exc
+
+
+# A bcrypt hash of a random value that can never be a credential. Built on the
+# first use rather than at import time, both to keep importing this module cheap
+# and because no value here is ever committed or reused.
+_dummy_password_hash: str | None = None
+
+
+def dummy_password_verification(password: str) -> None:
+    """Spend one real bcrypt verification without checking a credential.
+
+    Used on rejection paths where no stored hash was available (unknown broker,
+    unknown login inside a broker): returning immediately would make those
+    rejections measurably faster than a wrong-password rejection, which is an
+    account/broker enumeration oracle. Verifying against the fixed, unusable
+    hash above keeps the work — and therefore the response time — equivalent.
+
+    The result is deliberately discarded; a caller has nothing to learn from it.
+    """
+    global _dummy_password_hash
+    # A local copy keeps the cache reuse explicit; storing it back only when it
+    # was missing means every later rejection reuses the same hash.
+    dummy_hash = _dummy_password_hash
+    if dummy_hash is None:
+        # A benign race could build this twice; the losing hash is discarded and
+        # behaviour is identical, so no lock is warranted.
+        dummy_hash = hash_password(secrets.token_urlsafe(32))
+        _dummy_password_hash = dummy_hash
+    verify_password(password, dummy_hash)
 
 
 def create_access_token(subject: str, expires_delta: timedelta | None = None) -> str:

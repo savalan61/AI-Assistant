@@ -63,6 +63,44 @@ def test_hashing_same_password_twice_produces_different_hashes():
     assert verify_password(password, first) and verify_password(password, second)
 
 
+# --- dummy verification (timing hardening) -----------------------------------
+
+
+def test_dummy_verification_spends_a_real_bcrypt_check(monkeypatch: pytest.MonkeyPatch):
+    # The login endpoint calls this when no stored hash exists; it must do the
+    # same work as a real verification, not return early.
+    checked: list[str] = []
+    real_verify = security.verify_password
+
+    def spy(password: str, password_hash: str) -> bool:
+        checked.append(password_hash)
+        return real_verify(password, password_hash)
+
+    monkeypatch.setattr(security, "verify_password", spy)
+
+    assert security.dummy_password_verification("anything at all") is None
+
+    assert len(checked) == 1
+    assert checked[0].startswith("$2b$")  # a genuine bcrypt hash, so the cost is real
+
+
+def test_dummy_hash_is_built_once_and_reused(monkeypatch: pytest.MonkeyPatch):
+    checked: list[str] = []
+    real_verify = security.verify_password
+
+    def spy(password: str, password_hash: str) -> bool:
+        checked.append(password_hash)
+        return real_verify(password, password_hash)
+
+    monkeypatch.setattr(security, "verify_password", spy)
+
+    security.dummy_password_verification("first attempt")
+    security.dummy_password_verification("second attempt")
+
+    # One uncrackable hash, reused: a rejection path never pays a fresh hash.
+    assert checked[0] == checked[1]
+
+
 # --- JWT creation/decoding ---------------------------------------------------
 
 

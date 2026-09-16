@@ -59,7 +59,8 @@ class Settings(BaseSettings):
     LLM_SEND_POSITION_PRICING: bool = True
 
     # Login brute-force protection (in-process, per client IP and per submitted
-    # login). After LOGIN_MAX_FAILURES failures inside
+    # (broker code, login) pair, so tenants do not share a counter). After
+    # LOGIN_MAX_FAILURES failures inside
     # LOGIN_FAILURE_WINDOW_SECONDS the login endpoint answers a generic 429.
     # Counters reset on a successful login and on process restart.
     LOGIN_MAX_FAILURES: int = 10

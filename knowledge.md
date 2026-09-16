@@ -1,17 +1,32 @@
 # AI Broker Assistant — Project Knowledge
 
-> **Status note (authority).** This document is a historical project-knowledge
-> snapshot that stops at Steps 18–20. Several sections below (role names, MT5
-> session design, the future-stage list) describe earlier states of the system.
-> CURRENT_CHECKPOINT.md is authoritative for the current state; treat anything
-> here that conflicts with it as historical. Two facts in particular have moved:
-> roles are now super_admin / admin / customer (Step 21A, one super_admin per
-> Broker enforced by a database partial unique index), and MT5 authentication is
-> tenant-scoped (Step 36) with a per-user, administrator-provisioned credential
-> (Step 38): explicit mt5_login / mt5_server columns plus an encrypted MT5
-> INVESTOR (read-only) password, falling back to a numeric username +
-> Broker.mt5_server when those columns are NULL. The MT5 trading (master)
-> password is never requested, stored or used, and no API returns a credential.
+> **Status note (authority).** This document began as a project-knowledge
+> snapshot, and its frozen sections (role names, the section 6 tenant-isolation
+> paragraph, the section 8 composition root, the section 16 MT5 lifecycle
+> description, the completed-work list, the future-stage list and the current
+> immediate objective) stop at Steps 18–20 and are kept only as historical
+> records. CURRENT_CHECKPOINT.md is authoritative for the current state, and the
+> sections maintained to match it — authentication, MT5 tenant isolation, the
+> repository layout, the API list and this note — describe the system as it is
+> now; where any of them ever disagree with CURRENT_CHECKPOINT.md,
+> CURRENT_CHECKPOINT.md wins.
+>
+> Facts that have moved since the snapshot was written:
+> - roles are super_admin / admin / customer (Step 21A), with exactly one
+>   super_admin per Broker enforced by a database partial unique index
+> - the user identity is the single `login` column: it is both the application
+>   login and the MT5 account/login number (Step 42). The former `username` and
+>   `mt5_login` columns no longer exist
+> - MT5 authentication is tenant-scoped (Step 36) with a per-user,
+>   administrator-provisioned credential (Step 38): `mt5_server` plus an
+>   encrypted MT5 INVESTOR (read-only) password. The account number is the
+>   user's own `login`, and resolution falls back to `Broker.mt5_server` when the
+>   user's own `mt5_server` is NULL
+> - login selects its tenant explicitly (Step 43): the request names the broker
+>   code, and the credential lookup is scoped to that broker
+>
+> The MT5 trading (master) password is never requested, stored or used, and no
+> API returns a credential.
 
 ## 1. Project Overview
 
@@ -216,12 +231,42 @@ JWT authentication IS implemented and verified:
 
 bcrypt password hashing/verification (app/core/security.py)
 PyJWT access-token creation/decoding with expiration validation
-POST /auth/login issues the token
+POST /auth/login issues the token (tenant-safe since Step 43: broker code +
+login + application password)
 get_current_user() in app/core/dependencies.py resolves a Bearer JWT to the
 database-backed active User
-get_current_broker_admin() adds database-backed role authorization
+get_current_broker_manager() (super_admin or admin) and
+get_current_super_admin() add database-backed role authorization
 All MT5-touching endpoints (market-data, account-info, positions) and
 POST /users require authentication
+
+Login is tenant-safe (Step 43). Because `login` is the MT5 account/login
+number and is unique only per broker, two brokers may legitimately share one
+number (Broker A's 80009 and Broker B's 80009 can both exist), so the request
+names its tenant explicitly:
+
+POST /auth/login  { "broker": <broker code>, "login": <login>, "password": <app password> }
+
+The broker code is resolved case-insensitively (and whitespace-tolerantly) to
+exactly one Broker row and is used only to scope the credential lookup to that
+broker_id; it is never an authorization fact, and the tenant a request is
+authorized for still comes from the authenticated database User row. `broker`
+is mandatory on every request — never a tie-breaker that appears only when a
+login happens to be duplicated — and the pre-Step-43 `{ "login", "password" }`
+body is refused with 422.
+
+Client migration note: every client must now send `broker`; there is no
+optional or legacy form. Failed logins are otherwise unchanged in shape (the
+same generic 401, or 429 when the throttle trips).
+
+Every rejection — unknown broker, ambiguous broker code, unknown login inside a
+known broker, wrong password, inactive user, inactive broker — returns the
+identical generic 401, and the paths that have no stored hash to check spend an
+equivalent dummy bcrypt verification, so neither the response nor its timing
+reveals which broker codes or logins exist. The login brute-force throttle
+counts failures per client IP and per submitted (broker, login), so one
+tenant's login number can no longer be used to lock another tenant's identical
+number out.
 
 Authentication failures return HTTP 401 with WWW-Authenticate: Bearer; the
 authoritative broker_id and role always come from the database User record,
@@ -248,14 +293,21 @@ Tenant isolation is implemented at the database level (broker-scoped unique
 constraints, broker_id on User) and in user management (a Broker Admin can
 only create users in their own tenant).
 
-Tenant isolation is NOT yet implemented in the MT5 data flows: the MT5
-terminal connection is process-wide and non-tenant-scoped, so market-data,
-account-info, and positions are not scoped to the authenticated user's
-broker.
+Authentication is tenant-safe too (Step 43): POST /auth/login names its broker,
+the broker code is resolved to exactly one Broker row, and the credential
+lookup is scoped to that broker_id, so the same MT5 login number can exist at
+several brokers without ambiguity.
 
-Do NOT implement MT5 tenant isolation during unrelated tasks.
+MT5 tenant isolation IS implemented (Step 36). Reads are authenticated per
+tenant through the tenant-scoped session manager (app/core/mt5_session.py),
+which resolves the requesting user's credentials and holds a lock across the
+whole acquire → read span, so market-data, account-info, positions and
+trade-history can never read another tenant's account. The MetaTrader5 Python
+API authenticates one account per process, so MT5 throughput remains a
+process-wide bottleneck; a worker process per broker is still future work (see
+CURRENT_CHECKPOINT.md Known Issues item 1).
 
-When tenant isolation is introduced, it must be designed explicitly and consistently across:
+Tenant isolation must stay explicitly designed and consistent across:
 
 authentication
 users
@@ -301,8 +353,8 @@ The API router should not directly construct the concrete MT5 provider.
 Current responsibility separation:
 
 app/core/dependencies.py
-    → dependency/composition wiring + provider caches (market-data,
-      account-info, positions) + authentication dependencies
+    → dependency/composition wiring (per-request providers built around the
+      authenticated tenant's credentials) + authentication dependencies
 
 app/core/blocking.py
     → consolidated blocking boundary: run_mt5_call(...) executes synchronous
@@ -417,7 +469,7 @@ Do not modify MT5 lifecycle or blocking behavior during unrelated tasks.
 
 Current read-only, JWT-protected endpoints:
 
-POST /auth/login
+POST /auth/login  { "broker": <broker code>, "login": <login>, "password": <app password> }
 GET /market-data/{symbol}
 GET /account-info
 GET /positions
@@ -501,8 +553,8 @@ Completed:
 7. MarketDataService unit tests
 8. MT5 lifecycle (lazy process-wide singleton, thread-safe init, failed init
    not cached, FastAPI lifespan startup/shutdown, graceful shutdown)
-9. JWT authentication (hashing, tokens, login endpoint, get_current_user,
-   broker-admin authorization)
+9. JWT authentication (hashing, tokens, tenant-safe login endpoint,
+   get_current_user, broker-admin authorization)
 10. User roles (broker_admin/customer) and POST /users customer creation
 11. Read-only MT5 account information (contract, provider, service, API)
 12. Read-only MT5 open positions (contract, provider, service, API)
@@ -513,16 +565,17 @@ Completed:
 The repository remains strictly read-only with respect to trading.
 14. Current Development Stage
 
-The project has completed the MT5 read-only data foundation (lifecycle,
-market data, account information, open positions, trade history) and the
-consolidated blocking boundary.
+Frozen snapshot: at the time of writing, the project had completed the MT5
+read-only data foundation (lifecycle, market data, account information, open
+positions, trade history) and the consolidated blocking boundary, and the next
+planned area was GET /users listing or tenant-scoped MT5 design.
 
-The next planned stage is:
-
-Stage 21 — GET /users listing or tenant-scoped MT5 design, or another
-explicitly chosen area
-
-However:
+Development has continued far past that snapshot — roles and tenant-scoped user
+management, tenant-scoped MT5 sessions, provisioned MT5 credentials, economic
+and portfolio intelligence, the read-only AI agent, broker LLM configuration
+and a tenant-safe login contract are all implemented. CURRENT_CHECKPOINT.md
+holds the current stage and the next-step list; do not treat this section as
+current.
 
 Do not start any next stage automatically.
 
@@ -582,18 +635,25 @@ Do not implement future stages without explicit instruction.
 
 The current implementation already provides:
 
-process-level MT5 lifecycle
-lazy process-wide provider initialization (one cache per provider type,
-all attaching to the same terminal session)
-thread-safe initialization; failed initialization is not cached
-provider shutdown via FastAPI lifespan (startup warm-up, graceful shutdown)
+process-level MT5 lifecycle owned by one MT5SessionManager
+(app/core/mt5_session.py): the single terminal session is authenticated per
+tenant and reused while the tenant matches, under a lock that covers the whole
+acquire → read span
+no provider caches: each request builds its own provider objects around the
+authenticated tenant's credentials, so no cached provider can serve one
+tenant's data to another (the former process-wide caches were removed in
+Step 36)
+no startup warm-up: no tenant is authenticated at boot, so the session is
+established lazily by the first authenticated MT5 read; shutdown releases the
+session from the FastAPI lifespan
 controlled execution of blocking MT5 calls through run_mt5_call
 (app/core/blocking.py)
 
 Future work should still address:
 
 MT5 IPC timeouts where appropriate
-multiple broker/customer MT5 sessions (tenant-scoped connections)
+one MT5 worker process (or equivalent) per broker, so MT5 throughput stops
+being a single process-wide bottleneck
 broker-specific MT5 configuration
 multi-worker deployment semantics
 
@@ -842,9 +902,11 @@ Do not mix this cleanup into unrelated feature work unless explicitly requested.
 
 27. Current Immediate Objective
 
-Steps 18–20 (MT5 Open Positions, Consolidate MT5 Blocking Boundary, MT5
-Trade History) are implemented, verified, committed (544cd51) and pushed to
-origin/master.
+Frozen snapshot: at the time of writing, Steps 18–20 (MT5 Open Positions,
+Consolidate MT5 Blocking Boundary, MT5 Trade History) were implemented,
+verified, committed (544cd51) and pushed to origin/master.
 
-Wait for explicit instruction before starting any further stage
-(e.g. GET /users listing or tenant-scoped MT5 design).
+The current objective, and the authoritative commit/push state, live in
+CURRENT_CHECKPOINT.md; do not treat the paragraph above as current.
+
+Wait for explicit instruction before starting any further stage.

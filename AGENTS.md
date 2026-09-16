@@ -187,17 +187,19 @@ Application credentials and MT5 credentials are separate.
 
 Current business model:
 
-- username = application/Agent login
-- password_hash = application/Agent password
-- mt5_login / mt5_server = the user's MT5 account number and server, provisioned
-  per user by a broker administrator (an admin for customers, a super_admin for
-  any user in its broker) through PUT /users/{user_id}/mt5-credentials
+- login = the user's single identity: the application/Agent login AND the MT5
+  account/login number. It is one column holding one value (Step 42); there is
+  no username column and no mt5_login column anywhere
+- password_hash = application/Agent password, stored as a hash
+- mt5_server = the user's MT5 server, provisioned per user by a broker
+  administrator (an admin for customers, a super_admin for any user in its
+  broker) through PUT /users/{user_id}/mt5-credentials
 - mt5_password_encrypted = encrypted MT5 INVESTOR (read-only) password
 
-When mt5_login / mt5_server are NULL the resolver falls back to a numeric
-username + Broker.mt5_server, which is how rows provisioned before Step 38 keep
-working. Nothing else may read a credential: decryption happens only inside the
-MT5 session boundary.
+When the user's own mt5_server is NULL the resolver falls back to
+Broker.mt5_server. The MT5 account number is never provisioned separately: it is
+the user's own login. Nothing else may read a credential: decryption happens
+only inside the MT5 session boundary.
 
 Only the INVESTOR (read-only) MT5 password may be accepted. The MT5 trading
 (master) password must NEVER be requested, received, stored or used — no field,

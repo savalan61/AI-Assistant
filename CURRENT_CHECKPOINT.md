@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 42 — One User Identity (`login`) (this checkpoint)
+Step 43 — Tenant-Safe Login (this checkpoint; implemented, NOT committed)
++ Step 42 — One User Identity (`login`)
 + Step 41 — Stabilize & commit Step 40 + the trade-history field fix
 + Step 40 — Super Admin User CRUD
 + Fix — MT5 trade-history SL/TP field names
@@ -14,16 +15,19 @@ Step 42 — One User Identity (`login`) (this checkpoint)
 
 Status:
 
-Step 42: VERIFIED + COMMITTED (this checkpoint, local — not pushed)
+Step 43: VERIFIED — implemented, deliberately NOT committed (no push)
+Step 42: VERIFIED + COMMITTED (local — not pushed)
 Steps 12–41: COMMITTED; the Step 41 commit is also still local (not pushed)
 
 Checkpoint commit:
 
-This checkpoint carries Step 42 (the one-identity `login` rename across the
-model, migration, auth, user management, MT5 credential handling, seed scripts,
-tests and documentation) together with this document update, and it leaves the
-working tree clean. Pushing is deliberately NOT part of this step, so the commit
-stays local until a push is explicitly requested. The prior commit is Step 41 —
+The last checkpoint commit (Step 42) carries the one-identity `login` rename
+across the model, migration, auth, user management, MT5 credential handling,
+seed scripts, tests and documentation together with its document update, and it
+left the working tree clean at that point. Step 43 (below) is implemented and
+verified on top of it and is deliberately left UNCOMMITTED, and pushing it is
+not part of this step either, so it stays local until a push is explicitly
+requested. The prior commit is Step 41 —
 "feat(users): complete super admin user crud" (1577672) — which carries Step 40
 together with the trade-history field fix; it is also still local. The last
 synced (pushed) commit was "fix(config): harden environment settings loading"
@@ -36,6 +40,43 @@ user seed script), the Step 37 checkpoint ("feat(financial): harden numeric
 representation"), the Step 36 MT5 tenant-session commit, the Step 35 security
 hardening commit and b95eaa1 ("feat(ai): add broker llm routing and agent
 controls", Steps 29–33).
+
+Step 43 makes login tenant-safe. `login` is the MT5 account/login number, and
+MT5 account numbers are unique per broker rather than globally, so two brokers
+may legitimately hold the same number (Broker A and Broker B can both have
+80009). `POST /auth/login` therefore names its tenant: `{ "broker": <broker
+code>, "login": ..., "password": ... }`. The broker code is resolved
+case-insensitively to exactly one Broker row and is used only to scope the
+credential lookup to that broker_id — never as an authorization fact, never as
+a JWT claim. `broker` is mandatory on every request (the pre-Step-43 login-only
+body is refused with 422), and the request shape deliberately does not change
+when a login happens to be duplicated, so a client cannot learn from the request
+or the response that a login exists at more than one broker. The login
+brute-force throttle's login bucket is now `(broker, login)` instead of login
+alone, so one tenant's failures can no longer lock out another tenant's
+identical number, while the IP bucket stays IP-only. Every rejection path
+(unknown broker, ambiguous broker code, unknown login, wrong password, inactive
+user, inactive broker) returns the identical generic 401, and the paths that
+have no stored hash to check now spend an equivalent dummy bcrypt verification
+instead of returning early, so response timing cannot reveal which broker codes
+or logins exist. The JWT is untouched (`sub = str(User.id)`, no broker_id and no
+role claim) and post-authentication identity and authorization keep coming from
+the database. No schema change, no migration, and no change to `User.login`
+semantics or the `(broker_id, login)` uniqueness constraint.
+
+Step 43 verification: focused suite 81 cases passed (test_auth_login.py 35,
+test_login_throttle.py 28, test_security.py 18); full suite 827 passed, 2
+warnings (both pre-existing third-party deprecations); `python -m compileall app
+tests scripts` clean. Static/type verification: pyright was executed for the
+first time in this project (via npx, explicitly approved by the operator — it is
+still not installed in .venv), reporting 0 errors / 0 warnings across the 7
+changed files after fixing the one real defect it found (the test fixture
+`auth_db` was annotated with its yielded type instead of
+`Iterator[SeededAuthDb]`). A whole-project run (115 files) reports 61
+pre-existing diagnostics in 19 files this step does not touch (the same
+generator-fixture annotation pattern plus a few Literal/enum mismatches); none
+is in a changed file and none was fixed or suppressed here. No `# type: ignore`
+and no checker configuration change.
 
 Step 40 completes tenant-scoped user management for the broker's super_admin:
 read one user, partially update one user (including role) and delete one user,
@@ -69,9 +110,11 @@ INVESTOR (read-only) password — instead of deriving the first two from the
 application username and the broker row. A broker administrator, or the
 broker's super_admin, writes them for a customer through a protected endpoint;
 a customer can neither write nor read them, and no API ever returns the
-password. The legacy derivation (numeric username + Broker.mt5_server) is
-preserved as the fallback, so every pre-existing row keeps working unchanged.
-There is still no master/trading-password support anywhere.
+password. The legacy derivation (a numeric identity + Broker.mt5_server) is
+preserved as the fallback, so every pre-existing row keeps working unchanged;
+that identity is `User.login`, because Step 42 later collapsed the former
+`username` and `mt5_login` columns into the single `login` value. There is still
+no master/trading-password support anywhere.
 
 The maintenance fix corrects a real sequencing defect in the Step 21A role
 migration: it ran the broker_admin → super_admin data rotation while the old
@@ -122,13 +165,16 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-CLEAN
+MODIFIED — Step 43 (tenant-safe login) is implemented and verified but
+deliberately NOT committed, so its change set plus this document update are
+uncommitted.
 
-The Step 42 `login` rename and this document update are carried by the
-checkpoint commit, so the working tree is clean again. The last two commits —
-Step 41 (`1577672`, "feat(users): complete super admin user crud") and this
-Step 42 checkpoint — are local, so local HEAD is two commits ahead of
-origin/master until they are pushed.
+The Step 42 `login` rename and its document update were carried by the Step 42
+checkpoint commit, which left the working tree clean at that point. The last two
+commits — Step 41 (`1577672`, "feat(users): complete super admin user crud") and
+the Step 42 checkpoint — are local, so local HEAD is two commits ahead of
+origin/master until they are pushed. Step 43 (tenant-safe login) and this
+document update sit on top of them, uncommitted by instruction.
 
 ## Completed Stages
 
@@ -192,7 +238,9 @@ Includes:
   blocking boundary; synchronous MT5-backed service calls are executed on the
   worker threadpool (starlette run_in_threadpool), never on the event loop
 - GET /account-info now routes its service call through run_mt5_call,
-  resolving the Known Issues item 9 debt from Step 17
+  resolving the former Known Issues item 9 debt from Step 17 (that item was the
+  MT5 blocking-call debt and is recorded as resolved; today's item 9 is a
+  different, still-open issue — the economic-calendar data source)
 - GET /positions built on the same boundary from the start
 - GET /market-data/{symbol} migrated to the same boundary
 - providers and services remain synchronous; the async boundary lives only
@@ -583,8 +631,10 @@ Status: AUDIT ONLY — no code, no commit
 A read-only audit of the whole project (no file was created, modified,
 deleted, renamed, staged or committed). It recorded, among other findings:
 
-- the MT5 data plane has no tenant scoping (all brokers share one terminal
-  account) — known issue 1, and the product blocker it implies
+- the MT5 data plane had no tenant scoping (all brokers shared one terminal
+  account) — known issue 1 at the time, and the product blocker it implied.
+  RESOLVED by Step 36: MT5 sessions are tenant-scoped now, so this bullet is
+  the historical finding, not the current state
 - an SSRF vector through the broker-supplied LLM base_url
 - uncontrolled egress of customer financial data to third-party LLMs
 - no login brute-force protection
@@ -593,8 +643,10 @@ deleted, renamed, staged or committed). It recorded, among other findings:
 - the role-evolution migration can fail on duplicate per-broker admins
 - money modelled as float throughout the domain contracts
 
-Step 35 implemented the fixes the audit identified as required now; the
-remaining findings stay in Known Issues and Next Step below.
+Step 35 implemented the fixes the audit identified as required now; Step 36
+resolved the MT5 tenant-scoping finding and Step 37 the money-representation
+finding. Findings that are still open are tracked in Known Issues and Next Step
+below, and every closed one appears in the Resolved list.
 
 ### Step 35 — Security & Agent Hardening
 Status: VERIFIED + COMMITTED
@@ -615,7 +667,9 @@ Includes:
   endpoint re-validate cheaply before an outbound request, so a row edited
   outside the API cannot turn the server into a request-forgery primitive
 - app/services/auth/login_throttle.py: in-process login brute-force
-  protection keyed on the client IP and on the submitted username (failures
+  protection keyed on the client IP and on the submitted login (extended by
+  Step 43 with the broker code, so the key is now per `(broker, login)` and
+  tenants never share a counter) (failures
   counted whether or not the account exists, so the lockout cannot be used to
   probe for real usernames). Checked before any credential lookup, cleared by
   a successful login, configurable, and bounded by stale-entry eviction
@@ -676,13 +730,14 @@ Includes:
 - MT5SessionError extends RuntimeError, so every existing API maps an unusable
   tenant session to the established generic 503 with no new error mapping.
 - Credentials resolution (app/core/dependencies.py, resolve_mt5_account_credentials
-  and the get_mt5_credentials dependency): User.username (numeric) is the MT5
-  login, user.mt5_password_encrypted the ciphertext, Broker.mt5_server the
-  server — all from the authenticated database user, never from a request body,
-  query parameter or token claim. Resolution never decrypts; an incomplete
-  record (non-numeric username, missing server, missing/undecryptable password,
-  missing broker) fails closed inside the session boundary with a message that
-  never names which value was missing.
+  and the get_mt5_credentials dependency): the numeric user identity is the MT5
+  login — that is `User.login`, which absorbed the former `username` and
+  `mt5_login` columns in Step 42 — user.mt5_password_encrypted the ciphertext,
+  Broker.mt5_server the server — all from the authenticated database user, never
+  from a request body, query parameter or token claim. Resolution never
+  decrypts; an incomplete record (non-numeric login, missing server,
+  missing/undecryptable password, missing broker) fails closed inside the
+  session boundary with a message that never names which value was missing.
 - The four process-wide provider caches (market-data, account-info, positions,
   trade-history) are REMOVED. Each provider is now a cheap per-request object
   constructed with the session manager and that request's tenant credentials;
@@ -952,8 +1007,63 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
+### Step 43 — Tenant-Safe Login
+Status: VERIFIED — implemented, NOT committed (no push)
+
+Fixes a real cross-tenant defect. Because `login` is unique only per broker
+while the endpoint matched on it alone, the second broker to register an MT5
+login number made the first broker's identical number permanently unloggable
+(`len(users) != 1` → generic 401), and the throttle's login bucket was shared
+across tenants, so failures aimed at one broker could lock out another broker's
+user. Both are now structurally impossible.
+
+- `POST /auth/login` request is `{"broker", "login", "password"}`; the broker is
+  mandatory (missing → 422), so no fallback can resolve a login ambiguously and
+  no request shape reveals whether a login exists at more than one broker.
+- Tenant resolution: `WHERE lower(Broker.code) = strip(lower(submitted))` —
+  case-insensitive and whitespace-tolerant. Exactly one match proceeds; zero
+  matches (unknown broker) and more than one match (two codes differing only by
+  case, i.e. a data-integrity violation) both fail closed with the generic 401
+  rather than silently selecting a tenant.
+- Credential lookup is broker-scoped: `WHERE User.broker_id = <resolved
+  broker>.id AND User.login = <submitted login>`, keeping the existing
+  `len(...) != 1` refusal as a defensive backstop. The login is still compared
+  exactly as before — the lookup was narrowed, never broadened.
+- The resolved database row gates the login as well (the broker must be
+  active); `broker_id` and `role` still come from the database User record and
+  the JWT is unchanged (`sub = str(User.id)` only).
+- Throttle: `LoginThrottle.check/record_failure/record_success` now take the
+  broker, and the buckets are `("ip", address, "")` and `("login", normalized
+  broker code, normalized login)` — a three-part key, so no submitted value can
+  be shaped to collide with another tenant's bucket. The broker part is
+  normalized exactly like the resolution above, so casing/padding cannot create
+  a second bucket, and the check still runs before any database work. A
+  successful login clears only that client's IP bucket and that tenant's login
+  bucket.
+- Timing hardening: `app/core/security.py` gains
+  `dummy_password_verification()`, which pays one real bcrypt check against a
+  lazily built, otherwise unused dummy hash on the paths where no stored hash
+  exists (unknown/ambiguous broker, unknown login). Every other rejection
+  condition already ran bcrypt against the stored hash.
+- Uniform failures preserved: unknown broker, unknown login, wrong password,
+  inactive user and inactive broker all return the same `401 {"detail":
+  "Incorrect login or password"}` with `WWW-Authenticate: Bearer`, and every
+  rejection counts against both throttle keys.
+- Deliberately unchanged: database schema, `User.login` semantics,
+  `(broker_id, login)` uniqueness, MT5 credential architecture, JWT structure,
+  and every unrelated endpoint.
+- Tests: two-broker coverage in `tests/test_auth_login.py` (both tenants share
+  one login number; the named broker authenticates and the other does not; the
+  broker code resolves case-insensitively; failure responses stay
+  indistinguishable; one broker's throttle neither blocks nor is cleared by the
+  other; login-only and per-field-missing bodies → 422; the dummy verification
+  is asserted on exactly the paths that need it), broker-aware cases in
+  `tests/test_login_throttle.py`, and the dummy-verification primitives in
+  `tests/test_security.py`.
+
+
 ### Step 42 — One User Identity (`login`)
-Status: VERIFIED + COMMITTED (this checkpoint)
+Status: VERIFIED + COMMITTED (the prior checkpoint)
 
 A user had TWO identity columns describing the same fact: `username` (the
 application login) and `mt5_login` (the MT5 account number). They are now one
@@ -977,7 +1087,8 @@ number. This is a deliberate, breaking API change: there is no compatibility
 - `POST /auth/login` takes `login` + the application password; the throttle
   keys on the submitted login (per IP and per login) with identical behaviour
   for existing and unknown logins. The generic 401 detail is now "Incorrect
-  login or password".
+  login or password". (Superseded by Step 43: the broker code is now mandatory
+  on every login request and the throttle's login key is per `(broker, login)`.)
 - User CRUD uses `login` throughout: create (`POST /users`, `POST
   /users/admins`), list, get, partial update (changing the login changes the
   application login AND the MT5 account number at once), responses and the
@@ -1021,10 +1132,11 @@ password_hash and mt5_password_encrypted are structurally absent.
   id belonging to another broker is reported exactly like a non-existent one
   (404), so ids cannot be enumerated across tenants.
 - PATCH /users/{user_id} (super_admin): partial update of the fields user
-  management supports — username, password, email, phone, role, is_active. An
-  omitted field is unchanged; an explicit null clears email/phone only
-  (username, password, role and is_active may not be nulled). Duplicate
-  username/email/phone inside the tenant → generic 409, verified at the commit
+  management supports — login, password, email, phone, role, is_active (the
+  identity field is `login`: Step 42 collapsed the former `username` into it).
+  An omitted field is unchanged; an explicit null clears email/phone only
+  (login, password, role and is_active may not be nulled). Duplicate
+  login/email/phone inside the tenant → generic 409, verified at the commit
   boundary.
 - DELETE /users/{user_id} (super_admin): 204 No Content. The broker's only
   super_admin cannot be deleted (409).
@@ -1214,7 +1326,12 @@ Includes:
 
 ## Current Authentication Flow
 
-POST /auth/login  { "login": <account/login number>, "password": <app password> }
+POST /auth/login  { "broker": <broker code>, "login": <account/login number>, "password": <app password> }
+    ↓
+broker code resolved case-insensitively to exactly one Broker row
+(unknown or ambiguous code → the same generic 401 as any other failure)
+    ↓
+credential lookup scoped to that broker_id  (User.broker_id + User.login)
     ↓
 JWT access token
     ↓
@@ -1225,6 +1342,14 @@ get_current_user()
 database-backed User
     ↓
 protected API
+
+Client migration note (breaking change, Step 43): `broker` is now mandatory on
+every login request and there is no optional or legacy form. A request without
+it is refused with 422, and the previous `{"login", "password"}` body no longer
+authenticates anything. Clients send the broker code they belong to
+(case-insensitive, surrounding whitespace tolerated). Failure behaviour is
+otherwise unchanged: the same generic 401 detail for every rejection, and 429
+when the throttle trips.
 
 ## Current MT5 Credential Provisioning Flow
 
@@ -1259,7 +1384,7 @@ Authenticated request
     ↓
 get_current_user()
     ↓
-get_mt5_credentials (User.username + mt5_password_encrypted + Broker.mt5_server, from the database)
+get_mt5_credentials (User.login + mt5_password_encrypted + Broker.mt5_server, from the database)
     ↓
 run_mt5_call (blocking boundary, app/core/blocking.py)
     ↓
@@ -1689,13 +1814,23 @@ DELETE /users/{user_id} (super_admin only):
 ## Current Verified Facts
 
 - Application authentication exists.
-- Login endpoint exists.
+- Login endpoint exists (POST /auth/login; tenant-safe since Step 43: broker
+  code + login + application password).
 - JWT access tokens exist.
 - get_current_user() exists.
 - Market-data, account-info, positions, and trade-history endpoints all require authentication.
 - User broker_id comes from the database.
 - MT5 password is separate from application password.
 - No broker_id is trusted from JWT claims.
+- POST /auth/login requires the broker code; it is resolved against the
+  database and the credential lookup is scoped to that broker_id, so the same
+  login number at two brokers resolves to two different users (never to an
+  ambiguous match).
+- The login throttle counts failures per client IP and per (broker, login), so
+  one tenant's failures cannot lock out another tenant's identical login.
+- Rejection paths with no stored hash to check (unknown or ambiguous broker,
+  unknown login) still perform a bcrypt verification, so response timing does
+  not reveal which broker codes or logins exist.
 - No trading/order functionality exists.
 - No BUY/SELL/OPEN/CLOSE/MODIFY functionality exists.
 - MT5 providers remain read-only (verified by code inspection: no trading
@@ -1776,7 +1911,8 @@ DELETE /users/{user_id} (super_admin only):
 - JWT access tokens must carry exp and sub; get_current_user rejects inactive
   users AND inactive/suspended brokers with the same generic 401.
 - Login is brute-force throttled in-process, per client IP and per submitted
-  username, and the lockout is identical for existing and unknown usernames.
+  (broker code, login), and the lockout is identical for existing and unknown
+  logins.
 - Agent input is bounded (message length at the validation boundary; trade
   block capped with the omission count stated; total prompt size guarded), and
   the user's text is separated from system framing as untrusted data.
@@ -1901,10 +2037,12 @@ This limitation must be reported rather than hidden.
       re-check are in place, but the resolved address is not pinned for the
       request lifetime (pinning would require replacing the HTTP client's
       connection handling).
-    - Login throttling is in-process and per worker, and its lockout is keyed on
-      the submitted username, so an attacker flooding one username can lock
-      that user out for the configured window. The window is short and
-      configurable.
+    - Login throttling is in-process and per worker. Its lockout is keyed on the
+      submitted (broker code, login) as of Step 43, so an attacker flooding one
+      account can lock that account out for the configured window — but only
+      that one tenant's account, never another tenant's identical login number.
+      The window is short and configurable. The per-worker limitation is
+      unchanged: multiple workers still share no counters.
     - The real Free LLM Pool and real economic-calendar source are still absent
       (items 9 and 11), so a non-development deployment refuses those
       capabilities (503) instead of degrading.
@@ -1942,6 +2080,12 @@ Resolved:
   aborted on any database still holding broker_admin rows — RESOLVED in 3a63af9
   (constraint dropped first; the same end state, with no new migration and no
   change to downgrade()).
+- (Open item) Login tenant discriminator: `login` is unique per broker while the
+  endpoint matched on it alone, so a cross-tenant collision made a user
+  unloggable (and let one tenant's failures throttle another tenant's identical
+  number) — RESOLVED by Step 43: the request names its broker, the credential
+  lookup is scoped to the resolved broker_id, and the throttle's login bucket is
+  per (broker, login).
 
 These issues are known and must NOT be fixed automatically.
 
@@ -1952,7 +2096,13 @@ They should be addressed one controlled stage at a time.
 Steps 12–42, the role-migration ordering fix, the development user seed and the
 trade-history field fix are complete and committed (latest commit: the Step 42
 checkpoint, which is local until pushed, as is the Step 41 commit before it).
-The working tree is clean.
+
+Step 43 (tenant-safe login) is implemented and fully verified but deliberately
+NOT committed. The working tree holds that change set — app/api/auth_router.py,
+app/core/security.py, app/core/config.py,
+app/services/auth/login_throttle.py, tests/test_auth_login.py,
+tests/test_login_throttle.py, tests/test_security.py — together with this
+document update.
 
 The immediate next action is deliberately NOT fixed here: the previously open
 work is now landed, so the next stage should be chosen explicitly (candidates
@@ -2001,9 +2151,6 @@ none may be started without an explicit instruction:
   CHECK-ordering half of this defect was fixed in 3a63af9; the duplicate-row
   hazard remains, and a clear pre-flight error instead of a raw uniqueness
   failure is still wanted)
-- login tenant discriminator: usernames are unique per broker but login matches
-  on username alone, so a cross-tenant collision currently makes a user
-  unloggable
 - CORS with an explicit origin allowlist, plus a coarse global rate limit
   (only login and the per-user agent quota are throttled today)
 - trade-history N+1 MT5 IPC calls: each closing deal triggers a separate

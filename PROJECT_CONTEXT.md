@@ -47,6 +47,9 @@ Current implemented core entities (database models):
 
 - Broker
 - User (super_admin / admin / customer)
+- BrokerLLMConfig (a broker's own LLM provider, model, endpoint and encrypted
+  API key; exactly one row per broker, enforced by a unique constraint on
+  broker_id)
 
 Current implemented provider contracts (not database models):
 
@@ -54,6 +57,9 @@ Current implemented provider contracts (not database models):
 - Position
 - Candle
 - TradeHistoryEntry
+- EconomicCalendarProvider (app/providers/economic_calendar.py; the wired
+  implementation is still the development/test placeholder — see
+  CURRENT_CHECKPOINT.md Known Issues item 9)
 - the vendor-neutral LLM provider contract (app/providers/llm.py)
 
 Future/domain entities planned:
@@ -181,8 +187,8 @@ provider-pool boundary.
 
 Services delegate to the provider abstractions.
 
-The API exposes them through the market-data, account-info, and positions
-routes; all three are JWT-protected.
+The API exposes them through the market-data, account-info, positions and
+trade-history routes; all four are JWT-protected.
 
 ## MT5
 
@@ -261,7 +267,12 @@ Current JWT-protected, read-only endpoints:
 
 Plus unauthenticated infrastructure:
 
-- POST /auth/login → JWT access token
+- POST /auth/login → JWT access token. Requires the broker code, the user's
+  login (the MT5 account/login number) and the application password: `login` is
+  unique only per broker, so the tenant is selected explicitly and the credential
+  lookup is scoped to that broker_id (Step 43). The tenant a request is
+  authorized for still comes from the database User record, never from the token.
+  A missing `broker` is a 422; there is no legacy login-only form.
 - GET /health → simple liveness probe (does not reflect MT5 readiness)
 
 Expected error mapping currently includes:
@@ -277,6 +288,10 @@ Expected error mapping currently includes:
 Important security principles:
 
 - tenant isolation
+- explicit tenant selection at login (broker code + login + application
+  password); the lookup is scoped to the resolved broker, unknown/ambiguous
+  brokers fail closed, every rejection answers identically, and the throttle
+  counts failures per (broker, login) so tenants cannot lock each other out
 - secure credential handling
 - no hard-coded credentials
 - .env must not be committed
