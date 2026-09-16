@@ -1488,7 +1488,11 @@ Includes:
   profile documents UKOIL and BRENT as roots (and decorated forms such as
   UKOIL./BRENT.cash through the unchanged prefix rule). This is the data edit
   the profile module itself sanctions — no new profile system, no engine change,
-  no invented instrument.
+  no invented instrument. A later coverage audit of real broker catalogs
+  extended the same table with the verified aliases USCRUDE, XBRUSD, BRENTUSD,
+  UKBRAND (oil) and NASDAQ100, USTECH, NDXUSD (NASDAQ-100); futures/ETF tickers
+  (CL, NQ, QQQ) are deliberately not roots and XAUEUR/XAUGBP await a
+  currency-layer decision.
 - tests/test_instrument_relevance.py (7 new cases): UKOIL. + FOMC reaching the
   macro monetary-policy tier with the broker spelling preserved in the output;
   BRENT/UKOIL direct crude/geopolitical events reaching RELEVANT; US100. and

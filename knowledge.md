@@ -671,7 +671,12 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     profile (profiles.py) now documents UKOIL and BRENT (and their broker-
     decorated forms such as UKOIL., which the prefix rule already handled) as
     spellings of the same underlying commodity, so its documented factor tiers
-    apply to a Brent position exactly as to a WTI one. Concretely: UKOIL. + a
+    apply to a Brent position exactly as to a WTI one. A coverage audit of
+    real broker catalogs later extended the same table (data, not engine) with
+    the verified aliases USCRUDE, XBRUSD, BRENTUSD, UKBRAND (oil) and
+    NASDAQ100, USTECH, NDXUSD (NASDAQ-100); futures/ETF tickers (CL, NQ, QQQ)
+    are deliberately NOT roots, and gold quoted in EUR/GBP (XAUEUR/XAUGBP)
+    needs a currency-layer decision before any root is added. Concretely: UKOIL. + a
     USD FOMC event is POTENTIALLY_RELEVANT through MONETARY_POLICY instead of
     NOT_OBVIOUSLY_RELEVANT, and Persian-Gulf/crude events are RELEVANT through
     the DIRECT crude-oil tier — previously unreachable because Brent has no

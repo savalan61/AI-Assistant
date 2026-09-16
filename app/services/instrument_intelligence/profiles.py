@@ -141,12 +141,16 @@ PROFILES: tuple[InstrumentProfile, ...] = (
             "XTIUSD",
             "OILUSD",
             "OIL",
+            "USCRUDE",
             # Brent crude is the same underlying commodity as WTI on every
-            # documented factor tier, reached through a different broker
-            # benchmark spelling (UKOIL, BRENT, and their broker-decorated
-            # forms such as UKOIL.).
+            # documented factor tier, reached through different broker
+            # benchmark spellings (UKOIL, BRENT, XBRUSD/ICE's ticker, BRENTUSD,
+            # UKBRAND, and their broker-decorated forms such as UKOIL.).
             "UKOIL",
             "BRENT",
+            "XBRUSD",
+            "BRENTUSD",
+            "UKBRAND",
         ),
         focus_names=("USOIL", "WTI", "XTIUSD", "OILUSD"),
         direct=(
@@ -169,7 +173,7 @@ PROFILES: tuple[InstrumentProfile, ...] = (
     InstrumentProfile(
         name="Nasdaq-100 (NAS100/NASDAQ)",
         canonical="NAS100",
-        symbols=("NASDAQ", "NAS100", "US100", "USTEC", "NDX"),
+        symbols=("NASDAQ", "NASDAQ100", "NAS100", "US100", "USTEC", "USTECH", "NDX", "NDXUSD"),
         focus_names=("NASDAQ", "NAS100", "US100", "USTEC"),
         direct=(
             FundamentalDomain.TECHNOLOGY_SECTOR,
