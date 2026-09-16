@@ -34,6 +34,20 @@ Status labels used below:
 - **DECISION** — blocked on an operator/business decision, not on code.
 - **DEFERRED** — deliberately out of the MVP; a decision point, not a commitment.
 
+### Revision note
+
+2026-09-16 — **fundamental intelligence now comes before technical analysis.**
+The product becomes useful far earlier if the agent can answer "what is
+happening with XAUUSD today", "which fundamental factors matter", "which news
+and calendar events are relevant" and "what threatens my positions", so P1 is
+News + Fundamental Intelligence (built on the already-mandatory economic
+calendar), P2 is instrument catalog + multi-timeframe market data, and P3 is
+deterministic technical analysis, which then adds technical context to the same
+agent. The economic calendar remains mandatory for every agent request and the
+invariants below are unchanged. This reordering is a product decision, not a
+status: every phase listed below still requires an explicit instruction before it
+starts.
+
 ## Non-negotiable invariants
 
 Every phase below must preserve all of these. A phase that would break one of
@@ -45,13 +59,17 @@ changes this document first.
 2. **Economic Intelligence / calendar is MANDATORY for every Agent request.**
    Every agent request passes through the existing economic-intelligence context;
    no request may bypass, skip or degrade it, and no phase may make it optional.
-3. **QuantGist is a development/test source only.** It is never described,
-   configured or shipped as a production provider, and its provenance marker
-   (`quantgist-free-development`) must travel with its data into every response
-   and prompt.
-4. **No production calendar vendor is invented.** The production slot
-   (`ECONOMIC_CALENDAR_SOURCE=production`) refuses until a real vendor is chosen
-   and registered at the existing single seam.
+3. **Development/test sources are never production sources.** QuantGist (the
+   development/test economic-calendar tier) and the deterministic calendar and
+   news fakes are never described, configured or shipped as production
+   providers, and their provenance markers (`quantgist-free-development`,
+   `fake-development-placeholder`) must travel with their data into every
+   response and prompt.
+4. **No production calendar or news vendor is invented.** The production slots
+   (`ECONOMIC_CALENDAR_SOURCE=production`, `NEWS_SOURCE=production`) refuse until
+   a real vendor is chosen and registered at the existing single seam, and no
+   provider is ever called production-ready without a live verification recorded
+   in `CURRENT_CHECKPOINT.md`.
 5. **Tenant isolation.** A request can only ever read the authenticated user's own
    broker/account data; tenant identity comes from the database, never from a
    request body or a token claim.
@@ -155,70 +173,193 @@ below):
 | G3 | **All limiting state is in-process** (agent daily quota, login throttle): per worker, reset on restart | P8, P13 |
 | G4 | **No CI/CD, no container/deployment manifests**; `MetaTrader5` pins the runtime to Windows | P8 |
 | G5 | **No background jobs/scheduler and no retention policy**; nothing conversational is persisted today | P13 (only if needed) |
-| G6 | **Market data is a single M1 candle** — no timeframe, count or series | P1 (gates P2) |
-| G7 | **No production economic-calendar source** (vendor decision open); QuantGist is dev/test only | P3 |
+| G6 | **Market data is a single M1 candle** — no timeframe, count or series | P2 (gates P3) |
+| G7 | **No production economic-calendar source** (vendor decision open); QuantGist is dev/test only, so the calendar is real only in development today | P0 residual (vendor decision) |
 | G8 | **The shared free LLM pool is empty** until a deployment endpoint is configured; no real free-tier provider integrated | P5, P8 |
-| G9 | **Two position reads per agent request** (financial context and calendar relevance each read positions) — known issue 14; safe, but wasted serialized MT5 work | optional cleanup, P5 |
+| G9 | **Two position reads per agent request** (financial context and calendar relevance each read positions) — known issue 14; safe, but wasted serialized MT5 work | P1 (ride-along cleanup), P5 |
 | G10 | **No audit trail for broker LLM configuration changes and no API-key rotation flow**; no application-password reset/rotation | P7 |
-| G11 | **No technical analysis, no market series, no charts** | P1, P2 |
+| G11 | **No technical analysis, no market series, no charts** | P2, P3 |
 | G12 | **No reports/historical analytics, no watchlist/favorites, no P&L history** | P6, P9 |
 | G13 | **MT5 authenticates one account per process** → all MT5 reads serialize process-wide (known issue 1) | P8, P12 |
 | G14 | **Offline-only tests** (fakes/`MockTransport`): live vendor drift is invisible to the suite | standing practice: live smoke per provider change |
 | G15 | **No channel-facing abstraction beyond REST** (no conversation/session concept, no idempotency keys) | P8 |
 | G16 | **Windows-only MT5** and no MT5 IPC timeout; `/health` does not reflect MT5 readiness (known issues 2, 3, 7) | P8 |
+| G17 | **No fundamental/news capability at all**: no news provider contract, no fundamental-intelligence service, and instrument→currency relevance exists only as the economic calendar's currency legs, so XAUUSD-specific fundamental relevance (and per-position fundamental exposure) has no home | P1 |
 
 ## 3. MVP phases (P0–P8)
 
-Ordering note: **P1 gates P2** (the flagship 4H analysis needs a candle series),
-and **P3 is MVP-critical** because the calendar is mandatory and today's only
-sources are development/test ones.
+Ordering note: **P1 is the point of the product direction** (a usable fundamental
+answer about the instruments a customer actually holds), **P1 does not wait for
+P2** (it works from the calendar plus a documented instrument/currency relevance
+map), **P2 gates P3** (technical analysis needs a candle series), and the
+calendar stays mandatory throughout.
 
-### P0 — Fail-closed deployment configuration and environment matrix
+### P0 — Economic Calendar production posture
 
-**Goal.** Make every capability's availability explicit per environment so no
-deployment can serve development data or an unconfigured provider to a customer.
+**Goal.** Make the calendar's availability explicit and fail closed per
+environment, so no deployment can serve development/test calendar data to a
+customer and the eventual real vendor has exactly one place to be registered.
 
-**Status.** **DONE for the calendar** (Step 46, `ebbb86b`: explicit
-`ECONOMIC_CALENDAR_SOURCE`, development-only development sources, a production
-seam that refuses, generic 503s, value-free operator logs, and the full
-source × environment matrix under test). Remaining sub-items: PLANNED.
+**Status.** **DONE** (Step 46, `ebbb86b`: explicit `ECONOMIC_CALENDAR_SOURCE`,
+development-only development sources, a production seam that refuses, generic
+503s, value-free operator logs, and the full source × environment matrix under
+test), with one recorded residual: **the production vendor selection itself is
+DECISION** (see the residual item below).
 
 **Delivers.** (done) explicit calendar source selection with a production seam;
-(remaining) a documented per-environment capability matrix for secrets,
-encryption key, LLM endpoint and calendar source; startup validation that names
-what is missing without echoing any value; a test pinning that whole matrix.
+(remaining, DECISION) choosing and registering a real production calendar vendor
+behind that seam, with its licensing/redistribution rights settled and one
+minimal live smoke recorded in `CURRENT_CHECKPOINT.md`. A customer-facing launch
+is gated on this; until it lands, non-development deployments keep refusing
+rather than serving development data.
 
 **Existing modules.** `app/core/config.py`, `app/core/dependencies.py`,
 `tests/test_config_settings.py`, `tests/test_quantgist_economic_calendar.py`,
 `.env.example`.
 
-**New components.** None required.
+**New components.** None required for the posture; exactly one provider module
+plus its settings when the vendor is chosen.
 
 **Depends on.** Nothing.
 
 **Acceptance criteria.** Every non-development capability either has a configured
 provider or answers a documented generic failure; no development/test artifact is
 ever served outside development; invalid configuration fails at startup naming
-the setting only; no value is echoed.
+the setting only; no value is echoed; a chosen production calendar vendor is
+verified live before being called production-ready.
 
 **Verification.** Config and composition-root matrix tests; `compileall`;
-Pyright; `git diff --check`.
+Pyright; `git diff --check`. For the residual item: offline provider tests
+against recorded vendor payloads plus one minimal live smoke.
 
-**Criticality.** MVP-critical (partly done).
+**Criticality.** MVP-critical (posture done; vendor selection open).
 
-### P1 — Market data depth: multi-timeframe candles and symbol catalog
+### P1 — News and Fundamental Intelligence
 
-**Goal.** Turn market data from one M1 candle into a real, bounded series API, so
-chart-based analysis and channel clients can exist.
+**Goal.** Make the assistant practically useful immediately: answer "what is
+happening with XAUUSD today?", "which fundamental factors matter for XAUUSD?",
+"which news and economic-calendar events are relevant to XAUUSD?" and "what is
+threatening my current positions today?" from deterministic,
+provenance-carrying fundamental context — never from model guesswork. XAUUSD is
+the first and reference use case.
 
-**Status.** **NEXT** (the first phase after P0). Requires explicit instruction.
+**Status.** **NEXT**. Requires explicit instruction before implementation.
+
+**Delivers.**
+
+1. **News provider abstraction** (`app/providers/news.py`): a typed, vendor-neutral
+   news contract (a `NewsItem`-style record with id, `published_at` UTC, source,
+   title, a bounded summary/excerpt, an optional link, declared
+   instruments/currencies/categories, and a per-implementation provenance marker,
+   mirroring how `EconomicCalendarProvider` works today). Retrieval is
+   window-bounded (from/to) and symbol/currency-scoped where the provider supports
+   it, with a hard result cap.
+2. **Development/test implementation plus the production seam**: a deterministic
+   news fake (provenance `fake-development-placeholder`, no network) and a
+   `NEWS_SOURCE` setting resolved at the composition root exactly like
+   `ECONOMIC_CALENDAR_SOURCE` (the Step 46 pattern: development/test sources
+   inside development only; a `production` slot that refuses until a real vendor
+   is registered in that single branch; invalid values rejected at startup naming
+   the setting only). **No production news vendor is chosen or invented here**,
+   and nothing is called production-ready without a live verification recorded in
+   `CURRENT_CHECKPOINT.md`.
+3. **Instrument/currency relevance mapping**: a deterministic layer mapping a
+   supported instrument to the currencies/commodity factors that move it (XAUUSD
+   → the USD leg plus gold-specific factors), extending the existing calendar
+   relevance classifier rather than adding a second one. Provider-declared tags
+   are used when present; a documented deterministic keyword/entity mapping covers
+   items that arrive untagged; relevance is one of the existing discrete levels,
+   never a score that implies direction.
+4. **Fundamental context service** (`app/services/fundamental_intelligence/`):
+   combines today's economic calendar (the existing, mandatory
+   `EconomicIntelligenceService`) with relevant news, per-instrument relevance and
+   the authenticated user's own open positions into one deterministic
+   `FundamentalContext` (reference instant, window, provenance per source; per
+   item: timestamp, source, relevance, factual text).
+5. **Portfolio-position fundamental risk context**: for each open position, the
+   deterministic exposure of that position's instrument/currency legs to today's
+   calendar events and relevant news — factual exposure, not advice: no direction,
+   no probability, no recommendation, and an explicit UNKNOWN when data is missing
+   (never an implied "no risk").
+6. **HTTP surface**: `GET /fundamental-intelligence/today` (JWT-protected,
+   read-only; tenant identity from the authenticated user, so only the caller's own
+   positions are ever resolved), returning the deterministic context with
+   provenance per source.
+7. **Agent prompt integration**: a bounded fundamental block rendered beside the
+   existing financial and calendar blocks, keeping the established size discipline
+   (ordered, stated reductions) and the egress policy unchanged.
+8. **Fact-versus-interpretation separation, structurally enforced**: the
+   deterministic layer emits only source facts, timestamps, provenance and
+   relevance; interpretation happens only in model output, and the prompt labels
+   source material as source material with its provenance. Nothing deterministic
+   here produces an outlook, forecast, target or directional claim, and a
+   rendered-output scan enforces that.
+9. **Fail-closed behaviour where required**: a configured-but-unusable news source
+   refuses with the existing generic 503 (never silently answering as if there
+   were no news); a deployment with no news source configured marks news as
+   explicitly unavailable in both the context and the prompt — absence of data is
+   never presented as absence of events. The economic calendar keeps its existing
+   mandatory behaviour unchanged.
+10. **No trading advice or predictions anywhere**: no BUY/SELL/ENTER/EXIT wording,
+    no price forecasts, no probability statements, no "recommended action" — only
+    facts, relevance and exposure.
+
+**Existing modules.** `app/providers/economic_calendar.py` (contract shape to
+mirror), `app/services/economic_intelligence/` (relevance classifier to extend),
+`app/services/financial_context/` and `app/providers/position.py` (positions),
+`app/core/config.py` + `app/core/dependencies.py` (the source-selection seam),
+`app/services/agent/` (`agent_service.py`, `prompt.py`), `app/api/`.
+
+**New components.** `app/providers/news.py`, a deterministic news fake, the
+`NEWS_SOURCE` resolver branch, `app/services/fundamental_intelligence/`
+(relevance mapping + context builder), one read-only router, and the fundamental
+prompt block. No new external dependency, no scraper/parser, no scheduler, no
+cache, no retry.
+
+**Depends on.** P0 (DONE). Deliberately does **not** wait for P2: XAUUSD
+relevance works from a documented instrument/currency map, which P2 later
+generalises through the instrument catalog.
+
+**Acceptance criteria.** The four example questions above are answerable from
+deterministic context plus model synthesis, with XAUUSD working end to end; every
+rendered news/calendar item carries its source, provenance and a UTC timestamp;
+the deterministic layer contains no interpretation and interpretation appears only
+in model output; the prompt block stays inside the configured ceiling with stated
+reductions; the calendar is still composed into every agent request; a
+configured-but-unusable news source produces the generic 503; an unconfigured news
+source is labelled unavailable rather than empty; tenant isolation holds (a caller
+resolves only their own positions); no credential or secret reaches a prompt, log
+or response.
+
+**Verification.** Fully offline: fake-news provider tests, retrieval/window/cap
+tests, relevance-mapping golden tests (XAUUSD and at least one non-USD
+instrument), calendar+news combination tests, portfolio-exposure tests (no
+positions, one position, missing data → UNKNOWN), API tests (auth, tenant scope,
+provenance), prompt tests (bounded block, provenance present, fact labels kept,
+size discipline intact), failure-path tests (503 versus explicitly unavailable), a
+rendered-output scan for advisory/forecast language, secret-hygiene checks,
+`compileall`, Pyright, `git diff --check`. A live smoke is possible only after a
+real news vendor is registered; it is never run against the fake, and no fake
+result may be described as live.
+
+**Criticality.** MVP-critical (the capability that makes the product useful
+early).
+
+### P2 — Instrument catalog and multi-timeframe market data
+
+**Goal.** Turn market data from one M1 candle into a real, bounded series API and
+let the product name what it can actually read, so fundamental and (later)
+technical context can be symbol-scoped for any supported instrument. P1 starts
+with a documented XAUUSD relevance map and does not wait for this.
+
+**Status.** **PLANNED**.
 
 **Delivers.** An explicit set of allowed timeframes (M1–MN1 subset); a bounded
 `count` with a server-side hard cap; a candle-series contract with UTC alignment
-and provenance; a symbol catalog endpoint describing what the authenticated
-account can actually read; 422 for invalid timeframe/count, existing 404
-semantics for unavailable symbols; the current single-candle response preserved
-(or a deliberately versioned path).
+and provenance; a symbol catalog describing what the authenticated account can
+actually read and which instruments the fundamental relevance map covers; 422 for
+invalid timeframe/count, existing 404 semantics for unavailable symbols; the
+current single-candle response preserved (or a deliberately versioned path).
 
 **Existing modules.** `app/providers/market_data.py`,
 `app/providers/mt5_market_data.py`, `app/providers/fake_market_data.py`,
@@ -229,7 +370,8 @@ semantics for unavailable symbols; the current single-candle response preserved
 catalog is genuinely a new external read; otherwise extend the existing
 market-data contract.
 
-**Depends on.** Nothing (P0 delivered).
+**Depends on.** Nothing (P0 delivered). P1 benefits from it but does not require
+it, and it gates P3.
 
 **Acceptance criteria.** A request returns N candles for an allowed timeframe in
 UTC; invalid timeframe/count is refused before any provider call; caps are
@@ -240,31 +382,35 @@ are unchanged; no new trading capability.
 (auth, validation, 404, caps), UTC/window tests, `compileall`, Pyright, and one
 minimal live read-only smoke.
 
-**Criticality.** MVP-critical (gates P2).
+**Criticality.** MVP-critical (gates P3).
 
-### P2 — XAUUSD 4H analysis (technical analysis vertical slice)
+### P3 — Deterministic technical analysis (XAUUSD 4H first)
 
-**Goal.** The flagship read the product is bought for: an explainable,
-deterministic 4H XAUUSD view for a customer, strictly read-only.
+**Goal.** Add explainable, deterministic technical context for the same
+instruments the fundamental capability already covers, so the agent can combine
+fundamental facts (P1) with technical facts (this phase) for one instrument —
+XAUUSD 4H first.
 
-**Status.** **PLANNED** (depends on P1).
+**Status.** **PLANNED** (deliberately after P1 and P2; the fundamental capability
+is what makes the product useful, technical analysis is the depth that follows).
 
-**Delivers.** A technical-analysis service computing deterministic indicators
-over the P1 series (for example SMA/EMA, ATR, recent range and structure, simple
-momentum) with an `as_of` timestamp and provenance; an HTTP endpoint exposing
-that analysis; the same analysis rendered as a **bounded** block in the agent
-prompt so the assistant can discuss the instrument; explicit
-insufficient-data behaviour (fewer candles than required → clear generic failure,
-never invented numbers).
+**Delivers.** A technical-analysis service computing deterministic indicators over
+the P2 candle series (for example SMA/EMA, ATR, recent range and structure, simple
+momentum) with an `as_of` timestamp and provenance; an HTTP endpoint exposing that
+analysis; the same analysis rendered as a **bounded** block in the agent prompt
+next to the financial, calendar and fundamental blocks; explicit
+insufficient-data behaviour (fewer candles than the required window → clear
+generic failure, never invented numbers).
 
-**Existing modules.** P1 market data, `app/services/`, `app/providers/`,
+**Existing modules.** P2 market data, `app/services/`, `app/providers/`,
 `app/services/agent/prompt.py`, `app/core/dependencies.py`.
 
 **New components.** One module under `app/services/` for pure, in-process
 indicator functions. **No analytics vendor and no new external data dependency**;
 indicators are computed from provider candles.
 
-**Depends on.** P1.
+**Depends on.** P2 (the candle series). Complements P1: fundamental and technical
+contexts reach the same agent, each deterministic and provenance-carrying.
 
 **Acceptance criteria.** Identical inputs produce identical output; output
 contains no forecast, no BUY/SELL language and no recommendation; the agent
@@ -273,47 +419,11 @@ policy still hold; account identity never enters the analysis or the prompt;
 empty/short series fail closed.
 
 **Verification.** Golden-value indicator tests, insufficient-data tests, API
-contract tests, agent-prompt tests (block rendered, reductions still ordered),
-and a trading-language scan over rendered output.
+contract tests, agent-prompt tests (block rendered, reductions still ordered), and
+a trading-language scan over rendered output.
 
-**Criticality.** MVP-critical (flagship capability).
-
-### P3 — Production economic-calendar source (vendor decision, existing seam)
-
-**Goal.** Serve real calendar data to customers through the unchanged calendar
-architecture, without ever making the calendar optional.
-
-**Status.** **DECISION** — blocked on the vendor choice (licensing,
-redistribution rights, coverage, cost, quota), not on code. QuantGist remains a
-development/test source and is never the production answer.
-
-**Delivers.** A decision record for the chosen vendor; one provider implementing
-the unchanged `EconomicCalendarProvider` registered in the existing PRODUCTION
-branch; per-vendor settings (key, base URL, timeout); the deployment's provenance
-marker; and the removal of the "production refuses" state for that deployment
-only.
-
-**Existing modules.** `app/providers/economic_calendar.py`,
-`app/core/dependencies.py` (the single registration point),
-`app/services/economic_intelligence/`, `app/core/config.py`, tests.
-
-**New components.** Exactly one provider module plus its settings, shaped like
-the QuantGist adapter (no retries, no caching unless a later phase explicitly
-adds them).
-
-**Depends on.** P0 (done). Blocked by the vendor decision.
-
-**Acceptance criteria.** Production calendar data flows through the same
-relevance classifier into both the API response and the agent prompt carrying its
-provenance; no date-filter assumptions (the live-verified lesson); pagination or
-the vendor's equivalent handled; the key never appears in a log, message or
-response; development/test sources remain development-only.
-
-**Verification.** Offline provider tests against recorded vendor payloads, local
-window filtering, failure translation to the existing 503, one minimal live smoke
-with a small window, and secret-hygiene checks over logs and responses.
-
-**Criticality.** MVP-critical (the calendar is mandatory for the agent).
+**Criticality.** MVP-critical (the technical half of the instrument view, on top
+of the fundamental half from P1).
 
 ### P4 — Risk and portfolio intelligence depth
 
@@ -326,7 +436,8 @@ ground the agent in the same numbers.
 explicit documented thresholds; direction imbalance; drawdown over the
 trade-history window; a documented deterministic risk band (extending the current
 FLAT/LOW/ELEVATED/HIGH/UNKNOWN classification); and the same figures rendered
-into the agent prompt.
+into the agent prompt, deterministically combined with P1's fundamental exposure
+(still no advice, no direction, no probability).
 
 **Existing modules.** `app/services/portfolio_intelligence/`,
 `app/services/financial_context/`, `app/api/portfolio_intelligence_router.py`,
@@ -334,8 +445,8 @@ into the agent prompt.
 
 **New components.** None (extend the existing deterministic functions).
 
-**Depends on.** P1/P2 only for symbol-level context; currency-level risk can land
-independently.
+**Depends on.** P1 (the fundamental exposure it complements); symbol-level depth
+benefits from P2, while currency-level risk can land independently.
 
 **Acceptance criteria.** Every figure derives only from account/position/trade
 data; unknown inputs yield an explicit UNKNOWN rather than a guess; no
@@ -346,28 +457,32 @@ single-position edge cases, API contract tests, agent-prompt tests.
 
 **Criticality.** MVP-critical.
 
-### P5 — Agent answer quality and safety (explicitly no tool calling)
+### P5 — Agent grounding, safety and cost control (explicitly no tool calling)
 
-**Goal.** Make the assistant's answers trustworthy and bounded now that it
-carries financial, calendar and market context.
+**Goal.** Make the assistant's answers trustworthy, auditable and affordable now
+that it carries financial, calendar, fundamental and market context.
 
 **Status.** **PLANNED**.
 
-**Delivers.** A documented, deterministic layout and budget per context block; a
-deterministic **prompt-safety screening** step that refuses trading-instruction
-requests before any provider call (rule-based, not LLM-based); per-broker request
-governance alongside the existing per-user quota, with a documented quota
-contract; failure copy that never invents data; and a pinned, recorded decision
-that the MVP has **no tool/function calling, no agent framework, no multi-turn
-loop**.
+**Delivers.** A documented, deterministic layout, grounding rule and budget per
+context block, with every rendered block traceable to a source and its
+provenance; a deterministic **prompt-safety screening** step that refuses
+trading-instruction requests before any provider call (rule-based, not LLM-based);
+per-broker request governance and cost control alongside the existing per-user
+quota (prompt budget, provider-call accounting, documented quota contract); a
+per-request record of which context blocks and sources were sent (never the
+contents of a secret); failure copy that never invents data; and a pinned,
+recorded decision that the MVP has **no tool/function calling, no agent
+framework, no multi-turn loop**.
 
 **Existing modules.** `app/services/agent/` (`agent_service.py`, `prompt.py`,
 `scope.py`, `usage.py`, `egress.py`), `app/api/agent_router.py`.
 
-**New components.** Screening logic inside `app/services/agent/` — no new
-framework, no new dependency.
+**New components.** Screening, grounding and cost-accounting logic inside
+`app/services/agent/` — no new framework, no new dependency.
 
-**Depends on.** P2/P3/P4 for the contexts it renders.
+**Depends on.** P1 (fundamental context), P3 (technical context when it lands)
+and P4 (risk depth).
 
 **Acceptance criteria.** No prompt exceeds the configured ceiling; every omitted
 block is stated in the body; trading instructions are refused deterministically
@@ -388,9 +503,9 @@ scheduler.
 **Status.** **PLANNED**.
 
 **Delivers.** An on-demand report endpoint (account snapshot, period performance
-from trade history, positions summary, calendar context for the period, risk
-band) with a deterministic report contract; and an optional LLM narrative that
-reuses the existing router and egress policy unchanged.
+from trade history, positions summary, the period's calendar and relevant-news
+context, risk band) with a deterministic report contract; and an optional LLM
+narrative that reuses the existing router and egress policy unchanged.
 
 **Existing modules.** Financial context, portfolio intelligence, trade history,
 economic intelligence, `app/services/agent/` (LLM boundary), `app/api/`.
@@ -398,7 +513,7 @@ economic intelligence, `app/services/agent/` (LLM boundary), `app/api/`.
 **New components.** `app/services/reports/` composing existing services. No
 storage, no scheduler, no queue.
 
-**Depends on.** P2 (analysis), P3 (real calendar), P4 (risk).
+**Depends on.** P1 (fundamental context), P3 (technical analysis) and P4 (risk).
 
 **Acceptance criteria.** Report output is reproducible for identical inputs;
 contains no trading advice; no account identity in LLM-bound text; generating a
@@ -450,7 +565,7 @@ surface to build on **without building any channel in the MVP**.
 **Status.** **PLANNED**.
 
 **Delivers.** Request IDs and structured logging with secret redaction; a
-readiness endpoint reporting database / MT5 / LLM / calendar availability
+readiness endpoint reporting database / MT5 / LLM / calendar / news availability
 separately from liveness; CORS with an explicit allowlist; a coarse global rate
 limit; a CI pipeline (format/typecheck/`compileall`/full offline pytest, with a
 Windows runner for anything touching MT5); a documented deployment topology for
@@ -483,7 +598,7 @@ without it).
 ### P9 — Watchlist and favorites
 **Post-MVP.** A per-user watchlist (tenant-scoped) plus per-symbol summaries, so
 users can follow instruments rather than re-query them. Modules: users, market
-data (P1), portfolio intelligence. New component: a small watchlist model +
+data (P2), fundamental intelligence (P1), portfolio intelligence. New component: a small watchlist model +
 migration (the roadmap's second schema change). **Optional.**
 
 ### P10 — Channel clients on the same backend
@@ -514,28 +629,34 @@ everything is in-process and nothing conversational is stored. Depends on P8/P12
 conversation, memory or streaming agent answers be considered, and only as an
 explicit architectural decision recorded in this document first. If ever adopted,
 tools must be **read-only**, tenant-scoped, and must never include a trading
-action; the economic-calendar context must remain mandatory on every request; and
-the existing guard chain (scope → quota → contexts → provider) must still run.
-**DEFERRED.**
+action; the economic-calendar context must remain mandatory on every request;
+fundamental/news context returned by a tool must still carry its provenance and
+stay clearly separated from interpretation; and the existing guard chain
+(scope → quota → contexts → provider) must still run. **DEFERRED.**
 
 ## 5. MVP scope
 
 **In the MVP (P0–P8):** tenant-safe authentication and user management; read-only
-account, positions, trade history and market data with multi-timeframe series;
-portfolio/risk intelligence; economic intelligence with an explicit,
-fail-closed source configuration and a real production calendar source; the
-read-only agent whose every request carries the financial, calendar (and, after
-P2, market) context; on-demand reports; broker operations with auditability;
-production readiness (observability, limits, CI, deployment/retention
-documentation) and an API a channel client can consume.
+accounts, positions and trade history; **news + fundamental intelligence**
+(provenance-carrying news and economic-calendar facts, instrument/currency
+relevance and per-position fundamental exposure, XAUUSD first) with an explicit,
+fail-closed source configuration and a real production calendar source;
+multi-timeframe market data with an instrument catalog; deterministic technical
+analysis; deeper portfolio/risk intelligence; the read-only agent whose every
+request carries the financial, calendar and fundamental contexts (plus technical
+and market context once P2/P3 land); on-demand reports; agent grounding, safety
+and cost control; broker operations with auditability; and production readiness
+(observability, limits, CI, deployment/retention documentation) with an API a
+channel client can consume.
 
 **Explicitly outside the MVP:** tool/function calling and any agent framework;
 multi-turn conversation or conversation memory; persisted chat history;
 streaming/websockets; any Web/Telegram/WhatsApp/Mobile client; watchlists;
 billing/subscription management; localization/i18n; multi-broker MT5 worker
 pools; distributed limiters; schedulers/background jobs; multiple accounts per
-user or portfolio aggregation across users; news/sentiment feeds; self-service
-registration; and any form of trade execution, modification or closing.
+user or portfolio aggregation across users; social/sentiment feeds and external
+analyst commentary; self-service registration; and any form of trade execution,
+modification or closing.
 
 ## 6. Never (permanent constraints)
 
@@ -546,13 +667,21 @@ registration; and any form of trade execution, modification or closing.
 - Never expose credentials, secrets, tokens or API keys in prompts, logs, chat
   output or API responses.
 - Never allow cross-tenant access to account, position, trade or credential data.
-- Never present development/test data (Deterministic fake, QuantGist) as live
-  market data; provenance must always travel with the data.
+- Never present development/test data (the deterministic calendar and news
+  fakes, QuantGist) as live market data; provenance must always travel with the
+  data, and an absence of data (no news source configured, an empty response)
+  must never be presented as an absence of events.
+- Never claim a provider is production-ready without a live verification recorded
+  in `CURRENT_CHECKPOINT.md`, and never choose or use a news/calendar vendor
+  before its licensing and redistribution rights are settled.
+- Never let the deterministic news/fundamental/technical layer produce advice, a
+  forecast, a target or a recommendation; interpretation belongs to the model, on
+  top of labelled source facts.
 - Never make the Economic Intelligence / calendar context optional for the agent.
 - Never select QuantGist (or any development/test source) as a production
   provider.
-- Never invent a production calendar vendor: the production slot stays closed
-  until a real one is chosen and registered.
+- Never invent a production calendar or news vendor: the production slots stay
+  closed until a real one is chosen and registered.
 - Never replace the modular monolith with microservices, and never commit `.env`
   or any secret.
 
@@ -562,16 +691,19 @@ registration; and any form of trade execution, modification or closing.
 |---|---|---|---|
 | R1 | MT5 Python API authenticates one account per process, so all MT5 reads serialize | Throughput ceiling per broker | Current lock discipline keeps it safe (not a correctness risk); scale-out is P8 (topology) and P12 (worker per broker) |
 | R2 | `MetaTrader5` is Windows-only; no CI/Docker today | Deployment and CI friction; drift between dev and prod | P8 explicit packaging/CI decision (Windows runner for MT5 paths) |
-| R3 | No production calendar vendor: licensing/redistribution rights are unresolved | Blocks real calendar data for customers | P3 decision; today the production slot fails closed, so no development data can leak |
-| R4 | QuantGist free tier is delayed and quota-limited | Unsuitable for customers; quota exhaustion | Development/test only (enforced); production slot closed until P3 |
+| R3 | No production calendar vendor: licensing/redistribution rights are unresolved | Blocks real calendar data for customers | P0 residual vendor decision; today the production slot fails closed, so no development/test calendar data can leak |
+| R4 | QuantGist free tier is delayed and quota-limited | Unsuitable for customers; quota exhaustion | Development/test only (enforced); production slot closed until the P0 vendor decision lands |
 | R5 | LLM availability/cost; the shared free pool is empty by default | The agent answers 503 rather than degrading | Fail-closed today; P5 quota governance; P8 readiness reporting |
 | R6 | In-process quota/throttle only | Multi-worker deployments under-enforce limits | P8 (documented/refused multi-worker), P13 (distributed state) |
-| R7 | Offline test suite cannot see live vendor drift (the QuantGist shape mismatch was found only live) | Silent provider breakage | Standing practice: one minimal live smoke per provider change, plus recorded payload fixtures |
+| R7 | Offline test suite cannot see live vendor drift (the QuantGist shape mismatch was found only live) | Silent provider breakage | Standing practice: one minimal live smoke per provider change (calendar and news alike), plus recorded payload fixtures |
 | R8 | Prompt injection through user text or third-party calendar titles | Model misbehaviour | Untrusted-block framing and escaping already in place; deterministic screening in P5 |
-| R9 | Technical analysis could be read as investment advice | Product/regulatory risk | P2 requires deterministic, explainable, explicitly non-advisory output; no forecasts anywhere |
+| R9 | Fundamental or technical context could be read as investment advice (headlines plus relevance can imply direction) | Product/regulatory risk | P1 and P3 require deterministic, explainable, explicitly non-advisory output with structural fact-versus-interpretation separation; no forecasts anywhere |
 | R10 | No audit trail / retention policy today | Broker (and regulatory) requirements unmet | P7 (audit), P8 (retention statement) |
-| R11 | Two position reads per agent request (known issue 14) | Wasted serialized MT5 work | Optional cleanup once the read paths are revisited (P5) |
+| R11 | Two position reads per agent request (known issue 14), and P1 adds a fundamental-exposure read | Wasted serialized MT5 work | P1 reuses one position read where it can; otherwise optional cleanup once the read paths are revisited (P5) |
 | R12 | Read-only assurance must survive every future phase | Core product promise | Architecture tests (no trading capability anywhere), review per phase, invariants above |
+| R13 | News content licensing/redistribution and provider terms of service (headlines, excerpts, storage and re-display rights) are unresolved; many free tiers forbid commercial use | Blocks a production news feed; potential legal exposure | P1 stays source-agnostic behind the provider contract and fails closed in non-development; selecting and using a vendor requires settled rights, and provenance travels with every item |
+| R14 | A relevance false negative, or a missing/unconfigured news source, could hide a real fundamental driver | Misleading answers | An unconfigured source is labelled unavailable (never empty), missing exposure is an explicit UNKNOWN, the mandatory calendar remains the baseline context, and the relevance mapping is deterministic and test-pinned |
+| R15 | News retrieval is high-volume and latency/cost sensitive, and no caching is planned | Provider cost and rate limits; slow requests | P1 uses bounded windows and hard result caps per request (no per-request fan-out beyond one bounded query); caching is out of scope and would require its own phase and decision |
 
 ## 8. Change control
 
