@@ -27,18 +27,24 @@ from app.providers.instrument import Instrument, InstrumentProvider
 MAX_SYMBOL_LENGTH = 64
 MAX_SEARCH_LENGTH = 64
 
-# Broker suffix forms for the resolution rule below. A broker marks its own
-# variant of a base instrument with a separator and a short token — the common
-# `.r`, `.m`, `.cash`, `.pro`, `.ecn`, `_i`, `-r`, `#1` spellings. Two bounds
-# keep the rule a *suffix* rule rather than guessing:
+# Broker decoration forms for the resolution rule below. A broker marks its own
+# variant of a base instrument with a short decoration — the common `.r`, `.p`,
+# `.m`, `.cash`, `.pro`, `.ecn`, `_i`, `-r`, `#1` spellings, a trailing
+# separator with no token at all (`XAUUSD.`, `UKOIL.`, `US100.`), or a
+# delimiter-free lowercase tag glued to the base (`XAUUSDm`, `XAUUSDpro`).
+# Three bounds keep the rule a *decoration* rule rather than guessing:
 #
-# * the tail must START with a separator, so an undelimited tail (`XAUUSDm`) or
-#   simply a longer symbol (`XAUUSDX`) is never read as a suffix — the catalog
-#   offers no marker that such a tail is a variant rather than a different
-#   instrument; and
-# * the tail after the separator is a short alphanumeric token, so a
+# * the candidate must START with the requested name (case-insensitive), so a
+#   partial name (`US`, `GOL`, `XA`) never resolves to a longer instrument; and
+# * after a separator the tail is empty or a short alphanumeric token, so a
 #   descriptive or compound tail (`XAUUSD.verylongsuffix`, `XAUUSD.r.x`) is not
-#   a suffix either.
+#   a decoration either; and
+# * a delimiter-free tail must be a SHORT ALPHABETIC LOWERCASE tag. Lower case
+#   letters are the broker convention for such tags (the micro/cent/mini and
+#   `pro` spellings); an uppercase tail is how a genuinely different base
+#   symbol is spelled (`XAUUSDX`, `XAUUSDXAUUSD`), and a tail with digits or
+#   punctuation (`XAUUSD1`, `US500.cash` read from `US`) marks nothing — all
+#   stay unresolved rather than being read as variants.
 #
 # Broker symbols are ASCII in practice; a non-ASCII name simply never matches
 # this rule (it stays unresolved rather than being guessed at).
@@ -47,23 +53,30 @@ _MAX_SUFFIX_LENGTH = 8
 
 
 def _is_broker_suffix_variant(symbol: str, base: str) -> bool:
-    """True when ``symbol`` is ``base`` plus a broker suffix.
+    """True when ``symbol`` is ``base`` plus a broker decoration.
 
-    Both bounds above are applied: the requested name must be an exact
-    (case-insensitive) prefix of the catalog symbol, the next character must be
-    a broker separator, and the remainder must be a short alphanumeric token.
-    Nothing about the symbol's *meaning* is inferred: the caller still decides
-    what a unique candidate means, and anything else stays unresolved.
+    All bounds above are applied: the requested name must be an exact
+    (case-insensitive) prefix of the catalog symbol, and the remainder must be
+    one of the three decoration forms — a separator with an empty or short
+    alphanumeric tail, or a short lowercase tag glued to the base. Nothing
+    about the symbol's *meaning* is inferred: the caller still decides what a
+    unique candidate means, and anything else stays unresolved.
     """
     if not (symbol.isascii() and base.isascii()) or len(symbol) <= len(base):
         return False
     if symbol[: len(base)].casefold() != base.casefold():
         return False
     remainder = symbol[len(base) :]
-    if remainder[0] not in _SUFFIX_SEPARATORS:
-        return False
-    tail = remainder[1:]
-    return 1 <= len(tail) <= _MAX_SUFFIX_LENGTH and tail.isalnum()
+    if remainder[0] in _SUFFIX_SEPARATORS:
+        tail = remainder[1:]
+        return len(tail) <= _MAX_SUFFIX_LENGTH and (not tail or tail.isalnum())
+    # Delimiter-free form: a short alphabetic lowercase tag (`XAUUSDm`,
+    # `XAUUSDpro`). ``islower`` requires at least one cased character and all
+    # cased characters lower, and ``isalpha`` additionally excludes digits and
+    # punctuation — so an uppercase or mixed-case tail (a different base
+    # symbol), a digit-only tail (`XAUUSD1`) and a compound remainder such as
+    # ``US500.cash`` read from ``US`` are never accepted.
+    return remainder.isalpha() and remainder.islower() and len(remainder) <= _MAX_SUFFIX_LENGTH
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -121,9 +134,9 @@ class InstrumentService:
         2. a unique case-insensitive match over the broker's catalog, so a user
            typing ``xauusd.r`` still resolves while a broker's case-sensitive
            name is never rewritten;
-        3. a unique BROKER-SUFFIXED spelling of the requested base symbol
-           (``XAUUSD`` -> ``XAUUSD.r``), which is what makes a broker that
-           suffixes its whole catalog usable at all.
+        3. a unique BROKER-DECORATED spelling of the requested base symbol
+           (``XAUUSD`` -> ``XAUUSD.r``, ``XAUUSD.`` or ``XAUUSDm``), which is
+           what makes a broker that decorates its whole catalog usable at all.
 
         The returned ``Instrument.symbol`` is always the broker's own spelling.
         Every step requires *one* match: an ambiguous catalog is an error rather

@@ -228,11 +228,15 @@ ordering are deterministic and belong to `InstrumentService`
 unique case-insensitive match, lists/searches the catalog as a literal
 case-insensitive substring over symbol and description, and caps a listing at  200 instruments while reporting `total` and `truncated`. A requested symbol
   that the broker does not list verbatim resolves through a unique
-  case-insensitive match, and — since Step 52 — through a unique broker-suffixed
-  spelling of it (`XAUUSD` → `XAUUSD.r`), so a broker that suffixes its whole
-  catalog is usable. The suffix rule is bounded (a separator plus a short
-  alphanumeric tail); a longer symbol, an undelimited tail, a partial name or
-  several competing variants stay unresolved rather than being guessed.
+  case-insensitive match, and — since Step 52, extended in Step 54 — through a
+  unique broker-DECORATED spelling of it (`XAUUSD` → `XAUUSD.r`, `XAUUSD.p`,
+  `XAUUSD.` or the lowercase-tag `XAUUSDm`/`XAUUSDpro` forms), so a broker that
+  decorates its whole catalog is usable. The rule is bounded and knows no
+  suffix list: a candidate must be the requested name plus one of the three
+  decoration forms (separator + empty/short tail, or a short alphabetic
+  lowercase tag); a longer symbol, an uppercase undelimited tail, a digit-only
+  tail, a partial name or several competing variants stay unresolved rather
+  than being guessed.
 
 The same inversion is used for the AI layer: LLMProvider (app/providers/llm.py)
 is a vendor-neutral contract whose implementations are FakeLLMProvider,

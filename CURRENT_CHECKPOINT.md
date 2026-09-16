@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 53 — Market Data Symbol Resolution (this checkpoint)
+Step 54 — General Broker Decoration Resolution (this checkpoint)
++ Step 53 — Market Data Symbol Resolution
 + Step 52 — Safe Broker-Suffix Resolution
 + Step 51 — Instrument Resolution in Financial Research
 + Step 50 — MT5 Instrument Discovery & Resolution
@@ -27,9 +28,11 @@ Step 53 — Market Data Symbol Resolution (this checkpoint)
 
 Status:
 
-Step 53: VERIFIED (implementation, tests and documentation; committed together
-by the Step 53 commit "fix(market-data): resolve symbols through instrument
-catalog"; local, not pushed)
+Step 54: VERIFIED (implementation, tests and documentation; committed together
+by the Step 54 commit "fix(instruments): resolve decorated broker spellings
+without a suffix list"; local, not pushed)
+Step 53: VERIFIED + COMMITTED (e884767 — "fix(market-data): resolve symbols
+through instrument catalog"; local, not pushed)
 Step 52: VERIFIED + COMMITTED (9ab52d5 — "feat(instruments): safely resolve
 unique broker symbol suffixes"; local, not pushed)
 Step 51: VERIFIED + COMMITTED (c9a5a39 — "feat(research): resolve instruments
@@ -51,6 +54,18 @@ Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
 Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
+
+The Step 54 change set (the extended decoration rule in
+`_is_broker_suffix_variant` with its documented three-form bound, the
+re-pointed Step 52 bounds tests, the new decoration/ambiguity/partial-name
+service cases, the end-to-end suffixed-broker regression in the research suite,
+and this documentation) — the change set this checkpoint describes — is
+implemented, verified and committed as ONE focused commit
+("fix(instruments): resolve decorated broker spellings without a suffix list")
+carrying the diff, the tests and this documentation together, following the
+established single-commit convention. Resolution still lives entirely inside
+the instrument service: no provider, resolution order, research/agent/market-data
+path, configuration, LLM or schema change beyond the decoration rule itself.
 
 The Step 53 change set (the optional InstrumentService on MarketDataService and
 its resolve-then-read body, the composition-root wiring of the existing
@@ -1437,6 +1452,55 @@ Status: VERIFIED + COMMITTED
 - Focused tests grew 10 → 14 (override reads the requested file; default path
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
+
+
+### Step 54 — General Broker Decoration Resolution (READ-ONLY)
+Status: VERIFIED + COMMITTED (the Step 54 commit "fix(instruments): resolve
+decorated broker spellings without a suffix list"; one focused commit carrying
+implementation, tests and documentation — the established single-commit
+convention)
+
+Brokers decorate their variants in more shapes than the Step 52 rule accepted:
+`XAUUSD.p`, a trailing separator with no token at all (`XAUUSD.`, `UKOIL.`,
+`US100.`), and delimiter-free lowercase tags (`XAUUSDm`, `XAUUSDpro`). A base
+request against such a catalog stayed unresolvable even though exactly one
+candidate existed. Resolution now accepts any of these decoration forms — with
+NO list of known suffixes and NO guessing.
+
+Includes:
+
+- app/services/instruments/instrument_service.py: `_is_broker_suffix_variant`
+  accepts three decoration forms after the unchanged exact case-insensitive
+  prefix bound (no known-suffix list, no fuzzy or substring matching):
+  1. separator + empty tail (`XAUUSD.`) — new;
+  2. separator + short alphanumeric tail (`XAUUSD.r`, `XAUUSD.p`, `XAUUSD.cash`,
+     `XAUUSD_m`, `XAUUSD-m`, `XAUUSD#1`) — the Step 52 form, unchanged;
+  3. a short ALPHABETIC LOWERCASE tag glued to the base (`XAUUSDm`,
+     `XAUUSDpro`) — new. Lowercase letters are the broker tag convention; an
+     uppercase tail is how a genuinely different base symbol is spelled
+     (`XAUUSDX`, `XAUUSDXAUUSD`), a digit tail marks nothing (`XAUUSD1`), and
+     the alphabetic bound keeps a partial name from reading a longer symbol as
+     its decoration (`US500.cash` from `US`, `NICKEL25` from `NICKEL`).
+  Everything else is unchanged: the exact-then-case-insensitive-then-decoration
+  order, the one-candidate requirement (zero → unknown, several → ambiguous,
+  never a guess), the broker's own spelling in the result, the single catalog
+  read, the provider contract and the resolve() docstring contract. A catalog
+  read is still at most one extra vendor call per resolve.
+- tests/test_instrument_service.py: the Step 52 bounds tests were re-pointed
+  onto tails that are still not decorations (uppercase undelimited tails,
+  digit-only tails, compound/oversized tails, a different base); the separator
+  forms test now covers the full decoration set including the empty tail and
+  the lowercase tags; new cases pin exact-wins-over-tag, ambiguity across
+  separator and tag forms, and partial names never resolving even when the tail
+  shape would otherwise fit.
+- tests/test_financial_research.py (1 new case): the end-to-end regression —
+  a broker whose catalog is `UKOIL.`, `US100.` and `XAUUSD.` resolves all three
+  base requests and grades real news for each.
+
+Untouched: the resolution order, the Instrument contract, both instrument
+providers, the market-data/research/agent composition (they keep delegating to
+the same InstrumentService), NewsProvider/Alpha Vantage, config, schema, and
+the read-only/no-symbol_select posture. No live API request.
 
 
 ### Step 53 — Market Data Symbol Resolution (READ-ONLY)
@@ -3574,17 +3638,16 @@ This limitation must be reported rather than hidden.
     is pre-existing (a broker-spelled position symbol already matched under
     upper case in Steps 47-48, and the fundamental endpoint's output is
     unchanged), which is why Step 51 leaves it alone deliberately.
-22. Broker-suffix resolution (Step 52) covers DELIMITED suffixes only: a broker
-    whose variant is spelled without a separator (`XAUUSDm`, `XAUUSDpro`) or
-    with a tail longer than eight characters is still unresolvable, and the
-    request loses its look-back research block (the agent answers from the
-    mandatory calendar/fundamental context, and the research API returns the
-    deterministic 404). Extending the rule to undelimited tails is deliberately
-    NOT done: the catalog carries no marker that such a tail is a variant rather
-    than a different instrument, so matching it would be guessing. A broker that
-    lists several variants of one base (XAUUSD.r and XAUUSD.m) likewise stays
-    ambiguous by design — the caller must name the spelling it wants, and
-    GET /instruments lists the catalog to find it.
+22. Broker-suffix resolution (Step 52, extended in Step 54) requires the
+    candidate to be the requested name plus a decoration: a separator with an
+    empty or short alphanumeric tail, or a short alphabetic lowercase tag. An
+    undelimited UPPERCASE tail (`XAUUSDX`), a digit-only tail (`XAUUSD1`) and
+    tails longer than eight characters stay unresolvable: the catalog carries no
+    marker that such a tail is a variant rather than a different instrument, and
+    matching them would be guessing. A broker that lists several variants of one
+    base (XAUUSD.r and XAUUSD.m) likewise stays ambiguous by design — the
+    caller must name the spelling it wants, and GET /instruments lists the
+    catalog to find it.
 24. Every market-data request now performs one extra MT5 read (the symbol
     lookup that resolves it, plus at most one catalog scan when the spelling is
     not an exact match) before the candle read itself. That is the cost of

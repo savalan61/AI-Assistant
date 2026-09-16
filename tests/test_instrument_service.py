@@ -136,15 +136,18 @@ def test_a_unique_suffixed_spelling_resolves_regardless_of_case():
     assert suffixed_catalog("eurusd.m").resolve("EURUSD").symbol == "eurusd.m"
 
 
-@pytest.mark.parametrize("symbol", ["XAUUSD.r", "XAUUSD_m", "XAUUSD-m", "XAUUSD#1", "XAUUSD.cash", "XAUUSD.ECN"])
-def test_the_documented_separator_forms_are_recognised(symbol: str):
-    assert suffixed_catalog(symbol).resolve("XAUUSD").symbol == symbol
-
-
 def test_an_exact_spelling_always_wins_over_a_suffixed_variant():
     svc = suffixed_catalog("XAUUSD.r", "XAUUSD")
 
     assert svc.resolve("XAUUSD").symbol == "XAUUSD"
+
+
+def test_an_exact_spelling_wins_over_a_lowercase_tag_variant():
+    # "goldm" is in every sense a decoration of "GOLD" (GOLD + the lowercase
+    # tag "m"), but the exact entry still wins first.
+    svc = suffixed_catalog("GOLD", "goldm")
+
+    assert svc.resolve("GOLD").symbol == "GOLD"
 
 
 def test_a_case_insensitive_exact_match_wins_over_a_suffixed_variant():
@@ -178,28 +181,82 @@ def test_no_suffixed_variant_stays_unresolved():
 
 
 def test_a_variant_of_a_different_base_is_not_matched():
-    # The requested name must be the symbol's BASE, not merely a part of it.
-    svc = suffixed_catalog("XAUUSDT.r")
+    # The requested name must be the symbol's BASE, not merely a part of it:
+    # XAUUSDT.r is a variant of XAUUSDT, not of XAUUSD, and GOLDMINI is a base
+    # symbol of its own — neither is a decoration of the requested name.
+    for catalog_symbol in ("XAUUSDT.r", "GOLDMINI"):
+        svc = suffixed_catalog(catalog_symbol)
 
-    with pytest.raises(ValueError):
-        svc.resolve("XAUUSD")
+        with pytest.raises(ValueError):
+            svc.resolve("XAUUSD" if catalog_symbol == "XAUUSDT.r" else "GO")
 
 
 @pytest.mark.parametrize(
     "symbol",
     [
-        "XAUUSDm",  # undelimited tail: could equally be a different instrument
-        "XAUUSDx",
-        "XAUUSDXAUUSD",
+        "XAUUSDX",  # uppercase undelimited tail: a different base symbol's shape
+        "XAUUSD1",  # digit-only undelimited tail: marks nothing
+        "XAUUSDXAUUSD",  # long uppercase tail
         "XAUUSD.verylongsuffix",  # beyond the bounded suffix length
         "XAUUSD.r.x",  # compound tail
-        "XAUUSD.",  # separator with nothing after it
-        "XAUUSDr",
+        "XAUUSDT.r",  # a variant of a DIFFERENT base
     ],
 )
-def test_a_tail_that_is_not_a_broker_suffix_is_never_matched(symbol: str):
+def test_a_tail_that_is_not_a_broker_decoration_is_never_matched(symbol: str):
     with pytest.raises(ValueError):
         suffixed_catalog(symbol).resolve("XAUUSD")
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    [
+        "XAUUSD.r",  # separator + short token
+        "XAUUSD.p",  # another single-letter broker variant
+        "XAUUSD.",  # trailing separator with no token (UKOIL. / US100. style)
+        "XAUUSD_m",
+        "XAUUSD-m",
+        "XAUUSD#1",
+        "XAUUSD.cash",
+        "XAUUSD.ECN",  # case of the tail is the broker's business
+        "XAUUSDm",  # delimiter-free lowercase tag
+        "XAUUSDpro",  # longer lowercase tag
+    ],
+)
+def test_the_documented_broker_decoration_forms_are_recognised(symbol: str):
+    assert suffixed_catalog(symbol).resolve("XAUUSD").symbol == symbol
+
+
+def test_a_delimiter_free_tag_is_lowercase_only():
+    # Lowercase letters are the tag convention; an uppercase tail is how a
+    # different base symbol would be spelled, and digits mark nothing.
+    with pytest.raises(ValueError):
+        suffixed_catalog("XAUUSDX").resolve("XAUUSD")
+    with pytest.raises(ValueError):
+        suffixed_catalog("XAUUSD1").resolve("XAUUSD")
+
+
+def test_a_partial_name_never_resolves_even_when_the_tail_shape_fits():
+    # "US" is a prefix of US500.cash and its remainder ("500.cash") contains a
+    # separator, but the partial-name bound rejects digits in an undelimited
+    # tail, so the longer instrument is never read as a decoration of "US".
+    svc = suffixed_catalog("US500.cash", "AAPL")
+
+    with pytest.raises(ValueError):
+        svc.resolve("US")
+    with pytest.raises(ValueError):
+        svc.resolve("US5")  # even a longer slice of the same symbol
+
+
+def test_a_lowercase_tag_is_never_read_as_a_partial_name_match():
+    # A partial name of the right shape ("goldm" for "goldm" + nothing) is an
+    # exact entry, but "go" + "ldm" is a lowercase-alphabetic tail — the tag
+    # form must only fire when the tail is a real decoration, not a slice of a
+    # longer instrument name. The prefix bound does that: "GO" + "LDM" is
+    # uppercase, so it never matches.
+    svc = suffixed_catalog("GOLDMINI")
+
+    with pytest.raises(ValueError):
+        svc.resolve("GO")
 
 
 def test_a_suffix_match_is_never_a_substring_or_prefix_match():

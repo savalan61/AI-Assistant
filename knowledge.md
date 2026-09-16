@@ -668,23 +668,27 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     second catalog read, no live API request. Cost: one extra terminal read per
     market-data request, which matters because MT5 serializes reads on the single
     process-wide session (CURRENT_CHECKPOINT.md known issue 24)
-32. Safe broker-suffix resolution (Step 52): InstrumentService.resolve gained a
-    third and final step — exact spelling, then unique case-insensitive match
-    (both unchanged), then a UNIQUE broker-suffixed spelling of the requested
-    base symbol (XAUUSD -> XAUUSD.r). The rule is a form rule with two bounds,
-    not fuzzy matching: the candidate must begin with the requested name
-    (case-insensitive) and its remainder must start with a broker separator
-    (. _ - #) followed by a short (1-8) alphanumeric token, so undelimited tails
-    (XAUUSDm), longer symbols (XAUUSDX), descriptive/compound tails
-    (XAUUSD.verylongsuffix, XAUUSD.r.x) and partial names (US, GOL) never match.
-    Exactly one candidate resolves in the broker's own spelling; zero or several
-    stay unknown/ambiguous and are never guessed. This is what makes a broker
-    whose whole catalog is suffixed usable: research and the agent's research
-    block now work for XAUUSD on such a broker (focus: XAUUSD.r in the prompt)
-    instead of silently dropping the block. Same single InstrumentService
-    boundary, same FocusResolution contract, no provider/agent/prompt/schema
-    change, no extra catalog read, and GET /instruments/{symbol} gains the same
-    resolution (CURRENT_CHECKPOINT.md known issue 22)
+32. Safe broker-suffix resolution (Step 52, extended in Step 54):
+    InstrumentService.resolve's third and final step — after exact spelling and
+    a unique case-insensitive match, both unchanged — accepts a UNIQUE
+    broker-DECORATED spelling of the requested base symbol. Three decoration
+    forms, with NO list of known suffixes: separator + empty tail (XAUUSD.,
+    UKOIL., US100.), separator + short (1-8) alphanumeric token (XAUUSD.r,
+    XAUUSD.p, XAUUSD.cash, XAUUSD_m, XAUUSD-m, XAUUSD#1), or a short ALPHABETIC
+    LOWERCASE tag glued to the base (XAUUSDm, XAUUSDpro). The form rule is not
+    fuzzy matching: the candidate must begin with the requested name
+    (case-insensitive), so partial names (US, GOL, GO) never match, and an
+    uppercase undelimited tail (XAUUSDX), a digit-only tail (XAUUSD1), longer
+    symbols and descriptive/compound tails (XAUUSD.verylongsuffix, XAUUSD.r.x)
+    never match either. Exactly one candidate resolves in the broker's own
+    spelling; zero or several stay unknown/ambiguous and are never guessed.
+    This is what makes a broker whose whole catalog is decorated usable:
+    research, the agent's research block and market data all resolve the base
+    symbol through the same rule (focus: XAUUSD.r in the prompt) instead of
+    silently dropping the block. Same single InstrumentService boundary, same
+    FocusResolution contract, no provider/agent/prompt/schema change, no extra
+    catalog read, and GET /instruments/{symbol} gains the same resolution
+    (CURRENT_CHECKPOINT.md known issue 22)
 31. Instrument resolution inside financial research (Step 51): a requested
     instrument is resolved through the Step 50 broker catalog BEFORE anything is
     researched, and only the broker's own canonical spelling is graded. The
