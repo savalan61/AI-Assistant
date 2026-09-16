@@ -4,10 +4,18 @@ This is the agent layer's job: turn the user request plus the read-only
 financial context into plain text. The provider therefore never needs to know
 about FinancialContext, and this module never knows about any provider.
 
-Four deliberate restrictions on what is sent:
+Five deliberate restrictions on what is sent:
 
 * only facts already present in the context are rendered — nothing is inferred
   here, and no forecast, recommendation or trading suggestion is composed;
+* today's economic calendar (Step 45) is rendered as its own block from the
+  existing EconomicIntelligence contract: the event's timestamp, currency,
+  impact, forecast/previous/actual exactly as published, its deterministic
+  relevance level, and the source's provenance marker. Calendar data is public
+  information and carries no account identity, so it is not governed by the
+  financial-data switches below — the three switches still govern the customer
+  financial data they always did. Per-position relevance reasons stay in the
+  contract and are deliberately not rendered, keeping the block bounded;
 * account identity is omitted (login, holder name, server, account number).
   The model needs the numbers, not the identifiers, so unnecessary personal
   data is not shipped to an external service. This is structural, not a switch;
@@ -27,6 +35,7 @@ from app.providers.llm import LLMPrompt
 from app.providers.position import Position
 from app.providers.trade_history import TradeHistoryEntry
 from app.services.agent.egress import OutboundDataPolicy
+from app.services.economic_intelligence import EconomicIntelligenceContext
 from app.services.financial_context import FinancialContext
 from app.services.portfolio_intelligence import SymbolExposure
 
@@ -45,6 +54,16 @@ ASSISTANT_INSTRUCTIONS = (
 )
 
 _NONE = "- none"
+
+# Rendered when an event's forecast/previous/actual was not published (yet).
+_ABSENT = "-"
+
+# The calendar block's empty case and its size-reduction note. Both are stated
+# explicitly so the model can tell "no events today" from "events omitted".
+_NO_EVENTS = "- none (no economic events are published for today)"
+_ECONOMIC_OMITTED_NOTE = (
+    "Economic calendar: omitted because the financial context exceeded the prompt size limit."
+)
 
 # Delimiters around the untrusted request. Escaped inside the request itself so
 # the user text cannot terminate the block and be read as framing.
@@ -131,12 +150,41 @@ def _trades_block(
     return lines, len(shown), len(ordered)
 
 
+def _economic_block(economic: EconomicIntelligenceContext) -> list[str]:
+    """Render today's economic calendar: public data, no account identity.
+
+    The provenance marker is carried into the prompt exactly as it is into the
+    API response, so a delayed or placeholder source can never be read as live
+    market data by the model either.
+    """
+    lines = [
+        f"Economic calendar for today (source: {economic.data_source}; "
+        f"UTC window {economic.window_from.isoformat()} .. {economic.window_to.isoformat()}):"
+    ]
+    if not economic.events:
+        lines.append(_NO_EVENTS)
+        return lines
+    for item in economic.events:
+        event = item.event
+        lines.append(
+            f"- {event.timestamp.isoformat()} {event.currency} "
+            f"impact {event.impact.value} relevance {item.overall_relevance.value} "
+            f"forecast {event.forecast if event.forecast is not None else _ABSENT} "
+            f"previous {event.previous if event.previous is not None else _ABSENT} "
+            f"actual {event.actual if event.actual is not None else _ABSENT} "
+            f"| {event.title}"
+        )
+    return lines
+
+
 def _render_content(
     request: str,
     context: FinancialContext,
     policy: OutboundDataPolicy,
     *,
     include_trades: bool,
+    economic: EconomicIntelligenceContext | None = None,
+    economic_omitted: bool = False,
 ) -> str:
     """Render the prompt body deterministically for the given inclusion mode."""
     portfolio = context.portfolio_intelligence
@@ -197,6 +245,14 @@ def _render_content(
             "Recent executed trades: omitted because the financial context exceeded the "
             "prompt size limit."
         )
+
+    if economic is not None:
+        lines.append("")
+        lines.extend(_economic_block(economic))
+    elif economic_omitted:
+        # Only claimed when a calendar block was actually part of the prompt.
+        lines.append("")
+        lines.append(_ECONOMIC_OMITTED_NOTE)
     return "\n".join(lines)
 
 
@@ -204,28 +260,48 @@ def build_prompt(
     request: str,
     context: FinancialContext,
     policy: OutboundDataPolicy | None = None,
+    economic: EconomicIntelligenceContext | None = None,
 ) -> LLMPrompt:
-    """Render ``request`` and ``context`` into a provider-neutral prompt.
+    """Render ``request``, ``context`` and today's calendar into one prompt.
 
-    Pure and deterministic: the same request, context and policy always produce
-    the same prompt, so a provider sees a stable, reproducible input.
+    Pure and deterministic: the same request, context, policy and economic
+    context always produce the same prompt, so a provider sees a stable,
+    reproducible input. ``economic`` is optional: without it (a deployment with
+    no calendar capability, or an existing caller) the prompt is exactly what it
+    was before the economic block existed.
 
     Size handling is an ordered, stated rule rather than silent truncation:
 
     1. the trade block is already capped to the most recent
        ``AGENT_MAX_PROMPT_TRADES`` (with the omission count stated in the body);
     2. if the rendered prompt still exceeds ``AGENT_MAX_PROMPT_CHARS``, the
-       trade block is dropped entirely and the body says so;
-    3. if the remainder alone still exceeds the limit, ``PromptTooLargeError``
+       trade block is dropped entirely and the body says so (unchanged);
+    3. if it still exceeds the limit, the economic-calendar block is dropped too
+       and the body says so;
+    4. if the remainder alone still exceeds the limit, ``PromptTooLargeError``
        is raised so the caller fails cleanly instead of sending a payload of
        unbounded size.
     """
     effective_policy = policy if policy is not None else OutboundDataPolicy.from_settings()
 
-    content = _render_content(request, context, effective_policy, include_trades=True)
+    content = _render_content(
+        request, context, effective_policy, include_trades=True, economic=economic
+    )
     if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
-        content = _render_content(request, context, effective_policy, include_trades=False)
+        content = _render_content(
+            request, context, effective_policy, include_trades=False, economic=economic
+        )
         if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
-            raise PromptTooLargeError("financial context is too large to render a bounded prompt")
+            content = _render_content(
+                request,
+                context,
+                effective_policy,
+                include_trades=False,
+                economic_omitted=economic is not None,
+            )
+            if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
+                raise PromptTooLargeError(
+                    "financial context is too large to render a bounded prompt"
+                )
 
     return LLMPrompt(instructions=ASSISTANT_INSTRUCTIONS, content=content)

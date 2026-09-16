@@ -474,4 +474,11 @@ async def get_agent_service(
         # The outbound-data policy is applied to the prompt the provider gets,
         # so what may leave the process is explicit at the composition boundary.
         data_policy=get_outbound_data_policy(),
+        # Step 45: today's economic intelligence is composed into the same
+        # prompt through the EXISTING calendar/intelligence composition path
+        # (the one GET /economic-intelligence/today uses), so tenants see one
+        # calendar architecture. That path fails closed outside development
+        # (no calendar source may serve a broker's customers), and a provider
+        # failure surfaces as the established generic 503.
+        economic_intelligence_service=get_economic_intelligence_service(credentials),
     )

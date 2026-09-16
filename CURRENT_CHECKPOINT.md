@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 44 — QuantGist Economic Calendar Source (development/test; this checkpoint)
+Step 45 — Economic Intelligence in the Agent Pipeline (this checkpoint)
++ Step 44 — QuantGist Economic Calendar Source (development/test)
 + Step 43 — Tenant-Safe Login
 + Step 42 — One User Identity (`login`)
 + Step 41 — Stabilize & commit Step 40 + the trade-history field fix
@@ -16,22 +17,28 @@ Step 44 — QuantGist Economic Calendar Source (development/test; this checkpoin
 
 Status:
 
-Step 44: VERIFIED — implemented, deliberately NOT committed (working tree modified; no push)
+Step 45: VERIFIED + COMMITTED (the Step 45 checkpoint commit — its hash is recorded in the checkpoint-status commit that follows it)
+Step 44: VERIFIED + COMMITTED + PUSHED (638f972)
 Step 43: VERIFIED + COMMITTED + PUSHED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9)
 Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
 Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
-Step 44 (QuantGist development/test economic-calendar source) — the change set
-this checkpoint describes — is implemented and verified but deliberately NOT
-committed, so the working tree is modified (see its section below). The last
-commit is Step 43 (tenant-safe login),
+Step 45 (economic intelligence in the agent pipeline) — the change set this
+checkpoint describes — is implemented, verified and committed by the Step 45
+checkpoint commit, which carries the implementation, the tests and the
+documentation updates (PROJECT_CONTEXT.md, knowledge.md and this document); it
+is NOT pushed, so origin/master stays at the Step 44 commit until it is. Before
+it, Step 44 (the QuantGist development/test economic-calendar source) was
+committed by "feat(calendar): add QuantGist development/test source" (638f972,
+which carries the adapter, its tests, the wiring, the configuration and the
+documentation) and pushed. Step 43 is
 5afd89510af4ec5e63d4bcbf805bc9e73405f1e9 ("feat(auth): make login
 tenant-safe"), which carries the implementation, the tests and the four
 documentation updates (AGENTS.md, PROJECT_CONTEXT.md, knowledge.md and this
 document); it is pushed, together with its checkpoint-status commit (9dbfb7e)
-and the knowledge-base alignment commit (74cbba5, which is origin/master today).
+and the knowledge-base alignment commit (74cbba5).
 The prior commit is Step 42 — "refactor(users): collapse username and mt5_login
 into one login identity" (95d00d9), the one-identity `login` rename across the
 model, migration, auth, user management, MT5 credential handling, seed scripts,
@@ -48,6 +55,40 @@ user seed script), the Step 37 checkpoint ("feat(financial): harden numeric
 representation"), the Step 36 MT5 tenant-session commit, the Step 35 security
 hardening commit and b95eaa1 ("feat(ai): add broker llm routing and agent
 controls", Steps 29–33).
+
+Step 45 wires the existing economic intelligence into the agent, so a customer's
+question is answered with today's economic calendar in the same prompt. The agent
+composes, it does not fetch: AgentService takes an injected
+EconomicIntelligenceService (the same service GET /economic-intelligence/today
+uses, reached through the same composition-root path), resolves ONE reference
+instant per request and passes it to both the financial context and today's UTC
+calendar window, so the trade-history window and the calendar day can never
+disagree about when "now" is. The prompt gained a dedicated economic block that
+renders each event's timestamp, currency, impact, forecast/previous/actual exactly
+as published (null renders as "-", no precision is invented), the deterministic
+relevance level and the source's provenance marker — public market data with no
+account identity, which is why the three LLM_SEND_* egress switches keep
+governing exactly the customer financial data they always did, with no protection
+weakened and no account identity added. The existing size discipline gained one
+ordered step: the trade block is dropped first, then the economic block (each
+omission stated in the body, never a silent truncation), and only then does
+PromptTooLargeError fail the request. The economic calendar remains MANDATORY on
+every request: the composition root always supplies the service, a
+calendar/provider failure propagates unchanged and surfaces as the endpoint's
+existing generic 503, and no tool/function calling, agent framework, multi-turn
+loop, retry, cache or new provider was added. No schema change and no migration.
+
+Step 45 verification: focused suites 249 passed (the new
+ tests/test_agent_economic_context.py holds 23 composition cases: the calendar
+reaching the prompt, provenance and relevance preservation, the shared `now`,
+the empty calendar, the failure path, and unchanged agent behaviour); the agent
+area including the API boundary passed 75; full suite 924 passed, 2 warnings
+(both pre-existing third-party deprecations); compileall over app and tests clean;
+pyright (via npx, the project's venv interpreter) reports 0 errors / 0 warnings
+across the three changed application files and the new test file, with only the
+edited test files' pre-existing diagnostics left (no suppression added);
+git diff --stat confirmed the QuantGist adapter and alembic/ were untouched. The
+tests were written first: 25 cases failed before the implementation existed.
 
 Step 43 makes login tenant-safe. `login` is the MT5 account/login number, and
 MT5 account numbers are unique per broker rather than globally, so two brokers
@@ -143,12 +184,12 @@ No database migration was needed — these values are not persisted.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 799 passed, 2 warnings (both pre-existing third-party
+pytest tests/ -q → 924 passed, 2 warnings (both pre-existing third-party
 deprecation warnings: the anyio BlockingPortal alias and the starlette
-testclient httpx notice); verified 2026-09-15 on this exact tree, after the
-Step 40 and trade-history work. Step 40 added 25 focused cases (its
-admin-caller/role="admin" branch moved from the 422 parametrization to an
-authorization 403, so the net count is +25 overall), and Step 39A removed the
+testclient httpx notice); verified 2026-09-16 on this exact tree, after the
+Step 44 and Step 45 work. Step 44 rewrote the QuantGist cases against the
+verified live API and took the suite to 897; Step 45 added the agent/calendar
+composition (+27, 924 total). Step 40 took it to 799 and Step 39A removed the
 former Pydantic class-config deprecation, which is why the warning count is 2
 rather than 3.
 
@@ -173,16 +214,16 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-MODIFIED — the Step 44 change set (the QuantGist development/test calendar
-source, its tests and the configuration it needs) is implemented and verified but
-deliberately NOT committed, so the working tree holds that change set until a
-commit is explicitly requested.
+CLEAN — the Step 45 change set (the agent/calendar composition, its tests and
+the documentation updates) is committed by the Step 45 checkpoint commit, so
+nothing from that change set is left modified, staged or uncommitted.
 
 The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
-crud"), 42 (`95d00d9`), 43 (`5afd895`) and the two documentation commits after it
-(`9dbfb7e`, `74cbba5`) are pushed: origin/master and local HEAD are both
-74cbba5 until the Step 44 change set is committed.
+crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
+(`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
+638f972, and local HEAD is the Step 45 change set (the checkpoint commit plus
+its checkpoint-status commit), which is not pushed.
 
 ## Completed Stages
 
@@ -1015,8 +1056,60 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
+### Step 45 — Economic Intelligence in the Agent Pipeline (READ-ONLY)
+Status: VERIFIED + COMMITTED (the Step 45 checkpoint commit; hash in the checkpoint-status commit)
+
+Composes the EXISTING economic intelligence into the existing agent pipeline. It
+adds no calendar logic to the agent, no tool/function calling, no agent
+framework, no retry, no cache and no new provider — the agent composes, the
+EconomicIntelligenceService fetches.
+
+Includes:
+
+- app/services/agent/agent_service.py: an OPTIONAL injected
+  EconomicIntelligenceService. handle() resolves ONE reference instant
+  (now or datetime.now(UTC)) and passes that same instant to the financial
+  context and to EconomicIntelligenceService.build_today_context(now=...), so
+  the trade-history window and today's UTC calendar window can never disagree.
+  The service is a dependency, never constructed here, and failures propagate
+  unchanged (the API maps them to its existing 503). Without it (an existing
+  caller, or a deployment with no calendar capability) the prompt is exactly
+  what it was before this step.
+- app/services/agent/prompt.py: build_prompt(request, context, policy, economic)
+  adds a dedicated economic block rendering the existing contract only —
+  timestamp, currency, impact, forecast/previous/actual exactly as published
+  (null renders as "-"), the event's deterministic relevance level, and the
+  source's provenance marker (data_source) so delayed or placeholder data
+  cannot be read as live market data. An empty calendar renders an explicit
+  "no economic events are published for today" line. Per-position relevance
+  reasons stay in the contract and are deliberately not rendered.
+- size discipline preserved and extended by exactly one ordered step: the trade
+  block is still dropped first, then the economic block, and only after that
+  does PromptTooLargeError fail the request — each omission stated in the body
+  rather than truncating silently.
+- app/core/dependencies.py: get_agent_service composes the injected calendar
+  through the EXISTING get_economic_intelligence_service(credentials) path (the
+  one GET /economic-intelligence/today uses), so there is one calendar
+  architecture and one relevance classifier, and the calendar stays MANDATORY
+  for every agent request.
+- tests: tests/test_agent_economic_context.py (new, 23 cases), three
+  end-to-end cases in tests/test_agent_api.py (the calendar reaching the prompt,
+  a calendar failure becoming 503, and the unchanged response contract) plus the
+  calendar-source pin in that file's autouse fixture, and one composition-root
+  case in tests/test_agent_wiring.py. Nothing touches the network.
+- verification: focused 249 passed; agent area 75 passed; full suite 924
+  passed, 2 warnings (both pre-existing third-party deprecations); compileall
+  clean; pyright 0 errors / 0 warnings on the three changed application files
+  and the new test file. Tests were written first (25 failures before the
+  implementation). No schema change, no migration, no documentation change
+  outside this checkpoint.
+- read-only and safety: the prompt still carries no account identity, the three
+  LLM_SEND_* egress switches keep governing the customer financial data they
+  always did (calendar data is public market data and carries no account
+  identity), and no trading capability of any kind was added or changed.
+
 ### Step 44 — QuantGist Economic Calendar Source (DEVELOPMENT/TEST ONLY)
-Status: VERIFIED — implemented, deliberately NOT committed (working tree modified; no push)
+Status: VERIFIED + COMMITTED + PUSHED (638f972)
 
 Connects a real HTTP economic-calendar source behind the existing provider
 abstraction as a temporary development/test stand-in. It does NOT resolve Known
@@ -1029,9 +1122,18 @@ Includes:
 - app/providers/quantgist_economic_calendar.py: QuantGistEconomicCalendarProvider
   implementing the unchanged EconomicCalendarProvider interface (source marker
   "quantgist-free-development", get_events(from, to) -> tuple[EconomicEvent, ...]).
-  One GET /v1/calendar request per UTC date the window touches, with the key in
-  the X-API-Key header; the half-open window is enforced locally, so the vendor's
-  inclusive date filter cannot leak an event at or past the window end.
+  The adapter is written against the VERIFIED LIVE API (a one-request smoke test
+  on 2026-09-16): events live under a paginated "data" envelope, every date
+  filter is IGNORED, and the free feed is release_time-ascending. It therefore
+  walks GET /v1/calendar?page=N — one request per page it actually needs,
+  stopping at the first event at or past the window end — instead of one request
+  per UTC day, and the half-open [from, to) window is enforced entirely locally,
+  so the vendor's ignored/inclusive date filtering cannot leak an event at or
+  past the window end. Pagination is bounded by total_pages/has_more and the
+  envelope is validated fail-closed (bools rejected as ints, the echoed page
+  must match, per_page/total_pages >= 1, total >= 0) whenever a whole page is
+  read without reaching the window end. The key travels only in the X-API-Key
+  header.
 - the EconomicEvent contract is unchanged: vendor id -> event_id, release_time ->
   timezone-aware UTC timestamp, impact low|medium|high -> EventImpact, and numeric
   forecast/previous/actual rendered as published strings without inventing
@@ -1051,19 +1153,23 @@ Includes:
   otherwise the deterministic fake, so development behaviour and the existing
   suite are unchanged. No caching, no retry, no multi-provider framework, and no
   change to the service, API, schema, or JWT.
-- tests: tests/test_quantgist_economic_calendar.py (54 cases, fully offline through
-  an injected httpx.MockTransport: mapping, provenance, request shape, multi-day
-  fan-out, half-open window, every failure mode, the key never being echoed, and
-  the composition-root selection), one end-to-end test in
+- tests: tests/test_quantgist_economic_calendar.py (92 cases in that file and
+  the Step 45 composition file together, fully offline through an injected
+  httpx.MockTransport: live-shape mapping, provenance, request shape, pagination
+  with the early stop, the local half-open window filter, envelope validation,
+  every failure mode, the key never being echoed, both verified live timestamp
+  shapes, and the composition-root selection), one end-to-end test in
   tests/test_economic_intelligence_api.py proving the configured source reaches
   GET /economic-intelligence/today as data_source, and the QUANTGIST_API_KEY pin
   in that file's autouse fixture so a developer's .env cannot change what its
   existing tests describe.
-- verification: focused 135 passed; full suite 882 passed, 2 warnings (both
+- verification: focused 136 passed; full suite 897 passed, 2 warnings (both
   pre-existing third-party deprecations); compileall clean; pyright 0 errors / 0
-  warnings across the six changed Python files. Three pre-existing
-  dict[str, object] diagnostics in the API test file were fixed with a typed
-  accessor rather than a suppression.
+  warnings across the three changed Python files; git diff --check clean; one
+  live smoke request (a throwaway script, deleted afterwards) returned 3 real
+  events with correct UTC timestamps, impact mapping, provenance marker and no
+  API key in any output. The earlier fictional {"events": ...} payload shape and
+  the per-UTC-day fan-out were removed along with the tests that pinned them.
 - read-only: GET requests only. No trading action, no order, no position mutation
   and no recommendation; the AI remains strictly READ-ONLY, and no position/trade
   data is sent to the calendar provider.
@@ -1582,9 +1688,15 @@ Usage Limiter — per-user daily quota, in-process (exceeded → 429)
     ↓
 AgentService (app/services/agent/)
     ↓
+one reference instant (UTC) for the whole request (Step 45)
+    ↓
 FinancialContextService → FinancialContext (existing flows above)
     ↓
-build_prompt(request, context) → LLMPrompt (agent layer; identity omitted)
+EconomicIntelligenceService → EconomicIntelligenceContext (today's UTC calendar
+    window; the existing calendar/intelligence path — Step 45)
+    ↓
+build_prompt(request, context, policy, economic) → LLMPrompt
+    (agent layer; account identity omitted, calendar provenance preserved)
     ↓
 LLMRouter (broker-aware selection)
     ├── broker's own configured LLM (BrokerLLMConfig) when active
@@ -1937,8 +2049,21 @@ DELETE /users/{user_id} (super_admin only):
   configurable trade-history window defaulting to 30 days) exists as an
   internal read-only capability with no HTTP endpoint.
 - Agent boundary (AgentService + AgentResponse in app/services/agent/) exists
-  and is read-only: it orchestrates FinancialContextService and an injected
-  LLMProvider.
+  and is read-only: it orchestrates FinancialContextService, an injected
+  EconomicIntelligenceService (Step 45) and an injected LLMProvider.
+- Economic intelligence is part of EVERY agent request (Step 45, mandatory, not
+  optional): the agent passes ONE reference instant to both the financial
+  context and today's UTC calendar window, renders the calendar as its own
+  prompt block (timestamp, currency, impact, forecast/previous/actual as
+  published, deterministic relevance level and the source's provenance marker)
+  and never fetches calendar data itself. A calendar/provider failure propagates
+  unchanged and becomes the endpoint's existing generic 503, and when the prompt
+  must shrink the trade block is dropped first, then the calendar block, each
+  omission stated in the body.
+- The economic-calendar source is a development/test source only (Step 44) and
+  its provenance marker travels into both the API responses and the agent
+  prompt, so delayed or placeholder data cannot be presented as live market
+  data.
 - POST /agent exposes the agent over HTTP (authenticated; broker_id from the
   database User; no broker_id/user_id accepted in the body) and is read-only.
 - Agent guard chain exists and is enforced in this order: scope guard
@@ -1988,14 +2113,16 @@ DELETE /users/{user_id} (super_admin only):
   with Decimal(str(...)); account margin_level and candle tick volume
   intentionally remain float. API JSON still exposes numbers, not strings, via
   the shared DecimalAsNumber serializer.
-- Steps 18–40, the role-migration ordering fix, the development user seed and
-  the trade-history field fix are committed (latest
-  commit: this Step 40/41 checkpoint; the prior synced commit was "fix(config):
-  harden environment settings loading" (Steps 39A/39B), before that "feat(mt5):
-  add investor credential provisioning" (Step 38), then "fix(db): correct user
-  role migration ordering" (3a63af9), the Step 37 checkpoint "feat(financial):
-  harden numeric representation", the Step 36 MT5 tenant-session commit, the
-  Step 35 security hardening commit and b95eaa1).
+- Steps 18–45, the role-migration ordering fix, the development user seed and
+  the trade-history field fix are committed (latest: the Step 45 checkpoint
+  commit; before it Step 44 "feat(calendar): add QuantGist development/test
+  source" (638f972), Step 43 "feat(auth): make login tenant-safe" (5afd895),
+  Step 42 (95d00d9) and Step 41 "feat(users): complete super admin user crud"
+  (1577672); before those "fix(config): harden environment settings loading"
+  (Steps 39A/39B), "feat(mt5): add investor credential provisioning" (Step 38),
+  "fix(db): correct user role migration ordering" (3a63af9), the Step 37
+  checkpoint "feat(financial): harden numeric representation", the Step 36 MT5
+  tenant-session commit, the Step 35 security hardening commit and b95eaa1).
 - A user has exactly ONE identity: `login`, which is both the application
   login and the MT5 account number (a single column since Step 42). It is a
   numeric string for real accounts; a non-numeric login is not an MT5 account
@@ -2030,7 +2157,7 @@ DELETE /users/{user_id} (super_admin only):
   setting and never renders its value (in str and full traceback), the dotenv
   file is selected through model_config (the Pylance _env_file diagnostic is
   structurally impossible), and the deprecated class-based Config is gone.
-- Test suite verified 2026-09-15 on this exact tree: pytest tests/ -q → 799 passed, 2 warnings.
+- Test suite verified 2026-09-16 on this exact tree: pytest tests/ -q → 924 passed, 2 warnings.
 - Live end-to-end verification on the demo MT5 account: GET /account-info,
   GET /positions and GET /trade-history all answer 200 with real data (no
   credential, server or symbol detail is recorded anywhere).
@@ -2039,8 +2166,9 @@ DELETE /users/{user_id} (super_admin only):
   Config warning was eliminated by Step 39A.
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean. This checkpoint commit is local: it has NOT been
-  pushed, so local HEAD is one commit ahead of origin/master until it is.
+- Working tree is clean. The Step 45 checkpoint commit and its
+  checkpoint-status commit are local: they have NOT been pushed, so local HEAD
+  is two commits ahead of origin/master (638f972) until they are.
 
 Static/type verification:
 
@@ -2111,6 +2239,14 @@ This limitation must be reported rather than hidden.
     - The real Free LLM Pool and real economic-calendar source are still absent
       (items 9 and 11), so a non-development deployment refuses those
       capabilities (503) instead of degrading.
+14. Each agent request performs two position reads: FinancialContextService
+    reads positions for its own snapshot and the injected
+    EconomicIntelligenceService reads them again to score per-position
+    relevance. Both reads stay inside the existing run_mt5_call boundary and the
+    single tenant session, so tenant safety is unchanged, but a request costs
+    one extra serialized MT5 read. Reusing one snapshot would mean changing the
+    economic-intelligence service contract and was deliberately out of Step 45's
+    scope.
 
 Resolved:
 
@@ -2158,23 +2294,23 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–43, the role-migration ordering fix, the development user seed and the
+Steps 12–44, the role-migration ordering fix, the development user seed and the
 trade-history field fix are complete, committed and pushed (origin/master is
-74cbba5, the knowledge-base alignment commit; the latest feature commit is
-Step 43, `5afd895`).
+638f972, Step 44).
 
-Step 44 (QuantGist development/test economic-calendar source) is implemented and
-verified but deliberately NOT committed: app/providers/quantgist_economic_calendar.py,
-app/providers/__init__.py, app/core/config.py, app/core/dependencies.py,
-.env.example, tests/test_quantgist_economic_calendar.py and
-tests/test_economic_intelligence_api.py hold that change set, and the working tree
-is modified.
+Step 45 (economic intelligence in the agent pipeline) is implemented, verified
+and committed by the Step 45 checkpoint commit and its checkpoint-status commit,
+which are local: origin/master remains 638f972 until they are pushed.
 
-The immediate next action is deliberately NOT fixed here: the previously open
-work is now landed, so the next stage should be chosen explicitly (candidates
-are the open items below — a production economic-calendar source, which Step 44
-deliberately did NOT provide, the real free LLM providers, and the observability
-foundation are the three largest).
+The immediate next stage is Step 46 (already approved by the operator): explicit
+economic-calendar source configuration with a deliberate production seam. The
+calendar is MANDATORY for every agent request, so which source a deployment
+serves must be an explicit configuration value: a configured source is selected
+(development/test sources only inside development) and any environment without a
+usable production source fails closed with the existing clear 503 instead of
+degrading. Step 46 deliberately does NOT invent a production vendor, does not
+change the QuantGist adapter, and adds no retry, caching, background job, tool
+calling or new provider.
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:

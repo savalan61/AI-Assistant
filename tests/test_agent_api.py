@@ -193,6 +193,11 @@ class FailingLLMProvider(FakeLLMProvider):
 def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_settings, "SECRET_KEY", TEST_SECRET, raising=True)
     monkeypatch.setattr(app_settings, "ALGORITHM", TEST_ALGORITHM, raising=True)
+    # Pin the calendar source selection: POST /agent now composes today's
+    # economic context, and a developer's local .env may hold a real QuantGist
+    # key. Empty means the deterministic placeholder is used, so these tests
+    # stay offline and reproducible.
+    monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", "", raising=True)
 
 
 @pytest.fixture()
@@ -836,3 +841,64 @@ def test_prompt_size_error_leaks_no_financial_data(agent_env, patched_providers,
     text = str(body)
     assert "10000" not in text
     assert "XAUUSD" not in text
+
+
+# --- economic calendar composition (Step 45) -----------------------------------------------
+
+
+class FailingCalendarProvider:
+    """Calendar provider whose reads fail, simulating an unavailable source."""
+
+    source = "test-failing-calendar"
+
+    def __init__(self) -> None:
+        pass
+
+    def get_events(self, from_time: object, to_time: object) -> tuple[object, ...]:
+        raise RuntimeError("calendar source unavailable")
+
+
+@pytest.fixture()
+def failing_calendar(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(deps, "FakeEconomicCalendarProvider", FailingCalendarProvider)
+
+
+def test_todays_calendar_events_reach_the_llm_prompt(agent_env, patched_providers) -> None:
+    records = patched_providers()
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "Any events today?"})
+
+    assert status == 200
+    prompt = records["llm"].prompts[0]
+    # The deterministic placeholder calendar for the current UTC day reaches the
+    # prompt through the real composition root, with its provenance marker.
+    assert "Economic calendar for today" in prompt.content
+    assert "fake-development-placeholder" in prompt.content
+    assert "(placeholder)" in prompt.content
+
+
+def test_calendar_failure_maps_to_the_existing_503(
+    agent_env, patched_providers, failing_calendar
+) -> None:
+    records = patched_providers()
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    # The existing error boundary: a calendar/provider failure is translated by
+    # the endpoint into the generic 503, and no answer is fabricated.
+    assert status == 503
+    assert body == {"detail": "Agent service temporarily unavailable"}
+    assert records["llm"].call_count == 0
+
+
+def test_response_contract_is_unchanged_by_the_calendar_composition(agent_env, patched_providers) -> None:
+    patched_providers()
+
+    _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    # The wire contract is exactly as before: the calendar context feeds the
+    # prompt only and is not added to the response.
+    context = body["context"]
+    assert isinstance(context, dict)
+    assert set(body.keys()) == TOP_LEVEL_KEYS
+    assert set(context.keys()) == CONTEXT_KEYS

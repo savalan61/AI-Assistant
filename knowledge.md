@@ -621,6 +621,13 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
 21. One user identity: the single `login` column (Step 42)
 22. Tenant-safe login: mandatory broker code, broker-scoped lookup,
     tenant-scoped throttle key, uniform failures and timing equalisation (Step 43)
+23. QuantGist free tier as the development/test economic-calendar source,
+    selected only when QUANTGIST_API_KEY is configured (Step 44); there is still
+    no production calendar source (CURRENT_CHECKPOINT.md known issue 9)
+24. Economic intelligence composed into every agent prompt: one reference
+    instant per request, a dedicated calendar block carrying impact, relevance
+    and provenance, mandatory on every request, with the existing generic 503 as
+    its failure path (Step 45)
 
 The repository remains strictly read-only with respect to trading.
 14. Current Development Stage

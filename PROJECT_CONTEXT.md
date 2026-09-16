@@ -327,6 +327,10 @@ Already implemented today:
 - read-only AI agent (POST /agent) with a deterministic scope guard, a
   per-user daily limit, broker-scoped encrypted LLM configuration and an LLM
   router with a free-pool fallback boundary
+- economic intelligence composed into every agent request (Step 45: the agent
+  receives today's economic calendar alongside the financial context and asks
+  the model once; the calendar is mandatory, so a calendar-source failure is the
+  existing generic 503 rather than a degraded answer)
 
 Eventually the system may support:
 
@@ -334,7 +338,8 @@ Eventually the system may support:
 - technical analysis
 - fundamental analysis
 - news
-- economic calendar
+- economic calendar data beyond the development/test source (no production
+  calendar provider exists yet; CURRENT_CHECKPOINT.md Known Issues item 9)
 - daily reports
 - natural-language interaction over additional channels (web/mobile/Telegram/WhatsApp)
 

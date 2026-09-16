@@ -25,6 +25,7 @@ from app.providers.llm_router import LLMRouter
 from app.providers.openai_compatible_llm import OpenAICompatibleLLMProvider
 from app.services.agent import AgentService, OutboundDataPolicy
 from app.services.broker_llm_config import BrokerLLMConfigurationError
+from app.services.economic_intelligence import EconomicIntelligenceService
 
 
 # The "cipher" value is a test-only marker; it is never a real secret.
@@ -261,6 +262,23 @@ def test_agent_service_is_built_with_the_configured_policy(
 
     assert isinstance(service._data_policy, OutboundDataPolicy)
     assert service._data_policy.allow_trade_history is False
+
+
+def test_agent_service_is_built_with_the_economic_intelligence_service(
+    monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
+) -> None:
+    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+        return None
+
+    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
+
+    service = asyncio.run(deps.get_agent_service(make_user(), object()))
+
+    # Step 45: the agent is composed with the existing economic-intelligence
+    # service, so today's calendar reaches the prompt through the same
+    # composition path GET /economic-intelligence/today already uses.
+    assert isinstance(service._economic, EconomicIntelligenceService)
 
 
 def test_openai_adapter_is_a_provider_the_pool_accepts() -> None:
