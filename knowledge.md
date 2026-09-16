@@ -650,6 +650,24 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     no sentiment model, no learned matching, no LLM, no new provider, no schema
     change), and the calendar layer's currency-scoped LEVEL contract is unchanged
     for symbols that have a currency leg (CURRENT_CHECKPOINT.md known issues 17-19)
+33. Market-data symbol resolution (Step 53): the SAME InstrumentService.resolve()
+    semantics (exact, then unique case-insensitive, then unique broker suffix)
+    now decide which instrument GET /market-data/{symbol} reads, so ``xauusd``
+    reads the broker's ``XAUUSD``, ``XAuUsD`` does the same, and a broker whose
+    catalog only lists ``XAUUSD.r`` is read for ``XAUUSD.r`` instead of taking a
+    404. MarketDataService takes an OPTIONAL InstrumentService (None = the exact
+    pre-Step-53 behaviour), resolves FIRST and hands the broker's own spelling to
+    the unchanged candle provider; no resolution logic is duplicated, an
+    unknown/ambiguous symbol stays the existing client error, a catalog/MT5
+    failure stays the existing availability error, and both are decided before
+    any candle is read. Ambiguity fails closed exactly as everywhere else (no
+    guess, no deterministic pick), and the composition root composes the same
+    instrument service GET /instruments uses (one credential path, explicit
+    provider selection). Response schema, candle contract, research/agent paths,
+    providers, config, schema and trading behaviour are untouched; no cache, no
+    second catalog read, no live API request. Cost: one extra terminal read per
+    market-data request, which matters because MT5 serializes reads on the single
+    process-wide session (CURRENT_CHECKPOINT.md known issue 24)
 32. Safe broker-suffix resolution (Step 52): InstrumentService.resolve gained a
     third and final step — exact spelling, then unique case-insensitive match
     (both unchanged), then a UNIQUE broker-suffixed spelling of the requested

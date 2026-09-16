@@ -567,7 +567,11 @@ def get_market_data_service(
     credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
 ) -> MarketDataService:
     provider = MT5MarketDataProvider(session_manager=get_mt5_session_manager(), credentials=credentials)
-    return MarketDataService(provider)
+    # The requested symbol is resolved through the SAME instrument service
+    # GET /instruments uses (one resolution architecture, one credential path),
+    # so a candle read asks the broker for a spelling it actually lists. The
+    # candle provider itself is unchanged and still receives a plain symbol.
+    return MarketDataService(provider, instrument_service=get_instrument_service(credentials))
 
 
 def get_account_info_service(

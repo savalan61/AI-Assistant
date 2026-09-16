@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 52 — Safe Broker-Suffix Resolution (this checkpoint)
+Step 53 — Market Data Symbol Resolution (this checkpoint)
++ Step 52 — Safe Broker-Suffix Resolution
 + Step 51 — Instrument Resolution in Financial Research
 + Step 50 — MT5 Instrument Discovery & Resolution
 + Step 49 Follow-up — Financial Research in the Agent Pipeline
@@ -26,9 +27,11 @@ Step 52 — Safe Broker-Suffix Resolution (this checkpoint)
 
 Status:
 
-Step 52: VERIFIED (implementation, tests and documentation; committed together
-by the Step 52 commit "feat(instruments): safely resolve unique broker symbol
-suffixes"; local, not pushed)
+Step 53: VERIFIED (implementation, tests and documentation; committed together
+by the Step 53 commit "fix(market-data): resolve symbols through instrument
+catalog"; local, not pushed)
+Step 52: VERIFIED + COMMITTED (9ab52d5 — "feat(instruments): safely resolve
+unique broker symbol suffixes"; local, not pushed)
 Step 51: VERIFIED + COMMITTED (c9a5a39 — "feat(research): resolve instruments
 through MT5 catalog"; local, not pushed)
 Step 50: VERIFIED + COMMITTED (6c2df3e — "feat(instruments): add MT5 instrument
@@ -48,6 +51,19 @@ Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
 Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
+
+The Step 53 change set (the optional InstrumentService on MarketDataService and
+its resolve-then-read body, the composition-root wiring of the existing
+instrument seam into the market-data service, the service-level resolution
+cases, the HTTP-level resolution cases, the market-data/lifecycle test seams
+that now provide the tenant's catalog, and this documentation) — the change set
+this checkpoint describes — is implemented, verified and committed as ONE
+focused commit ("fix(market-data): resolve symbols through instrument catalog")
+carrying the diff, the tests and this documentation together, following the
+established single-commit convention. No resolution rule, provider, response
+schema, configuration value, research/agent path, LLM change or schema change is
+involved: the market-data service asks the existing instrument boundary and
+passes the broker's spelling to the unchanged candle provider.
 
 The Step 52 change set (the bounded broker-suffix rule in InstrumentService.resolve
 with its separator/length bounds and its docstring contract, the 25 new Step 50
@@ -578,7 +594,7 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is sixteen commits ahead of it, none of them pushed:
+638f972, and local HEAD is seventeen commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
@@ -588,8 +604,9 @@ Alpha Vantage development source and its checkpoint-status record), the
 Step 48 commit (instrument-aware fundamental relevance), the Step 49 commit (the
 graded financial-research context), the Step 49 follow-up commit (`9081b5f`, the
 research context composed into the agent), the Step 50 commit (`6c2df3e`, MT5
-instrument discovery and resolution) and the Step 51 commit (`c9a5a39`,
-instrument resolution inside financial research).
+instrument discovery and resolution), the Step 51 commit (`c9a5a39`, instrument
+resolution inside financial research) and the Step 52 commit (`9ab52d5`, safe
+broker-suffix resolution).
 
 ## Completed Stages
 
@@ -1420,6 +1437,56 @@ Status: VERIFIED + COMMITTED
 - Focused tests grew 10 → 14 (override reads the requested file; default path
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
+
+
+### Step 53 — Market Data Symbol Resolution (READ-ONLY)
+Status: VERIFIED + COMMITTED (the Step 53 commit "fix(market-data): resolve
+symbols through instrument catalog"; one focused commit carrying the diff, the
+tests and documentation — the established single-commit convention, so no
+separate hash-recording commit follows)
+
+Makes GET /market-data/{symbol} use the resolution semantics the instrument and
+research surfaces already use, so ``xauusd`` reads the broker's ``XAUUSD`` and a
+broker whose catalog only lists ``XAUUSD.r`` is read for ``XAUUSD.r`` instead of
+returning 404.
+
+Includes:
+
+- app/services/market/market_data_service.py: MarketDataService takes an
+  OPTIONAL InstrumentService (None = the exact behaviour before resolution) and
+  its get_market_data() resolves the requested symbol FIRST, passing the
+  broker's own canonical spelling to the unchanged candle provider. No
+  resolution logic is duplicated: the service asks the existing instrument
+  boundary and uses its answer; the ValueError/RuntimeError contract is
+  unchanged, so an unknown/ambiguous symbol stays a client error and an
+  MT5/catalog failure stays an availability error — both decided before any
+  candle is read.
+- app/core/dependencies.py: get_market_data_service composes the SAME
+  instrument service GET /instruments uses (one resolution architecture, one
+  credential path, provider selection still explicit at the composition root).
+- tests/test_market_data_service.py (11 new cases): case-insensitive requests
+  reading the broker's canonical spelling, a suffixed-only broker catalog
+  resolving the base symbol, several variants failing closed before any candle
+  read, unknown symbol and catalog failure likewise, determinism, exact and
+  unrelated symbols unaffected, the no-instrument-service pass-through, and the
+  bounded cost (one symbol lookup, and at most one catalog scan).
+- tests/test_market_data_auth.py (8 new cases): the same guarantees at the HTTP
+  boundary — case-insensitive resolution for XAUUSD, a suffixed-only catalog,
+  multiple variants and unknown symbols staying the existing 404 (with no candle
+  read), a catalog failure staying the existing generic 503, and the response
+  schema/credential-free body unchanged; the fixture now installs the tenant's
+  catalog at the composition seam.
+- tests/test_mt5_lifecycle.py: the per-request provider test now also asserts
+  the instrument provider is built per request for the SAME tenant and that the
+  candle read was asked for the broker's own spelling; the recording market-data
+  fixture supplies the catalog seam.
+
+Untouched: InstrumentService and its resolution rules, the Instrument contract,
+the MT5/fake instrument and market-data providers, the Candle contract and the
+market-data response schema, financial research, the agent, the prompt builder,
+the fundamental/economic services, NewsProvider/Alpha Vantage, the configuration
+matrix, the LLM contract, trading paths, schema and migrations. The affected
+suites are fully offline and no live API request was made.
 
 
 ### Step 52 — Safe Broker-Suffix Resolution (READ-ONLY)
@@ -3518,6 +3585,15 @@ This limitation must be reported rather than hidden.
     lists several variants of one base (XAUUSD.r and XAUUSD.m) likewise stays
     ambiguous by design — the caller must name the spelling it wants, and
     GET /instruments lists the catalog to find it.
+24. Every market-data request now performs one extra MT5 read (the symbol
+    lookup that resolves it, plus at most one catalog scan when the spelling is
+    not an exact match) before the candle read itself. That is the cost of
+    resolving through the tenant's own catalog, and it matters operationally
+    because the MT5 Python API serializes every read on the one process-wide
+    terminal session: a deployment that needs cheaper per-candle reads would
+    want a later decision (a per-request resolution cache, or asking the caller
+    for broker spellings), which Step 53 deliberately does not introduce. No
+    cache, scheduler or second catalog read was added.
 23. A research request naming several instruments fails closed (404) when ANY
     of them is not offered by the tenant's broker: there is no partial research
     response, and the caller is expected to re-ask with the instrument the

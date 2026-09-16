@@ -241,6 +241,11 @@ provider-pool boundary.
 
 Services delegate to the provider abstractions.
 
+The market-data, financial-research and agent paths ask the InstrumentService
+boundary to resolve a requested symbol into the broker's own spelling before
+they read anything (Step 51/52/53): there is one resolution architecture, one
+credential path and no duplicated catalog logic.
+
 The API exposes them through the market-data, account-info, positions and
 trade-history routes; all four are JWT-protected.
 
@@ -298,7 +303,11 @@ authoritative record of every endpoint and contract.
 
 Current JWT-protected, read-only endpoints:
 
-- GET /market-data/{symbol} → Candle response
+- GET /market-data/{symbol} → Candle response; since Step 53 the symbol is
+  resolved through the same InstrumentService semantics the other surfaces use
+  ("xauusd" reads the broker's "XAUUSD", and a catalog that only lists
+  "XAUUSD.r" is read for "XAUUSD.r"); unknown or ambiguous → the existing 404,
+  MT5/catalog unavailable → the existing 503
 - GET /instruments → bounded instrument catalog from the authenticated tenant's
   own MT5 terminal; {instruments, total, truncated}, extra optional fields are
   null when the broker omits them, an empty match is 200 with
@@ -351,7 +360,8 @@ Expected error mapping currently includes:
 
 - 401 for unauthenticated/invalid/expired tokens
 - 403 for non-admin access to admin-only endpoints
-- 404 when requested market data is unavailable
+- 404 when requested market data is unavailable (including a symbol no broker
+  catalog entry resolves to, or one several suffixed variants make ambiguous)
 - 409 for duplicate user creation conflicts
 - 503 when an MT5-backed service is temporarily unavailable
 
@@ -386,7 +396,8 @@ Do not add caching, queues, workers, microservices, AI orchestration, or other i
 
 Already implemented today:
 
-- market data
+- market data (resolved through the same instrument boundary since Step 53, so
+  a case-insensitive or broker-suffixed request reads the broker's own spelling)
 - account information (balance, equity, margin, free margin)
 - open positions
 - trade history

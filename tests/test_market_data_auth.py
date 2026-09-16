@@ -2,8 +2,13 @@
 
 Require none of: real PostgreSQL, real MT5 terminal, network, real credentials.
 The REAL get_current_user dependency runs (real JWT decode + real async user
-lookup via a per-test SQLite get_db override); only the market-data provider
-boundary is faked behind the existing composition-root seam.
+lookup via a per-test SQLite get_db override); only the vendor boundaries are
+faked behind the existing composition-root seams. Since Step 53 the market-data
+path resolves the requested symbol through the instrument service first, so the
+instrument provider CLASS seam is replaced with the deterministic in-memory
+catalog: the real InstrumentService and the real resolution rules run, with no
+terminal and no credentials, and the recording market-data provider proves which
+spelling the candle read was asked for.
 """
 import asyncio
 from datetime import timedelta
@@ -21,6 +26,8 @@ from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
 from app.db.models import Broker, User
+from app.providers.fake_instrument import FakeInstrumentProvider
+from app.providers.instrument import Instrument, TradeMode
 from app.providers.market_data import Candle
 from decimal import Decimal
 
@@ -44,22 +51,55 @@ def set_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 class _FakeProvider:
     """Deterministic provider standing in for MT5 at the composition seam.
 
-    The composition root now constructs providers with the authenticated
-    tenant's credentials and the process-wide session manager; the fake accepts
-    and ignores both, since the tenant-scoped session itself is covered by the
-    MT5 session/provider tests.
+    The composition root constructs providers with the authenticated tenant's
+    credentials and the process-wide session manager; the fake accepts and
+    ignores both, since the tenant-scoped session itself is covered by the
+    MT5 session/provider tests. The symbol each candle read was asked for is
+    recorded, so resolution can be asserted at the HTTP boundary.
     """
+
+    requested_symbols: list[str] = []
 
     def __init__(self, behavior: str = "ok", session_manager: object = None, credentials: object = None):
         self.behavior = behavior
         self.credentials = credentials
 
     def get_market_data(self, symbol: str) -> Candle:
+        _FakeProvider.requested_symbols.append(symbol)
         if self.behavior == "value_error":
             raise ValueError(f"No candle data returned for {symbol}")
         if self.behavior == "runtime_error":
             raise RuntimeError("MT5 infrastructure failure")
         return FAKE_CANDLE
+
+
+def catalog_provider_class(*symbols: str):
+    """Instrument-provider class at the composition seam over a fixed catalog."""
+
+    class CatalogInstrumentProvider:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            self._inner = FakeInstrumentProvider(
+                instruments=tuple(
+                    Instrument(
+                        symbol=symbol,
+                        name=None,
+                        asset_class=None,
+                        base_currency=None,
+                        quote_currency=None,
+                        digits=5,
+                        trade_mode=TradeMode.FULL,
+                    )
+                    for symbol in symbols
+                )
+            )
+
+        def get_instrument(self, symbol: str):
+            return self._inner.get_instrument(symbol)
+
+        def list_instruments(self):
+            return self._inner.list_instruments()
+
+    return CatalogInstrumentProvider
 
 
 @pytest.fixture()
@@ -92,6 +132,8 @@ def protected_app(tmp_path, monkeypatch):
     app.include_router(router)
     app.dependency_overrides[get_db] = override_get_db
 
+    _FakeProvider.requested_symbols = []
+
     def use_provider(behavior: str) -> None:
         # The composition root builds the provider class with keyword arguments,
         # so the fake class (not a zero-arg lambda) is installed here.
@@ -101,11 +143,31 @@ def protected_app(tmp_path, monkeypatch):
 
         monkeypatch.setattr(deps, "MT5MarketDataProvider", FakeProvider)
 
+    def use_catalog(*symbols: str, error: Exception | None = None) -> None:
+        """Install the broker catalog the requested symbol is resolved against."""
+        if error is None:
+            monkeypatch.setattr(deps, "MT5InstrumentProvider", catalog_provider_class(*symbols))
+            return
+
+        class FailingInstrumentProvider:
+            def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+                pass
+
+            def get_instrument(self, symbol: str):
+                raise error
+
+            def list_instruments(self):
+                raise error
+
+        monkeypatch.setattr(deps, "MT5InstrumentProvider", FailingInstrumentProvider)
+
     use_provider("ok")
+    use_catalog("EURUSD", "XAUUSD", "XAUUSD.r")
     yield {
         "app": app,
         "user_token": create_access_token(str(user_id)),
         "use_provider": use_provider,
+        "use_catalog": use_catalog,
         "set_user_active": lambda active: _set_active(factory, User, user_id, active),
         "factory": factory,
     }
@@ -192,3 +254,65 @@ def test_existing_503_behavior_unchanged_after_authentication(protected_app):
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Market data service temporarily unavailable"
+
+
+# --- Step 53: the requested symbol is resolved through the broker catalog ---------
+
+
+@pytest.mark.parametrize("requested", ["xauusd", "XAuUsD", "XAUUSD"])
+def test_case_insensitive_requests_read_the_brokers_canonical_symbol(protected_app, requested):
+    response = get(protected_app["app"], token=protected_app["user_token"], symbol=requested)
+
+    assert response.status_code == 200
+    # The candle provider was asked for the broker's own spelling, not the
+    # caller's.
+    assert _FakeProvider.requested_symbols == ["XAUUSD"]
+
+
+def test_a_suffixed_broker_catalog_resolves_the_base_symbol(protected_app):
+    protected_app["use_catalog"]("XAUUSD.r")
+
+    response = get(protected_app["app"], token=protected_app["user_token"], symbol="xauusd")
+
+    assert response.status_code == 200
+    assert _FakeProvider.requested_symbols == ["XAUUSD.r"]
+
+
+def test_several_broker_variants_fail_closed_as_the_resolution_contract_requires(protected_app):
+    protected_app["use_catalog"]("XAUUSD.r", "XAUUSD.m")
+
+    response = get(protected_app["app"], token=protected_app["user_token"], symbol="XAUUSD")
+
+    # The existing market-data client-error contract, decided BEFORE any candle
+    # read: two different instruments are never a coin flip.
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Market data unavailable for the requested symbol"
+    assert _FakeProvider.requested_symbols == []
+
+
+def test_an_unknown_symbol_is_a_404_without_a_candle_read(protected_app):
+    response = get(protected_app["app"], token=protected_app["user_token"], symbol="NOSUCHSYMBOL")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Market data unavailable for the requested symbol"
+    assert _FakeProvider.requested_symbols == []
+
+
+def test_a_catalog_failure_is_the_generic_503(protected_app):
+    protected_app["use_catalog"](error=RuntimeError("MT5 instrument catalog unavailable"))
+
+    response = get(protected_app["app"], token=protected_app["user_token"], symbol="EURUSD")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Market data service temporarily unavailable"
+    assert _FakeProvider.requested_symbols == []
+
+
+def test_no_credential_or_provider_internal_appears_in_a_resolved_response(protected_app):
+    response = get(protected_app["app"], token=protected_app["user_token"], symbol="xauusd")
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"timestamp", "open", "high", "low", "close", "volume"}
+    rendered = response.text.lower()
+    assert "password" not in rendered and "credential" not in rendered
+    assert "mt5" not in rendered

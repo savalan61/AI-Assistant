@@ -24,6 +24,8 @@ from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
 from app.db.models import Broker, User
+from app.providers.fake_instrument import FakeInstrumentProvider
+from app.providers.instrument import Instrument, TradeMode
 from app.providers.market_data import Candle, MarketDataProvider
 from decimal import Decimal
 
@@ -77,6 +79,11 @@ class _Recording:
         self.call_threads: list[int] = []
         self.symbols: list[str] = []
         self.credentials: list[object] = []
+        # The market-data path now resolves the requested symbol first (Step 53),
+        # so the instrument boundary is built per request too — with the same
+        # authenticated tenant's credentials.
+        self.instrument_providers: list[object] = []
+        self.instrument_credentials: list[object] = []
 
 
 def make_recording_provider_class(record: _Recording):
@@ -119,9 +126,37 @@ def recording_session(monkeypatch):
 
 @pytest.fixture()
 def patched_provider(monkeypatch, recording_session):
-    """Install a recording market-data provider at the composition-root seam."""
+    """Install recording market-data and instrument providers at the seams."""
     record: _Recording = recording_session["record"]
+
+    class RecordingInstrumentProvider:
+        """In-memory broker catalog: EURUSD, exactly as the broker lists it."""
+
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            record.instrument_providers.append(self)
+            record.instrument_credentials.append(credentials)
+            self._inner = FakeInstrumentProvider(
+                instruments=(
+                    Instrument(
+                        symbol="EURUSD",
+                        name="Euro vs US Dollar",
+                        asset_class="Forex",
+                        base_currency="EUR",
+                        quote_currency="USD",
+                        digits=5,
+                        trade_mode=TradeMode.FULL,
+                    ),
+                )
+            )
+
+        def get_instrument(self, symbol: str):
+            return self._inner.get_instrument(symbol)
+
+        def list_instruments(self):
+            return self._inner.list_instruments()
+
     monkeypatch.setattr(deps, "MT5MarketDataProvider", make_recording_provider_class(record))
+    monkeypatch.setattr(deps, "MT5InstrumentProvider", RecordingInstrumentProvider)
     yield record
 
 
@@ -265,6 +300,14 @@ def test_market_data_provider_is_built_per_request_for_the_tenant(
     assert len(record.providers) == 2
     for credentials in record.credentials:
         assert getattr(credentials, "login", None) == 10001
+
+    # Step 53: the symbol is resolved through the instrument boundary first, so
+    # that provider is per-request too — and bound to the SAME tenant identity.
+    assert len(record.instrument_providers) == 2
+    for credentials in record.instrument_credentials:
+        assert getattr(credentials, "login", None) == 10001
+    # The candle read was asked for the broker's own spelling.
+    assert record.symbols == ["EURUSD", "EURUSD"]
 
 
 def test_blocking_call_runs_off_the_event_loop_thread(patched_provider, auth_env):
