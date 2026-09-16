@@ -226,8 +226,13 @@ symbol lookup never mutates terminal state (no symbol_select). Resolution and
 ordering are deterministic and belong to `InstrumentService`
 (app/services/instruments), which resolves a symbol exactly first and then by a
 unique case-insensitive match, lists/searches the catalog as a literal
-case-insensitive substring over symbol and description, and caps a listing at
-200 instruments while reporting `total` and `truncated`.
+case-insensitive substring over symbol and description, and caps a listing at  200 instruments while reporting `total` and `truncated`. A requested symbol
+  that the broker does not list verbatim resolves through a unique
+  case-insensitive match, and — since Step 52 — through a unique broker-suffixed
+  spelling of it (`XAUUSD` → `XAUUSD.r`), so a broker that suffixes its whole
+  catalog is usable. The suffix rule is bounded (a separator plus a short
+  alphanumeric tail); a longer symbol, an undelimited tail, a partial name or
+  several competing variants stay unresolved rather than being guessed.
 
 The same inversion is used for the AI layer: LLMProvider (app/providers/llm.py)
 is a vendor-neutral contract whose implementations are FakeLLMProvider,
@@ -299,7 +304,8 @@ Current JWT-protected, read-only endpoints:
   null when the broker omits them, an empty match is 200 with
   {"instruments": []}, and the query is a literal substring `search`
 - GET /instruments/{symbol} → one resolved instrument in the broker's own
-  spelling (a "xauusd.r" request resolves to "XAUUSD.r"); unknown or blank
+  spelling (a "xauusd.r" request resolves to "XAUUSD.r", and since Step 52 a
+  "XAUUSD" request resolves to a unique suffixed spelling such as "XAUUSD.r"); unknown or blank
   symbol → 404, MT5 unavailable → 503, oversized input → 422. Generic for any
   broker symbol (equities, crypto, soft commodities, indices, suffixed FX/metal
   spellings); no symbol list is hardcoded.

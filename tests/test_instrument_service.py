@@ -115,6 +115,128 @@ def test_symbol_without_any_metadata_still_resolves(service):
     assert resolved.digits == 2  # whatever the broker provided is passed through
 
 
+# --- broker-suffixed resolution ------------------------------------------------------
+
+
+def suffixed_catalog(*symbols: str) -> InstrumentService:
+    """A broker catalog holding exactly ``symbols`` (the real service runs)."""
+    return InstrumentService(
+        FakeInstrumentProvider(instruments=tuple(instrument(symbol) for symbol in symbols))
+    )
+
+
+def test_a_unique_suffixed_spelling_of_the_requested_base_resolves():
+    assert suffixed_catalog("XAUUSD.r").resolve("XAUUSD").symbol == "XAUUSD.r"
+
+
+def test_a_unique_suffixed_spelling_resolves_regardless_of_case():
+    # The requested name is not the broker's spelling in any sense, but the
+    # catalog offers exactly one suffixed variant of it.
+    assert suffixed_catalog("XAUUSD.r").resolve("xauusd").symbol == "XAUUSD.r"
+    assert suffixed_catalog("eurusd.m").resolve("EURUSD").symbol == "eurusd.m"
+
+
+@pytest.mark.parametrize("symbol", ["XAUUSD.r", "XAUUSD_m", "XAUUSD-m", "XAUUSD#1", "XAUUSD.cash", "XAUUSD.ECN"])
+def test_the_documented_separator_forms_are_recognised(symbol: str):
+    assert suffixed_catalog(symbol).resolve("XAUUSD").symbol == symbol
+
+
+def test_an_exact_spelling_always_wins_over_a_suffixed_variant():
+    svc = suffixed_catalog("XAUUSD.r", "XAUUSD")
+
+    assert svc.resolve("XAUUSD").symbol == "XAUUSD"
+
+
+def test_a_case_insensitive_exact_match_wins_over_a_suffixed_variant():
+    svc = suffixed_catalog("XAUUSD.r", "xauusd")
+
+    assert svc.resolve("XAUUSD").symbol == "xauusd"
+
+
+def test_several_suffixed_variants_are_ambiguous_and_never_guessed():
+    svc = suffixed_catalog("XAUUSD.r", "XAUUSD.m")
+
+    with pytest.raises(ValueError) as exc_info:
+        svc.resolve("XAUUSD")
+
+    assert "ambiguous" in str(exc_info.value)
+
+
+def test_several_suffixed_variants_are_ambiguous_in_any_catalog_order():
+    # Determinism: the outcome depends on the catalog's contents, never on the
+    # order the terminal happened to return them in.
+    for catalog in (("XAUUSD.m", "XAUUSD.r"), ("XAUUSD.cash", "XAUUSD.r", "XAUUSD.m")):
+        with pytest.raises(ValueError, match="ambiguous"):
+            suffixed_catalog(*catalog).resolve("XAUUSD")
+
+
+def test_no_suffixed_variant_stays_unresolved():
+    with pytest.raises(ValueError) as exc_info:
+        suffixed_catalog("EURUSD", "USOIL").resolve("XAUUSD")
+
+    assert "does not offer" in str(exc_info.value)
+
+
+def test_a_variant_of_a_different_base_is_not_matched():
+    # The requested name must be the symbol's BASE, not merely a part of it.
+    svc = suffixed_catalog("XAUUSDT.r")
+
+    with pytest.raises(ValueError):
+        svc.resolve("XAUUSD")
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    [
+        "XAUUSDm",  # undelimited tail: could equally be a different instrument
+        "XAUUSDx",
+        "XAUUSDXAUUSD",
+        "XAUUSD.verylongsuffix",  # beyond the bounded suffix length
+        "XAUUSD.r.x",  # compound tail
+        "XAUUSD.",  # separator with nothing after it
+        "XAUUSDr",
+    ],
+)
+def test_a_tail_that_is_not_a_broker_suffix_is_never_matched(symbol: str):
+    with pytest.raises(ValueError):
+        suffixed_catalog(symbol).resolve("XAUUSD")
+
+
+def test_a_suffix_match_is_never_a_substring_or_prefix_match():
+    # None of these is an exact catalog entry, and each is a substring/prefix of
+    # one: a partial name must never resolve to the longer instrument.
+    svc = suffixed_catalog("USOIL.cash", "XAUUSD.r", "GOLD", "AAPL")
+
+    for requested in ("US", "USO", "USD", "XA", "AU", "GOL", "AA"):
+        with pytest.raises(ValueError):
+            svc.resolve(requested)
+
+
+def test_an_unrelated_symbol_in_the_catalog_does_not_interfere():
+    svc = suffixed_catalog("XAUUSD.r", "EURUSD.m", "USOIL.cash", "AAPL")
+
+    assert svc.resolve("XAUUSD").symbol == "XAUUSD.r"
+    assert svc.resolve("EURUSD").symbol == "EURUSD.m"
+    assert svc.resolve("USOIL").symbol == "USOIL.cash"
+    assert svc.resolve("AAPL").symbol == "AAPL"  # exact
+
+
+def test_suffixed_resolution_is_deterministic():
+    svc = suffixed_catalog("XAUUSD.r", "AAPL")
+
+    assert svc.resolve("XAUUSD") == svc.resolve("XAUUSD")
+    assert svc.resolve("xauusd").symbol == svc.resolve("XAUUSD").symbol
+
+
+def test_a_suffix_ambiguity_does_not_fall_through_to_a_looser_rule():
+    # Two variants AND a third, unrelated symbol: still ambiguous, never the
+    # unrelated one.
+    svc = suffixed_catalog("XAUUSD.r", "XAUUSD.m", "COFFEE")
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        svc.resolve("XAUUSD")
+
+
 def test_provider_availability_failure_is_not_treated_as_unknown_symbol():
     class FailingProvider(InstrumentProvider):
         def get_instrument(self, symbol: str) -> Instrument:

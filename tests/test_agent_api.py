@@ -1087,6 +1087,39 @@ def test_the_named_instrument_is_resolved_through_the_tenants_own_catalog(
     assert "focus: XAUUSD" in prompt
 
 
+def test_a_suffixed_broker_still_gets_the_research_block(
+    agent_env, patched_providers, monkeypatch
+) -> None:
+    """The reported symptom, end to end: the broker lists only XAUUSD.r."""
+    records = patched_providers()
+
+    suffixed_row = next(
+        row for row in FakeInstrumentProvider().instruments if row.symbol == "XAUUSD.r"
+    )
+
+    class SuffixOnlyInstrumentProvider:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            self._inner = FakeInstrumentProvider(instruments=(suffixed_row,))
+
+        def get_instrument(self, symbol: str):
+            return self._inner.get_instrument(symbol)
+
+        def list_instruments(self):
+            return self._inner.list_instruments()
+
+    monkeypatch.setattr(deps, "MT5InstrumentProvider", SuffixOnlyInstrumentProvider)
+
+    status, _ = post_agent(
+        agent_env, agent_env["customer_a_id"], {"message": "What news matters for XAUUSD today?"}
+    )
+
+    assert status == 200
+    prompt = records["llm"].prompts[0].content
+    assert "Financial research (published source facts" in prompt
+    # The block is built for the broker's own spelling of the detected symbol.
+    assert "focus: XAUUSD.r" in prompt
+
+
 def test_a_broker_catalog_failure_is_the_generic_503(
     agent_env, patched_providers
 ) -> None:

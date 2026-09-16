@@ -13,8 +13,10 @@ The result is deliberately generic: any symbol the broker offers — an FX pair,
 metal, an energy contract, an index, a share, a crypto pair, a soft commodity,
 with or without a broker suffix — resolves through the same path. Nothing in
 this module knows about XAUUSD, USOIL, NASDAQ or any other instrument: the
-fundamental relevance profiles in ``app.services.instrument_intelligence`` stay
-an optional intelligence enhancement layered on top, never a prerequisite.
+suffix rule below is a form rule over the requested name and the broker's own
+catalog, and the fundamental relevance profiles in
+``app.services.instrument_intelligence`` stay an optional intelligence
+enhancement layered on top, never a prerequisite.
 """
 from typing import NamedTuple
 
@@ -24,6 +26,44 @@ from app.providers.instrument import Instrument, InstrumentProvider
 # cap keeps a malformed caller from turning a lookup into an unbounded read.
 MAX_SYMBOL_LENGTH = 64
 MAX_SEARCH_LENGTH = 64
+
+# Broker suffix forms for the resolution rule below. A broker marks its own
+# variant of a base instrument with a separator and a short token — the common
+# `.r`, `.m`, `.cash`, `.pro`, `.ecn`, `_i`, `-r`, `#1` spellings. Two bounds
+# keep the rule a *suffix* rule rather than guessing:
+#
+# * the tail must START with a separator, so an undelimited tail (`XAUUSDm`) or
+#   simply a longer symbol (`XAUUSDX`) is never read as a suffix — the catalog
+#   offers no marker that such a tail is a variant rather than a different
+#   instrument; and
+# * the tail after the separator is a short alphanumeric token, so a
+#   descriptive or compound tail (`XAUUSD.verylongsuffix`, `XAUUSD.r.x`) is not
+#   a suffix either.
+#
+# Broker symbols are ASCII in practice; a non-ASCII name simply never matches
+# this rule (it stays unresolved rather than being guessed at).
+_SUFFIX_SEPARATORS = (".", "_", "-", "#")
+_MAX_SUFFIX_LENGTH = 8
+
+
+def _is_broker_suffix_variant(symbol: str, base: str) -> bool:
+    """True when ``symbol`` is ``base`` plus a broker suffix.
+
+    Both bounds above are applied: the requested name must be an exact
+    (case-insensitive) prefix of the catalog symbol, the next character must be
+    a broker separator, and the remainder must be a short alphanumeric token.
+    Nothing about the symbol's *meaning* is inferred: the caller still decides
+    what a unique candidate means, and anything else stays unresolved.
+    """
+    if not (symbol.isascii() and base.isascii()) or len(symbol) <= len(base):
+        return False
+    if symbol[: len(base)].casefold() != base.casefold():
+        return False
+    remainder = symbol[len(base) :]
+    if remainder[0] not in _SUFFIX_SEPARATORS:
+        return False
+    tail = remainder[1:]
+    return 1 <= len(tail) <= _MAX_SUFFIX_LENGTH and tail.isalnum()
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -75,11 +115,20 @@ class InstrumentService:
     def resolve(self, symbol: str) -> Instrument:
         """Resolve one requested symbol to the broker's own instrument record.
 
-        Exact match first. Only when the exact spelling is unknown does a unique
-        case-insensitive match over the broker's catalog apply, so a user typing
-        ``xauusd.r`` still resolves while a broker's case-sensitive name is never
-        rewritten — the returned ``Instrument.symbol`` is always the broker's own
-        spelling.
+        Three steps, in order, each of them exact and deterministic:
+
+        1. the broker's own spelling, as requested;
+        2. a unique case-insensitive match over the broker's catalog, so a user
+           typing ``xauusd.r`` still resolves while a broker's case-sensitive
+           name is never rewritten;
+        3. a unique BROKER-SUFFIXED spelling of the requested base symbol
+           (``XAUUSD`` -> ``XAUUSD.r``), which is what makes a broker that
+           suffixes its whole catalog usable at all.
+
+        The returned ``Instrument.symbol`` is always the broker's own spelling.
+        Every step requires *one* match: an ambiguous catalog is an error rather
+        than a coin flip, and a name the catalog does not offer — with or
+        without a suffix — stays unresolved rather than being guessed at.
 
         Unknown or ambiguous input raises ValueError (a client error); an MT5
         availability failure raised by the provider propagates as RuntimeError.
@@ -91,9 +140,13 @@ class InstrumentService:
             pass
 
         # Only reached for a spelling the terminal did not recognise directly.
+        # One catalog read serves both remaining steps, so resolution never
+        # costs more than one extra vendor call.
+        catalog = self._catalog()
+
         matches = tuple(
             instrument
-            for instrument in self._catalog()
+            for instrument in catalog
             if instrument.symbol.casefold() == requested.casefold()
         )
         if len(matches) == 1:
@@ -101,6 +154,19 @@ class InstrumentService:
         if len(matches) > 1:
             # Distinct broker symbols that differ only by case: guessing one
             # would silently resolve the wrong instrument.
+            raise ValueError(f"Instrument name is ambiguous: {requested}")
+
+        suffix_matches = tuple(
+            instrument
+            for instrument in catalog
+            if _is_broker_suffix_variant(instrument.symbol, requested)
+        )
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
+        if len(suffix_matches) > 1:
+            # Several suffixed variants of the same base (XAUUSD.r and
+            # XAUUSD.m): they are different instruments, so picking one would be
+            # a guess. The caller must name the spelling it wants.
             raise ValueError(f"Instrument name is ambiguous: {requested}")
         raise ValueError(f"MT5 does not offer instrument {requested}")
 

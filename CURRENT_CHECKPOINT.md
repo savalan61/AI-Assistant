@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 51 — Instrument Resolution in Financial Research (this checkpoint)
+Step 52 — Safe Broker-Suffix Resolution (this checkpoint)
++ Step 51 — Instrument Resolution in Financial Research
 + Step 50 — MT5 Instrument Discovery & Resolution
 + Step 49 Follow-up — Financial Research in the Agent Pipeline
 + Step 49 — Graded Financial Research Context
@@ -25,9 +26,11 @@ Step 51 — Instrument Resolution in Financial Research (this checkpoint)
 
 Status:
 
-Step 51: VERIFIED (implementation, tests and documentation; committed together
-by the Step 51 commit "feat(research): resolve instruments through MT5
-catalog"; local, not pushed)
+Step 52: VERIFIED (implementation, tests and documentation; committed together
+by the Step 52 commit "feat(instruments): safely resolve unique broker symbol
+suffixes"; local, not pushed)
+Step 51: VERIFIED + COMMITTED (c9a5a39 — "feat(research): resolve instruments
+through MT5 catalog"; local, not pushed)
 Step 50: VERIFIED + COMMITTED (6c2df3e — "feat(instruments): add MT5 instrument
 discovery and resolution"; local, not pushed)
 Step 49 Follow-up: VERIFIED + COMMITTED (9081b5f — "feat(agent): integrate
@@ -45,6 +48,17 @@ Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
 Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
+
+The Step 52 change set (the bounded broker-suffix rule in InstrumentService.resolve
+with its separator/length bounds and its docstring contract, the 25 new Step 50
+resolution cases, the research-service/research-API/agent regression cases for a
+suffixed broker, and this documentation) — the change set this checkpoint
+describes — is implemented, verified and committed as ONE focused commit
+("feat(instruments): safely resolve unique broker symbol suffixes") carrying
+implementation, tests and documentation together, following the established
+single-commit convention. Resolution still lives entirely inside the instrument
+service: no provider, research-service, agent, prompt, configuration, LLM or
+schema change beyond the resolution rule itself.
 
 The Step 51 change set (the optional InstrumentService on
 FinancialResearchService, the FocusResolution step and the context's
@@ -564,7 +578,7 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is fifteen commits ahead of it, none of them pushed:
+638f972, and local HEAD is sixteen commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
@@ -573,8 +587,9 @@ implementation and its checkpoint-status record), the two Step 47A commits (the
 Alpha Vantage development source and its checkpoint-status record), the
 Step 48 commit (instrument-aware fundamental relevance), the Step 49 commit (the
 graded financial-research context), the Step 49 follow-up commit (`9081b5f`, the
-research context composed into the agent) and the Step 50 commit (`6c2df3e`,
-MT5 instrument discovery and resolution).
+research context composed into the agent), the Step 50 commit (`6c2df3e`, MT5
+instrument discovery and resolution) and the Step 51 commit (`c9a5a39`,
+instrument resolution inside financial research).
 
 ## Completed Stages
 
@@ -1405,6 +1420,80 @@ Status: VERIFIED + COMMITTED
 - Focused tests grew 10 → 14 (override reads the requested file; default path
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
+
+
+### Step 52 — Safe Broker-Suffix Resolution (READ-ONLY)
+Status: VERIFIED + COMMITTED (the Step 52 commit "feat(instruments): safely
+resolve unique broker symbol suffixes"; one focused commit carrying
+implementation, tests and documentation — the established single-commit
+convention, so no separate hash-recording commit follows)
+
+Makes a broker that suffixes its whole instrument catalog usable. Focus
+detection (and a user) names a base symbol such as XAUUSD; a broker may only
+list XAUUSD.r. Until now that name was unresolvable, so research and the agent's
+research block were dropped for such a broker. Resolution now accepts a UNIQUE
+broker-suffixed spelling of the requested base symbol — and nothing else.
+
+Includes:
+
+- app/services/instruments/instrument_service.py: resolve() gained a third,
+  final step after the two existing ones (exact spelling, then unique
+  case-insensitive match, both unchanged): a unique suffix variant of the
+  requested base symbol. The rule is a FORM rule with two deliberate bounds, and
+  is implemented as `_is_broker_suffix_variant` over the requested name and the
+  broker's own catalog:
+  - the candidate must begin with the requested name (case-insensitive) and its
+    remainder must START with a broker separator (`.`, `_`, `-`, `#`) — so an
+    undelimited tail (`XAUUSDm`) or simply a longer symbol (`XAUUSDX`) is never
+    read as a suffix; and
+  - the tail after the separator must be a short (1-8) alphanumeric token, so a
+    descriptive or compound tail (`XAUUSD.verylongsuffix`, `XAUUSD.r.x`) is not
+    one either.
+  Exactly one suffix candidate resolves; zero or several stay a ValueError
+  (unknown / ambiguous, with the existing messages), so a broker listing both
+  XAUUSD.r and XAUUSD.m is never a coin flip. The returned
+  Instrument.symbol is always the broker's own spelling, nothing about the
+  symbol's meaning is inferred, and the rule adds no catalog read (the same
+  single extra catalog scan the case-insensitive fallback already performed).
+  No substring, prefix, alias or fuzzy matching exists anywhere: a partial name
+  (`US`, `USO`, `GOL`) never resolves to the longer instrument.
+- tests/test_instrument_service.py (25 new cases): a unique suffixed spelling
+  resolving for a requested base (also when only the case differs), the
+  documented separator forms, exact and case-insensitive-exact still winning
+  over a suffixed variant, several variants staying ambiguous (in any catalog
+  order), no variant staying unresolved, a variant of a DIFFERENT base not
+  matching (`XAUUSDT.r` for `XAUUSD`), seven tail shapes that must never match,
+  partial names never resolving (substring/prefix guard), unrelated catalog
+  symbols not interfering, and determinism.
+- tests/test_financial_research.py (3 new cases): the suffixed broker now
+  resolving the base symbol, several variants staying unresolved, and the
+  Step 48 profile still grading a suffix-resolved spelling as RELEVANT; the two
+  Step 51 cases whose intent was "this broker does not offer it" were moved onto
+  a catalog with no variant of the requested symbol, so their meaning is
+  unchanged.
+- tests/test_financial_research_api.py (2 new cases): a suffixed-only broker
+  answering 200 with the broker's canonical symbols and graded items, and two
+  suffixed variants producing the deterministic 404.
+- tests/test_agent_research_context.py (3 new cases + 2 re-pointed): the agent
+  builds the research block for a suffixed broker, the whole real pipeline
+  renders the broker's spelling (`focus: XAUUSD.r`) into the prompt, and several
+  variants build no research at all instead of guessing — while the existing
+  "the broker does not offer it" and byte-identical-prompt cases keep their
+  meaning on a catalog that really lacks the symbol.
+- tests/test_agent_api.py (1 new case): the reported symptom end to end through
+  POST /agent — a broker listing only XAUUSD.r still yields the research block
+  focused on XAUUSD.r.
+
+Untouched: the Instrument contract, the providers (MT5 and fake), the research
+service, the agent service, the prompt builder, FundamentalIntelligenceService,
+EconomicIntelligenceService, NewsProvider/Alpha Vantage, the configuration
+matrix, the LLM contract, the schema and migrations. The Step 51 resolution
+architecture is unchanged in shape: the same single InstrumentService boundary,
+the same FocusResolution contract (broker spelling preserved), the same 404/503
+mapping. GET /instruments/{symbol} gains the same suffix resolution (it is the
+same service), which is the intended single-resolution semantics. The affected
+suites are fully offline: 280 cases pass with every non-loopback connect and all
+non-local DNS resolution blocked, and no live API request was made.
 
 
 ### Step 51 — Instrument Resolution in Financial Research (READ-ONLY)
@@ -3418,15 +3507,17 @@ This limitation must be reported rather than hidden.
     is pre-existing (a broker-spelled position symbol already matched under
     upper case in Steps 47-48, and the fundamental endpoint's output is
     unchanged), which is why Step 51 leaves it alone deliberately.
-22. A focus instrument the broker's catalog does not confirm is simply not
-    researched: the agent still answers from the mandatory calendar/fundamental
-    context, but the request loses its look-back research block (the resolution
-    reports the name as unresolved instead of guessing). Step 50's resolution
-    matches a broker symbol exactly or case-insensitively-equal only, so a
-    broker that lists `XAUUSD.r` where focus detection produced `XAUUSD` is the
-    concrete case. Fuzzy or suffix-aware matching is deliberately NOT added:
-    inventing a broker symbol would be worse than researching nothing, and the
-    resolution contract is the instruments endpoint's contract too.
+22. Broker-suffix resolution (Step 52) covers DELIMITED suffixes only: a broker
+    whose variant is spelled without a separator (`XAUUSDm`, `XAUUSDpro`) or
+    with a tail longer than eight characters is still unresolvable, and the
+    request loses its look-back research block (the agent answers from the
+    mandatory calendar/fundamental context, and the research API returns the
+    deterministic 404). Extending the rule to undelimited tails is deliberately
+    NOT done: the catalog carries no marker that such a tail is a variant rather
+    than a different instrument, so matching it would be guessing. A broker that
+    lists several variants of one base (XAUUSD.r and XAUUSD.m) likewise stays
+    ambiguous by design — the caller must name the spelling it wants, and
+    GET /instruments lists the catalog to find it.
 23. A research request naming several instruments fails closed (404) when ANY
     of them is not offered by the tenant's broker: there is no partial research
     response, and the caller is expected to re-ask with the instrument the

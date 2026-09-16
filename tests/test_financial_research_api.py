@@ -39,6 +39,7 @@ from app.db.base import Base
 from app.db.database import get_db
 from app.db.models import Broker, User, UserRole
 from app.providers.fake_instrument import FakeInstrumentProvider
+from app.providers.instrument import Instrument, TradeMode
 from app.providers.news import NewsItem, NewsProvider
 
 TEST_SECRET = "unit-test-secret-not-a-real-credential"
@@ -478,6 +479,83 @@ def test_an_arbitrary_broker_symbol_is_researchable_without_a_profile(
     for wrapper in body["news"]["items"]:
         assert wrapper["overall_relevance"] in RELEVANCE_LEVELS
         assert symbol in wrapper["matched_instruments"] or not wrapper["matched_instruments"]
+
+
+def suffix_only_broker(monkeypatch: pytest.MonkeyPatch, *symbols: str) -> None:
+    """Patch the catalog seam with a broker that lists exactly ``symbols``.
+
+    Used for the brokers whose whole catalog is suffixed (XAUUSD.r), where the
+    base symbol a user or the focus detector names does not exist verbatim.
+    """
+
+    class SuffixOnlyInstrumentProvider:
+        def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+            self._inner = FakeInstrumentProvider(
+                instruments=tuple(
+                    Instrument(
+                        symbol=symbol,
+                        name=None,
+                        asset_class=None,
+                        base_currency=None,
+                        quote_currency=None,
+                        digits=2,
+                        trade_mode=TradeMode.FULL,
+                    )
+                    for symbol in symbols
+                )
+            )
+
+        def get_instrument(self, symbol: str):
+            return self._inner.get_instrument(symbol)
+
+        def list_instruments(self):
+            return self._inner.list_instruments()
+
+    monkeypatch.setattr(deps, "MT5InstrumentProvider", SuffixOnlyInstrumentProvider)
+
+
+def test_a_broker_that_only_lists_a_suffixed_spelling_still_answers(
+    research_env, monkeypatch
+) -> None:
+    # The regression this fix exists for: the caller (or the agent's focus
+    # detector) names XAUUSD and the broker's whole catalog is suffixed.
+    suffix_only_broker(monkeypatch, "XAUUSD.r")
+
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=XAUUSD",
+    )
+
+    assert status == 200
+    assert body["focus_symbols"] == ["XAUUSD.r"]
+    assert body["instruments"] == ["XAUUSD.r"]
+    gold = next(
+        (
+            wrapper
+            for wrapper in body["news"]["items"]
+            if "Gold ETF flows" in wrapper["item"]["title"]
+        ),
+        None,
+    )
+    assert gold is not None and gold["overall_relevance"] == "RELEVANT"
+
+
+def test_two_suffixed_variants_of_the_requested_base_are_a_404(
+    research_env, monkeypatch
+) -> None:
+    # XAUUSD.r and XAUUSD.m are different instruments: the request is refused
+    # rather than silently researched as one of them.
+    suffix_only_broker(monkeypatch, "XAUUSD.r", "XAUUSD.m")
+
+    status, body = get_research(
+        research_env,
+        research_env["customer_a_id"],
+        f"?from={WINDOW_FROM}&to={WINDOW_TO}&symbol=XAUUSD",
+    )
+
+    assert status == 404
+    assert body == {"detail": "Instrument unavailable for the requested symbol"}
 
 
 def test_an_instrument_the_broker_does_not_offer_is_a_404(research_env) -> None:

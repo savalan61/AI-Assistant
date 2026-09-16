@@ -207,9 +207,11 @@ def test_a_requested_spelling_resolves_to_the_brokers_own_canonical_symbol() -> 
 
 
 def test_a_requested_spelling_the_broker_does_not_offer_is_unresolved() -> None:
+    # This broker offers no XAUUSD in any spelling — not the base symbol and not
+    # a suffixed variant of it.
     context = make_service(
         (item("gold-1", WINDOW_FROM, "Gold demand rises as central banks increase purchases"),),
-        catalog=("XAUUSD.r",),
+        catalog=("EURUSD", "EURUSD.m"),
     ).build_research(WINDOW_FROM, WINDOW_TO, focus_symbols=("XAUUSD",))
 
     # The name is reported as unresolved, is not graded against, and is never
@@ -302,6 +304,42 @@ def test_grading_uses_the_resolved_spelling_and_keeps_the_profiles_working() -> 
     # The XAUUSD profile still reaches a suffixed broker spelling, so the direct
     # match is still the strongest level; the label echoed by the relevance
     # layer is upper-cased, as it always has been (known issue 21).
+    assert entry.relevance.value == "RELEVANT"
+    assert entry.kind is not None and entry.kind.value == "DIRECT"
+    assert entry.matched_instruments == ("XAUUSD.R",)
+    assert context.focus_symbols == ("XAUUSD.r",)
+
+
+def test_a_broker_that_suffixes_its_catalog_resolves_the_base_symbol() -> None:
+    # The regression this fix exists for: focus detection yields XAUUSD, the
+    # broker's catalog only offers XAUUSD.r, and the request must still be
+    # researched — in the broker's own spelling.
+    context = make_service(catalog=("XAUUSD.r",)).build_research(
+        WINDOW_FROM, WINDOW_TO, focus_symbols=("XAUUSD",)
+    )
+
+    assert context.focus_symbols == ("XAUUSD.r",)
+    assert context.unresolved_symbols == ()
+    assert context.instruments == ("XAUUSD.r",)
+
+
+def test_several_suffixed_variants_stay_unresolved() -> None:
+    # XAUUSD.r and XAUUSD.m are different instruments: research never picks one.
+    context = make_service(catalog=("XAUUSD.r", "XAUUSD.m")).build_research(
+        WINDOW_FROM, WINDOW_TO, focus_symbols=("XAUUSD",)
+    )
+
+    assert context.unresolved_symbols == ("XAUUSD",)
+    assert context.focus_symbols == ()
+
+
+def test_the_profile_grading_works_on_a_suffix_resolved_spelling() -> None:
+    context = make_service(
+        (item("gold-1", WINDOW_FROM, "Gold demand rises as central banks increase purchases"),),
+        catalog=("XAUUSD.r",),
+    ).build_research(WINDOW_FROM, WINDOW_TO, focus_symbols=("XAUUSD",))
+
+    entry = context.news[0]
     assert entry.relevance.value == "RELEVANT"
     assert entry.kind is not None and entry.kind.value == "DIRECT"
     assert entry.matched_instruments == ("XAUUSD.R",)

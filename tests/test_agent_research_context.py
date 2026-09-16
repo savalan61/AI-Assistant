@@ -858,11 +858,12 @@ def test_the_detected_focus_instrument_is_resolved_before_it_is_researched() -> 
 
 
 def test_a_focus_instrument_the_broker_does_not_offer_builds_no_research() -> None:
-    # The request names XAUUSD but this broker offers only XAUUSD.r. The label is
-    # never treated as a real instrument: nothing is researched for it, and the
-    # question is still answered from the mandatory context rather than failing.
+    # The request names XAUUSD and this broker offers no XAUUSD in any spelling.
+    # The label is never treated as a real instrument: nothing is researched for
+    # it, and the question is still answered from the mandatory context rather
+    # than failing.
     research = _RecordingResearchService(
-        real_research_context(), instrument_service=broker_catalog("XAUUSD.r")
+        real_research_context(), instrument_service=broker_catalog("EURUSD", "EURUSD.m")
     )
     provider = FakeLLMProvider()
     agent, _, _ = make_agent(
@@ -891,7 +892,7 @@ def test_an_unconfirmed_focus_instrument_never_reaches_the_prompt() -> None:
         economic=_RecordingEconomicService(make_economic_context()),
         fundamental=_RecordingFundamentalService(real_fundamental_context()),
         research=_RecordingResearchService(
-            real_research_context(), instrument_service=broker_catalog("XAUUSD.r")
+            real_research_context(), instrument_service=broker_catalog("EURUSD")
         ),
         llm=provider,
     )
@@ -907,6 +908,77 @@ def test_an_unconfirmed_focus_instrument_never_reaches_the_prompt() -> None:
     baseline_agent.handle(request, broker_id=1, now=AS_OF)
 
     assert unconfirmed == baseline_provider.prompts[0].content
+
+
+def test_a_suffixed_broker_still_produces_the_research_block() -> None:
+    # The regression this fix exists for: detection yields XAUUSD, the broker's
+    # catalog only offers XAUUSD.r, and the research block is built in the
+    # broker's own spelling instead of being dropped.
+    research = _RecordingResearchService(
+        real_research_context(), instrument_service=broker_catalog("XAUUSD.r")
+    )
+    provider = FakeLLMProvider()
+    agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        research=research,
+        llm=provider,
+    )
+
+    agent.handle("What is happening with XAUUSD today?", broker_id=1, now=AS_OF)
+
+    assert research.resolutions[0].unresolved == ()
+    assert research.resolutions[0].resolved == ("XAUUSD.r",)
+    assert research.calls[0][2] == ("XAUUSD.r",)
+
+
+def test_the_suffixed_brokers_spelling_reaches_the_prompt() -> None:
+    # The whole real pipeline over a suffixed broker: real research service, real
+    # resolution, real grading, real prompt rendering.
+    provider = FakeLLMProvider()
+    agent = AgentService(
+        FinancialContextService(
+            account_service=AccountInfoService(_FakeAccountInfoProvider()),
+            position_service=PositionService(FakePositionProvider(positions=(XAUUSD,))),
+            trade_history_service=TradeHistoryService(FakeTradeHistoryProvider(trades=(TRADE,))),
+        ),
+        provider,
+        economic_intelligence_service=_RecordingEconomicService(make_economic_context()),
+        fundamental_intelligence_service=FundamentalIntelligenceService(
+            news_service=NewsService(FakeNewsProvider(), max_items=20)
+        ),
+        financial_research_service=FinancialResearchService(
+            NewsService(FakeNewsProvider(), max_items=20), broker_catalog("XAUUSD.r")
+        ),
+    )
+
+    agent.handle("What is happening with XAUUSD today?", broker_id=1, now=AS_OF)
+
+    content = provider.prompts[0].content
+    assert "Financial research (published source facts" in content
+    # The broker's spelling, never the detected label.
+    assert "focus: XAUUSD.r" in content
+    assert "focus: XAUUSD)" not in content
+
+
+def test_several_suffixed_variants_build_no_research_instead_of_guessing() -> None:
+    research = _RecordingResearchService(
+        real_research_context(), instrument_service=broker_catalog("XAUUSD.r", "XAUUSD.m")
+    )
+    provider = FakeLLMProvider()
+    agent, _, _ = make_agent(
+        economic=_RecordingEconomicService(make_economic_context()),
+        fundamental=_RecordingFundamentalService(real_fundamental_context()),
+        research=research,
+        llm=provider,
+    )
+
+    agent.handle("What is happening with XAUUSD today?", broker_id=1, now=AS_OF)
+
+    assert research.resolutions[0].unresolved == ("XAUUSD",)
+    assert research.calls == []  # different instruments: never a coin flip
+    assert "Financial research" not in provider.prompts[0].content
+    assert "Economic calendar for today" in provider.prompts[0].content
 
 
 def test_a_catalog_failure_propagates_and_the_llm_is_never_asked() -> None:

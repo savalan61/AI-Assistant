@@ -650,6 +650,23 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     no sentiment model, no learned matching, no LLM, no new provider, no schema
     change), and the calendar layer's currency-scoped LEVEL contract is unchanged
     for symbols that have a currency leg (CURRENT_CHECKPOINT.md known issues 17-19)
+32. Safe broker-suffix resolution (Step 52): InstrumentService.resolve gained a
+    third and final step — exact spelling, then unique case-insensitive match
+    (both unchanged), then a UNIQUE broker-suffixed spelling of the requested
+    base symbol (XAUUSD -> XAUUSD.r). The rule is a form rule with two bounds,
+    not fuzzy matching: the candidate must begin with the requested name
+    (case-insensitive) and its remainder must start with a broker separator
+    (. _ - #) followed by a short (1-8) alphanumeric token, so undelimited tails
+    (XAUUSDm), longer symbols (XAUUSDX), descriptive/compound tails
+    (XAUUSD.verylongsuffix, XAUUSD.r.x) and partial names (US, GOL) never match.
+    Exactly one candidate resolves in the broker's own spelling; zero or several
+    stay unknown/ambiguous and are never guessed. This is what makes a broker
+    whose whole catalog is suffixed usable: research and the agent's research
+    block now work for XAUUSD on such a broker (focus: XAUUSD.r in the prompt)
+    instead of silently dropping the block. Same single InstrumentService
+    boundary, same FocusResolution contract, no provider/agent/prompt/schema
+    change, no extra catalog read, and GET /instruments/{symbol} gains the same
+    resolution (CURRENT_CHECKPOINT.md known issue 22)
 31. Instrument resolution inside financial research (Step 51): a requested
     instrument is resolved through the Step 50 broker catalog BEFORE anything is
     researched, and only the broker's own canonical spelling is graded. The
