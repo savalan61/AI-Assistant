@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Step 43 — Tenant-Safe Login (this checkpoint; implemented, NOT committed)
+Step 43 — Tenant-Safe Login (this checkpoint)
 + Step 42 — One User Identity (`login`)
 + Step 41 — Stabilize & commit Step 40 + the trade-history field fix
 + Step 40 — Super Admin User CRUD
@@ -15,19 +15,22 @@ Step 43 — Tenant-Safe Login (this checkpoint; implemented, NOT committed)
 
 Status:
 
-Step 43: VERIFIED — implemented, deliberately NOT committed (no push)
+Step 43: VERIFIED + COMMITTED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9, local — not pushed)
 Step 42: VERIFIED + COMMITTED (local — not pushed)
 Steps 12–41: COMMITTED; the Step 41 commit is also still local (not pushed)
 
 Checkpoint commit:
 
-The last checkpoint commit (Step 42) carries the one-identity `login` rename
-across the model, migration, auth, user management, MT5 credential handling,
-seed scripts, tests and documentation together with its document update, and it
-left the working tree clean at that point. Step 43 (below) is implemented and
-verified on top of it and is deliberately left UNCOMMITTED, and pushing it is
-not part of this step either, so it stays local until a push is explicitly
-requested. The prior commit is Step 41 —
+Step 43 (tenant-safe login) — the checkpoint this document describes — is
+committed as 5afd89510af4ec5e63d4bcbf805bc9e73405f1e9 ("feat(auth): make login
+tenant-safe"). It carries the implementation, the tests and the four
+documentation updates (AGENTS.md, PROJECT_CONTEXT.md, knowledge.md and this
+document), and it leaves the working tree clean. Pushing is deliberately not part
+of this step, so the commit stays local until a push is explicitly requested. The
+prior commit is Step 42 — "refactor(users): collapse username and mt5_login into
+one login identity" (95d00d9), the one-identity `login` rename across the model,
+migration, auth, user management, MT5 credential handling, seed scripts, tests
+and its document update; it is also still local. Before that, Step 41 —
 "feat(users): complete super admin user crud" (1577672) — which carries Step 40
 together with the trade-history field fix; it is also still local. The last
 synced (pushed) commit was "fix(config): harden environment settings loading"
@@ -165,16 +168,14 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-MODIFIED — Step 43 (tenant-safe login) is implemented and verified but
-deliberately NOT committed, so its change set plus this document update are
-uncommitted.
+CLEAN — the Step 43 change set (implementation, tests and the four documentation
+updates) is committed as 5afd895; the only change in flight is this status
+correction itself, which is documentation-only.
 
 The Step 42 `login` rename and its document update were carried by the Step 42
-checkpoint commit, which left the working tree clean at that point. The last two
-commits — Step 41 (`1577672`, "feat(users): complete super admin user crud") and
-the Step 42 checkpoint — are local, so local HEAD is two commits ahead of
-origin/master until they are pushed. Step 43 (tenant-safe login) and this
-document update sit on top of them, uncommitted by instruction.
+checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
+crud"), 42 (`95d00d9`) and 43 (`5afd895`) are local, so local HEAD is three
+commits ahead of origin/master until they are pushed.
 
 ## Completed Stages
 
@@ -1008,7 +1009,7 @@ Status: VERIFIED + COMMITTED
 
 
 ### Step 43 — Tenant-Safe Login
-Status: VERIFIED — implemented, NOT committed (no push)
+Status: VERIFIED + COMMITTED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9, local — not pushed)
 
 Fixes a real cross-tenant defect. Because `login` is unique only per broker
 while the endpoint matched on it alone, the second broker to register an MT5
@@ -2093,16 +2094,17 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
-Steps 12–42, the role-migration ordering fix, the development user seed and the
-trade-history field fix are complete and committed (latest commit: the Step 42
-checkpoint, which is local until pushed, as is the Step 41 commit before it).
+Steps 12–43, the role-migration ordering fix, the development user seed and the
+trade-history field fix are complete and committed (latest commit: Step 43,
+`5afd895`, which is local until pushed, as are the Step 41 and Step 42 commits
+before it).
 
-Step 43 (tenant-safe login) is implemented and fully verified but deliberately
-NOT committed. The working tree holds that change set — app/api/auth_router.py,
-app/core/security.py, app/core/config.py,
+Step 43 (tenant-safe login) is committed as
+5afd89510af4ec5e63d4bcbf805bc9e73405f1e9 ("feat(auth): make login tenant-safe"),
+carrying app/api/auth_router.py, app/core/security.py, app/core/config.py,
 app/services/auth/login_throttle.py, tests/test_auth_login.py,
-tests/test_login_throttle.py, tests/test_security.py — together with this
-document update.
+tests/test_login_throttle.py, tests/test_security.py and the four documentation
+updates; it is local and unpushed.
 
 The immediate next action is deliberately NOT fixed here: the previously open
 work is now landed, so the next stage should be chosen explicitly (candidates
