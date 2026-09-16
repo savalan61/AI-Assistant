@@ -11,7 +11,7 @@ trading action, and no endpoint here can mutate anything. Tenant identity comes
 only from the authenticated database user, so a caller can never read another
 tenant's positions.
 """
-from datetime import datetime
+from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 
@@ -26,12 +26,25 @@ from app.core.dependencies import (
     get_current_user,
     get_economic_intelligence_service,
     get_fundamental_intelligence_service,
+    get_financial_research_service,
 )
 from app.db.models import User
 from app.services.economic_intelligence import EconomicIntelligenceService
-from app.services.fundamental_intelligence import FundamentalContext, FundamentalIntelligenceService
+from app.services.fundamental_intelligence import (
+    FinancialResearchContext,
+    FinancialResearchService,
+    FundamentalContext,
+    FundamentalIntelligenceService,
+)
 
 router = APIRouter()
+
+
+def _require_utc(value: datetime, field: str) -> datetime:
+    """Reject a naive datetime (the trade-history endpoint's window convention)."""
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise HTTPException(status_code=400, detail=f"'{field}' must be a UTC-aware ISO 8601 datetime")
+    return value.astimezone(UTC)
 
 
 class NewsItemResponse(BaseModel):
@@ -94,6 +107,45 @@ class PositionExposureResponse(BaseModel):
     reason: str
     calendar_event_ids: list[str]
     news_item_ids: list[str]
+
+
+class ResearchNewsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    item: NewsItemResponse
+    # Strongest relevance across the requested focus instruments, from the same
+    # discrete levels the fundamental endpoint uses. Never a score/direction.
+    overall_relevance: str
+    matched_instruments: list[str]
+    # Deterministic factual reason for the classification above.
+    reason: str
+
+
+class ResearchContextResponse(BaseModel):
+    # False means no news source is configured/available for this deployment.
+    # ``items`` is then empty and ``unavailable_reason`` explains that news
+    # could not be assessed — deliberately distinct from "there is no news".
+    available: bool
+    data_source: str | None
+    unavailable_reason: str | None
+    items: list[ResearchNewsResponse]
+
+
+class FinancialResearchResponse(BaseModel):
+    # broker_id is the authenticated user's own tenant identity, echoed for the
+    # client; it is never accepted as request input. The research context itself
+    # is instrument/window data with no tenant-sensitive content, so the echo is
+    # the response's only tenant fact.
+    broker_id: int
+    as_of: datetime
+    window_from: datetime
+    window_to: datetime
+    # The instruments the request asked about (uppercased, sorted).
+    focus_symbols: list[str]
+    # The set everything was graded against: the focus symbols themselves
+    # (research holds no positions, so nothing else is in play here).
+    instruments: list[str]
+    news: ResearchContextResponse
 
 
 class FundamentalIntelligenceResponse(BaseModel):
@@ -211,4 +263,80 @@ async def get_todays_fundamental_intelligence(
             )
             for exposure in context.positions
         ],
+    )
+
+
+@router.get("/financial-research/today", response_model=FinancialResearchResponse)
+async def get_todays_financial_research(
+    from_time: datetime = Query(
+        ..., alias="from", description="Research window start (UTC-aware ISO 8601)"
+    ),
+    to_time: datetime = Query(
+        ..., alias="to", description="Research window end (UTC-aware ISO 8601)"
+    ),
+    symbol: str = Query(
+        ...,
+        min_length=1,
+        max_length=32,
+        description="Focus instrument(s), e.g. XAUUSD or XAUUSD,USOIL (comma-separated).",
+    ),
+    current_user: User = Depends(get_current_user),
+    research_service: FinancialResearchService = Depends(get_financial_research_service),
+) -> FinancialResearchResponse:
+    """Graded published-source news for an explicit window and instrument(s).
+
+    Read-only research context: no account, no positions, no tenant data beyond
+    the broker_id echo. The window must be UTC-aware and half-open; the focus
+    symbols are labels for relevance grading only and never widen what is read.
+    """
+    from_time = _require_utc(from_time, "from")
+    to_time = _require_utc(to_time, "to")
+    if from_time >= to_time:
+        raise HTTPException(status_code=400, detail="'from' must be earlier than 'to'")
+    focus_symbols = tuple(
+        part.strip() for part in symbol.split(",") if part.strip()
+    )
+    if not focus_symbols:
+        raise HTTPException(status_code=422, detail="symbol must name at least one instrument")
+
+    def compose() -> FinancialResearchContext:
+        return research_service.build_research(
+            from_time,
+            to_time,
+            focus_symbols=focus_symbols,
+        )
+
+    try:
+        context = await run_mt5_call(compose)
+    except ValueError:
+        # A blank focus symbol or an unusable window is a client input problem.
+        raise HTTPException(status_code=422, detail="Invalid research window or symbol")
+    except RuntimeError:
+        # News infrastructure failure: the established generic 503, with no
+        # provider internals in the detail.
+        raise HTTPException(
+            status_code=503, detail="Financial research service temporarily unavailable"
+        )
+
+    return FinancialResearchResponse(
+        broker_id=current_user.broker_id,
+        as_of=context.as_of,
+        window_from=context.window_from,
+        window_to=context.window_to,
+        focus_symbols=list(context.focus_symbols),
+        instruments=list(context.instruments),
+        news=ResearchContextResponse(
+            available=context.news_available,
+            data_source=context.news_data_source,
+            unavailable_reason=context.news_unavailable_reason,
+            items=[
+                ResearchNewsResponse(
+                    item=NewsItemResponse.model_validate(entry.item),
+                    overall_relevance=entry.relevance.value,
+                    matched_instruments=list(entry.matched_instruments),
+                    reason=entry.reason,
+                )
+                for entry in context.news
+            ],
+        ),
     )

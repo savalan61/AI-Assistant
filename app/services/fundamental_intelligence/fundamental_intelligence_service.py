@@ -139,12 +139,14 @@ def _normalize_symbol(symbol: str | None) -> str | None:
     return normalized
 
 
-def _news_intelligence(item: NewsItem, instruments: tuple[str, ...]) -> FundamentalNewsItem:
+def news_intelligence(item: NewsItem, instruments: tuple[str, ...]) -> FundamentalNewsItem:
     """Classify one item against every instrument in play.
 
     Each instrument is classified through its own documented fundamental profile,
     so an item that never names an instrument can still be relevant - and can be
-    relevant at different levels to different instruments.
+    relevant at different levels to different instruments. Shared by the
+    fundamental context and the financial-research context (Step 49): one
+    classification, so both surfaces can never disagree about an item.
     """
     matches = tuple(classify_instrument_relevance(item, symbol) for symbol in instruments)
     level = strongest_level(tuple(match.level for match in matches))
@@ -387,7 +389,7 @@ class FundamentalIntelligenceService:
             # relevance is decided here, so an untagged item is still considered.
             items = self._news.get_news(calendar.window_from, calendar.window_to)
 
-        news = tuple(_news_intelligence(item, instruments) for item in items)
+        news = tuple(news_intelligence(item, instruments) for item in items)
         positions = tuple(
             _exposure(position, calendar, news, news_available) for position in calendar.positions
         )

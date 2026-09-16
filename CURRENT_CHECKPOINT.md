@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 48 — Instrument-Aware Fundamental Relevance (this checkpoint)
+Step 49 — Graded Financial Research Context (this checkpoint)
++ Step 48 — Instrument-Aware Fundamental Relevance
 + Step 47A — Alpha Vantage News Source (DEVELOPMENT/TEST ONLY)
 + Step 47 — News & Fundamental Intelligence
 + Step 46 — Explicit Economic-Calendar Source Configuration
@@ -21,6 +22,7 @@ Step 48 — Instrument-Aware Fundamental Relevance (this checkpoint)
 
 Status:
 
+Step 49: VERIFIED (implementation, tests and documentation; committed together by the Step 49 commit "feat(research): add graded financial research context"; local, not pushed)
 Step 48: VERIFIED (implementation, tests and documentation; committed together by the Step 48 commit "feat(fundamental): generalize instrument-aware relevance"; local, not pushed)
 Step 47A: VERIFIED + COMMITTED (e434659 — "feat(news): add Alpha Vantage development source" + its checkpoint-status commit; local, not pushed)
 Step 47: VERIFIED + COMMITTED (c44953d — "feat(fundamental): add news and fundamental intelligence" + its checkpoint-status commit; local, not pushed)
@@ -33,7 +35,26 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
-Step 48 (instrument-aware fundamental relevance: the shared domain vocabulary and
+Step 49 (the graded financial-research context: FinancialResearchService and
+FinancialResearchContext in app/services/fundamental_intelligence/research.py, the
+public news_intelligence classification shared with the fundamental context, the
+get_financial_research_service composition seam reusing the existing news seam
+unchanged, and the JWT-protected GET /financial-research/today endpoint with the
+explicit UTC window and focus-symbol parameters) — the change set this checkpoint
+describes — is implemented, verified and committed as ONE focused commit
+("feat(research): add graded financial research context") that carries the
+implementation, the tests and this documentation together, following the Step 48
+convention of a single commit; no separate checkpoint-status commit follows it, so
+this document records the state rather than a hash. The service is a reusable slice
+of the fundamental-intelligence layer: graded published-source news for an explicit
+half-open UTC window and explicit focus instruments, with NO account, position or
+tenant data (it holds no MT5 provider, reads no positions and accepts no tenant
+identity — the response's only tenant fact is the caller's own broker_id echo).
+Classification is the SAME news_intelligence grading the fundamental context uses,
+so the two surfaces can never disagree about an item; no provider, configuration
+value, agent path or schema changed, no live API request was made, and Alpha
+Vantage, the fake, the NEWS_SOURCE matrix and the agent pipeline are untouched.
+Before it, Step 48 (instrument-aware fundamental relevance: the shared domain vocabulary and
 instrument profiles under app/services/instrument_intelligence, the graded
 per-instrument classification in the news and calendar relevance layers, the
 profile-based calendar rule for symbols with no currency leg, the exposure factor
@@ -413,14 +434,15 @@ No database migration was needed — these values are not persisted.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 1341 passed, 2 warnings (both pre-existing third-party
+pytest tests/ -q → 1381 passed, 2 warnings (both pre-existing third-party
 deprecation warnings: the anyio BlockingPortal alias and the starlette
 testclient httpx notice); the Step 47A figure of 1213 was re-verified on the
 tree BEFORE Step 48 with outbound networking hard-disabled, so it also proved
 the suite reached no network (neither Alpha Vantage nor anything else), and the
-Step 48 run was taken on this exact tree. Step 48 added the profile/vocabulary,
-instrument-relevance and multi-instrument-context modules (1213 → 1341) and made
-NO live API request of any kind. Step 44 rewrote the QuantGist cases
+Step 49 run re-proved the same property for the two new suites: both pass with
+DNS resolution and outbound connections patched to raise. Step 49 added the
+research-service and research-API suites (1341 → 1381) and made NO live API
+request of any kind. Step 44 rewrote the QuantGist cases
 against the verified live API and took the suite to 897; Step 45 added the
 agent/calendar composition (924); Step 46 added the source x environment matrix
 and the production-seam cases (948); Step 47 added the news provider/service,
@@ -451,11 +473,15 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-CLEAN — the Step 48 change set (the shared domain vocabulary and instrument
-profiles, the graded per-instrument news and calendar relevance, the
-no-currency-leg profile rule, the exposure factors, the prompt rendering and the
-three new test modules) is committed by the Step 48 commit, so nothing from that
-change set is left modified, staged or uncommitted. The Step 47A change set (the
+CLEAN — the Step 49 change set (the research service and context, the shared
+news_intelligence classification, the composition seam and the
+GET /financial-research/today endpoint, the two new test modules and this
+documentation) is committed by the Step 49 commit, so nothing from that change
+set is left modified, staged or uncommitted. The Step 48 change set (the shared
+domain vocabulary and instrument profiles, the graded per-instrument news and
+calendar relevance, the no-currency-leg profile rule, the exposure factors, the
+prompt rendering and the three new test modules) is committed by the Step 48
+commit. The Step 47A change set (the
 Alpha Vantage news provider, the alphavantage NEWS_SOURCE value and its matrix,
 the key-redaction measure, the new and extended tests, .env.example and the
 documentation) is committed by the Step 47A commit and its checkpoint-status
@@ -472,14 +498,15 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is eleven commits ahead of it, none of them pushed:
+638f972, and local HEAD is twelve commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
 intelligence ahead of technical analysis), the two Step 47 commits (the
 implementation and its checkpoint-status record), the two Step 47A commits (the
-Alpha Vantage development source and its checkpoint-status record) and the
-Step 48 commit (instrument-aware fundamental relevance).
+Alpha Vantage development source and its checkpoint-status record), the
+Step 48 commit (instrument-aware fundamental relevance) and the Step 49 commit
+(the graded financial-research context).
 
 ## Completed Stages
 

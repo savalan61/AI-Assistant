@@ -650,6 +650,20 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     no sentiment model, no learned matching, no LLM, no new provider, no schema
     change), and the calendar layer's currency-scoped LEVEL contract is unchanged
     for symbols that have a currency leg (CURRENT_CHECKPOINT.md known issues 17-19)
+28. Graded financial research context (Step 49): a reusable slice of the
+    fundamental-intelligence layer — FinancialResearchService composing graded
+    published-source news for an EXPLICIT half-open UTC window and explicit
+    focus instruments, with no account, position or tenant data (no MT5
+    provider, no positions read, no tenant identity accepted; the JWT-protected
+    GET /financial-research/today endpoint echoes only the caller's own
+    broker_id). Classification is the SAME news_intelligence grading the
+    fundamental context uses (one relevance mechanism, Step 48 profiles), an
+    absent news source is reported as explicitly unavailable (never as "no
+    news"), a failing source fails closed with the generic 503, output stays
+    bounded and deterministically ordered, provenance travels on every item,
+    and the NEWS_SOURCE matrix, Alpha Vantage, the fake, the agent pipeline and
+    the schema are untouched (no live API request was made; no production news
+    vendor — CURRENT_CHECKPOINT.md known issues 15 and 16)
 27. Alpha Vantage as the real development news source (Step 47A): a NewsProvider
     implementation behind the Step 47 contract (one bounded NEWS_SENTIMENT query
     per call, the half-open UTC window sent to the vendor and re-applied locally,

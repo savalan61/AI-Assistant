@@ -37,7 +37,10 @@ from app.services.broker_llm_config import (
 from app.services.economic_calendar import EconomicCalendarService
 from app.services.economic_intelligence import EconomicIntelligenceService
 from app.services.financial_context import FinancialContextService
-from app.services.fundamental_intelligence import FundamentalIntelligenceService
+from app.services.fundamental_intelligence import (
+    FinancialResearchService,
+    FundamentalIntelligenceService,
+)
 from app.services.market import MarketDataService
 from app.services.news import NewsService
 from app.services.portfolio_intelligence import PortfolioIntelligenceService
@@ -314,6 +317,18 @@ def get_fundamental_intelligence_service() -> FundamentalIntelligenceService:
     are added without a second MT5 read.
     """
     return FundamentalIntelligenceService(news_service=get_news_service())
+
+
+def get_financial_research_service() -> FinancialResearchService:
+    """Compose the graded research context from the same resolved news source.
+
+    Reuses the news seam above unchanged: the same explicit NEWS_SOURCE
+    selection, the same development-only posture, the same failure behaviour.
+    Like the fundamental service, the research service holds no MT5 provider,
+    reads no positions and accepts no tenant identity — it is a windowed news
+    context only — so it carries nothing tenant-sensitive by construction.
+    """
+    return FinancialResearchService(news_service=get_news_service())
 
 
 # Agent LLM wiring. The production seam is the broker-aware router: a broker

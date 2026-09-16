@@ -291,6 +291,7 @@ Current JWT-protected, read-only endpoints:
   update and delete inside the caller's broker
 - POST /agent, GET /economic-intelligence/today,
   GET /fundamental-intelligence/today?symbol=<optional instrument>,
+  GET /financial-research/today?from=<UTC ISO>&to=<UTC ISO>&symbol=<instruments>,
   GET /portfolio-intelligence, GET/PUT /broker-llm-config → the read-only AI
   surface and broker LLM settings
 - PUT /users/{user_id}/mt5-credentials → provision a user's MT5 investor
@@ -375,6 +376,13 @@ Already implemented today:
   position's factual exposure (explicit UNKNOWN when it cannot be established),
   a JWT-protected GET /fundamental-intelligence/today endpoint, and that same
   context composed into every agent prompt
+- graded financial research (Step 49): the same news/relevance architecture
+  exposed as a reusable windowed context — a JWT-protected
+  GET /financial-research/today endpoint taking an explicit UTC window and
+  explicit focus instruments (for example XAUUSD,USOIL) and returning graded
+  published-source news with provenance; unlike the fundamental context it
+  holds no account, position or tenant data, and it reuses the exact same
+  classification so the two surfaces can never disagree
 
 Eventually the system may support:
 

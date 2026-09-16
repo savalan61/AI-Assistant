@@ -4,8 +4,13 @@ from app.services.fundamental_intelligence.fundamental_intelligence_service impo
     FundamentalIntelligenceService,
     FundamentalNewsItem,
     PositionFundamentalExposure,
+    news_intelligence,
 )
 from app.services.fundamental_intelligence.focus import detect_focus_symbol, detect_focus_symbols
+from app.services.fundamental_intelligence.research import (
+    FinancialResearchContext,
+    FinancialResearchService,
+)
 from app.services.fundamental_intelligence.relevance import (
     InstrumentRelevance,
     NewsRelevance,
@@ -19,6 +24,8 @@ from app.services.fundamental_intelligence.relevance import (
 
 __all__ = [
     "ExposureStatus",
+    "FinancialResearchContext",
+    "FinancialResearchService",
     "FundamentalContext",
     "FundamentalIntelligenceService",
     "FundamentalNewsItem",
@@ -32,5 +39,6 @@ __all__ = [
     "detected_currencies",
     "news_currencies",
     "news_instruments",
+    "news_intelligence",
     "strongest_level",
 ]
