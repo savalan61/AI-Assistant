@@ -667,9 +667,22 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     providers, config, schema and trading behaviour are untouched; no cache, no
     second catalog read, no live API request. Cost: one extra terminal read per
     market-data request, which matters because MT5 serializes reads on the single
-    process-wide session (CURRENT_CHECKPOINT.md known issue 24)
-32. Safe broker-suffix resolution (Step 52, extended in Step 54):
-    InstrumentService.resolve's third and final step — after exact spelling and
+    process-wide session (CURRENT_CHECKPOINT.md known issue 24)33. Profile-documented Brent spellings (Step 54 relevance fix): the crude-oil
+    profile (profiles.py) now documents UKOIL and BRENT (and their broker-
+    decorated forms such as UKOIL., which the prefix rule already handled) as
+    spellings of the same underlying commodity, so its documented factor tiers
+    apply to a Brent position exactly as to a WTI one. Concretely: UKOIL. + a
+    USD FOMC event is POTENTIALLY_RELEVANT through MONETARY_POLICY instead of
+    NOT_OBVIOUSLY_RELEVANT, and Persian-Gulf/crude events are RELEVANT through
+    the DIRECT crude-oil tier — previously unreachable because Brent has no
+    currency leg and the profile did not cover the spelling. This is a DATA edit
+    (two symbol roots), not a new profile system, and no existing behaviour
+    changes: currency-leg rules stay authoritative for symbols with a leg
+    (USDJPY, EURUSD, XAUUSD all keep their verdicts and wording), unprofiled
+    instruments without a leg (US30, COCOA.) stay fail-closed, and a profile
+    never makes every USD event relevant (US Grain Stocks Report stays
+    NOT_OBVIOUSLY_RELEVANT for every profiled instrument)
+32. Safe broker-suffix resolution (Step 52, extended in Step 54): InstrumentService.resolve's third and final step — after exact spelling and
     a unique case-insensitive match, both unchanged — accepts a UNIQUE
     broker-DECORATED spelling of the requested base symbol. Three decoration
     forms, with NO list of known suffixes: separator + empty tail (XAUUSD.,

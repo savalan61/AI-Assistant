@@ -388,6 +388,100 @@ def test_a_direct_profile_match_is_the_only_route_to_the_strongest_level() -> No
     assert relevance.kind is not None and relevance.kind.value == "DIRECT"
 
 
+# --- broker-decorated spellings reach their profile ------------------------------------------
+
+
+def test_a_brent_position_s_forward_separator_spelling_reaches_the_oil_profile() -> None:
+    # The regression this fix exists for: UKOIL. (a broker's Brent spelling,
+    # trailing separator and all) has no currency leg, and a USD FOMC decision
+    # used to be NOT_OBVIOUSLY_RELEVANT merely because the crude-oil profile
+    # did not document the Brent spellings. The profile is a data table: Brent
+    # is the same commodity, so the documented macro tier decides.
+    relevance = classify_relevance(event("FOMC Rate Decision"), position("UKOIL."))
+
+    assert relevance.relevance is POTENTIALLY
+    assert relevance.kind is not None and relevance.kind.value == "MACRO"
+    assert relevance.domains == (FundamentalDomain.MONETARY_POLICY,)
+    assert "fundamental profile" in relevance.reason
+    assert relevance.symbol == "UKOIL."  # the broker's spelling stays visible
+
+
+def test_brent_spellings_reach_direct_oil_factors() -> None:
+    for symbol in ("UKOIL", "BRENT"):
+        relevance = classify_relevance(
+            event("Persian Gulf tensions disrupt crude shipments"), position(symbol)
+        )
+
+        assert relevance.relevance is RELEVANT
+        assert relevance.kind is not None and relevance.kind.value == "DIRECT"
+        assert relevance.domains == (FundamentalDomain.CRUDE_OIL, FundamentalDomain.GEOPOLITICAL_RISK)
+
+
+def test_decorated_index_and_gold_spellings_reach_their_profiles() -> None:
+    cpi = classify_relevance(event("US CPI inflation accelerates"), position("US100."))
+    fomc = classify_relevance(event("FOMC Rate Decision"), position("XAUUSD.r"))
+
+    assert cpi.relevance is POTENTIALLY
+    assert cpi.kind is not None and cpi.kind.value == "MACRO"
+    assert cpi.domains == (FundamentalDomain.INFLATION,)
+    assert "fundamental profile" in cpi.reason
+    assert fomc.relevance is POTENTIALLY
+    assert fomc.kind is not None and fomc.kind.value == "MACRO"
+    assert fomc.domains == (FundamentalDomain.MONETARY_POLICY,)
+
+
+def test_a_profile_is_never_a_blanket_for_every_event() -> None:
+    # Relevance must come from the profile's configured factor domains: an event
+    # about a factor the profile does not document stays NOT_OBVIOUSLY_RELEVANT.
+    # (XAUUSD.r is deliberately absent: it HAS a USD currency leg, so a USD
+    # event is currency-relevant for it regardless of any profile.)
+    for symbol in ("UKOIL.", "BRENT", "US100."):
+        relevance = classify_relevance(event("US Grain Stocks Report"), position(symbol))
+
+        assert relevance.relevance is NOT_OBVIOUS
+        assert relevance.kind is None
+        assert relevance.domains == ()
+
+
+def test_currency_leg_relevance_is_unchanged_for_profiled_and_unprofiled_pairs() -> None:
+    # The currency-scoped contract is authoritative for symbols with a leg:
+    # USDJPY keeps its base-currency verdict with no factor attribution, and a
+    # profiled symbol whose event currency IS a leg keeps its existing wording.
+    usdjpy_fomc = classify_relevance(event("FOMC Rate Decision"), position("USDJPY"))
+    assert usdjpy_fomc.relevance is POTENTIALLY
+    assert usdjpy_fomc.kind is None
+    assert usdjpy_fomc.domains == ()
+    assert "base currency" in usdjpy_fomc.reason
+
+    gold_usd = classify_relevance(event("FOMC Rate Decision"), position("XAUUSD"))
+    assert gold_usd.relevance is POTENTIALLY
+    assert gold_usd.kind is not None and gold_usd.kind.value == "MACRO"
+    assert "pricing currency" in gold_usd.reason
+
+
+def test_multiple_evidence_sources_combine_deterministically() -> None:
+    # The same event may reach a position through BOTH the currency rule and the
+    # documented profile: XAUUSD.r has a USD leg (currency wording first) and the
+    # factor sentence is appended, in a fixed order, every time.
+    first = classify_relevance(event("FOMC Rate Decision"), position("XAUUSD.r"))
+    second = classify_relevance(event("FOMC Rate Decision"), position("XAUUSD.r"))
+
+    assert first == second
+    assert first.reason.startswith("USD is the quote currency of XAUUSD.r")
+    assert "central-bank monetary policy" in first.reason
+    assert first.kind is not None and first.kind.value == "MACRO"
+
+
+def test_an_unprofiled_instrument_without_a_currency_leg_stays_not_obvious() -> None:
+    # US30 keeps its fail-closed verdict, and so does a broker-decorated symbol
+    # no profile covers (COCOA. — a trailing separator changes nothing).
+    for symbol in ("US30", "COCOA."):
+        relevance = classify_relevance(event("US CPI inflation accelerates"), position(symbol))
+
+        assert relevance.relevance is NOT_OBVIOUS
+        assert "No currency leg could be identified" in relevance.reason
+
+
 # --- fact only: no advice, no prediction -------------------------------------------------------
 
 

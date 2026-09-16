@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 54 — General Broker Decoration Resolution (this checkpoint)
+Fix — Economic Calendar Position Relevance via Instrument Profiles (this checkpoint)
++ Step 54 — General Broker Decoration Resolution
 + Step 53 — Market Data Symbol Resolution
 + Step 52 — Safe Broker-Suffix Resolution
 + Step 51 — Instrument Resolution in Financial Research
@@ -28,6 +29,9 @@ Step 54 — General Broker Decoration Resolution (this checkpoint)
 
 Status:
 
+Calendar relevance fix: VERIFIED (implementation, tests and documentation;
+committed together by the fix commit "fix(calendar): grade positions through
+instrument profiles"; local, not pushed)
 Step 54: VERIFIED + COMMITTED (b454784 — "fix(instruments): resolve decorated
 broker spellings without a suffix list"; local, not pushed)
 Step 53: VERIFIED + COMMITTED (e884767 — "fix(market-data): resolve symbols
@@ -53,6 +57,16 @@ Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
 Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
+
+The calendar-relevance fix change set (the Brent symbol roots added to the
+existing crude-oil profile, the seven new focused relevance cases, and this
+documentation) — the change set this checkpoint describes — is implemented,
+verified and committed as ONE focused commit ("fix(calendar): grade positions
+through instrument profiles") carrying the diff, the tests and this
+documentation together, following the established single-commit convention. No
+relevance engine, resolution rule, provider, contract, configuration, LLM or
+schema change: the existing Step 48 profile path now also reaches Brent
+spellings because the profile table documents them.
 
 The Step 54 change set (the extended decoration rule in
 `_is_broker_suffix_variant` with its documented three-form bound, the
@@ -1453,6 +1467,40 @@ Status: VERIFIED + COMMITTED
 - Focused tests grew 10 → 14 (override reads the requested file; default path
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
+
+
+### Fix — Economic Calendar Position Relevance via Instrument Profiles
+Status: VERIFIED + COMMITTED (the fix commit "fix(calendar): grade positions
+through instrument profiles"; one focused commit carrying implementation, tests
+and documentation — the established single-commit convention)
+
+The reported defect: a UKOIL. BUY position plus a USD "FOMC Rate Decision" event
+was classified NOT_OBVIOUSLY_RELEVANT. The cause was NOT a missing engine path —
+the Step 48 no-currency-leg profile path in classify_relevance already worked
+(NAS100 + CPI proves it) — but a data gap: the crude-oil profile's documented
+symbol roots (USOIL, WTI, XTIUSD, OILUSD, OIL) did not cover any Brent spelling,
+so profile_for("UKOIL.") returned None and a no-currency-leg symbol with no
+profile failed closed.
+
+Includes:
+
+- app/services/instrument_intelligence/profiles.py: the EXISTING crude-oil
+  profile documents UKOIL and BRENT as roots (and decorated forms such as
+  UKOIL./BRENT.cash through the unchanged prefix rule). This is the data edit
+  the profile module itself sanctions — no new profile system, no engine change,
+  no invented instrument.
+- tests/test_instrument_relevance.py (7 new cases): UKOIL. + FOMC reaching the
+  macro monetary-policy tier with the broker spelling preserved in the output;
+  BRENT/UKOIL direct crude/geopolitical events reaching RELEVANT; US100. and
+  XAUUSD.r decorated spellings; the profile never blanket-matching (US Grain
+  Stocks Report stays NOT_OBVIOUSLY_RELEVANT for every profiled symbol);
+  currency-leg contracts unchanged (USDJPY base-currency verdict with no factor
+  attribution, XAUUSD pricing-currency wording with the profile sentence
+  appended deterministically); and US30/COCOA. still failing closed.
+
+Untouched: classify_relevance's decision structure, both relevance contracts,
+the resolution rules, providers, research/agent/market-data composition,
+configuration, schema, and the read-only posture. No live API request.
 
 
 ### Step 54 — General Broker Decoration Resolution (READ-ONLY)
@@ -3639,6 +3687,14 @@ This limitation must be reported rather than hidden.
     is pre-existing (a broker-spelled position symbol already matched under
     upper case in Steps 47-48, and the fundamental endpoint's output is
     unchanged), which is why Step 51 leaves it alone deliberately.
+25. The instrument profiles are a static data table: an instrument the table
+    does not document gets NO profile-based relevance even when an obviously
+    similar instrument does (UKOIL./BRENT were unreachable until this fix; US30,
+    COCOA. and every other unprofiled symbol still are). Coverage therefore
+    grows only by deliberate data edits, and a user trading an unprofiled
+    instrument keeps the fail-closed verdict — which is the intended trust
+    posture, but it means calendar relevance for the long tail of broker
+    symbols stays limited until profiles are extended.
 22. Broker-suffix resolution (Step 52, extended in Step 54) requires the
     candidate to be the requested name plus a decoration: a separator with an
     empty or short alphanumeric tail, or a short alphabetic lowercase tag. An

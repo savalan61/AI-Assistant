@@ -135,7 +135,19 @@ PROFILES: tuple[InstrumentProfile, ...] = (
     InstrumentProfile(
         name="crude oil (USOIL/WTI)",
         canonical="USOIL",
-        symbols=("USOIL", "WTI", "XTIUSD", "OILUSD", "OIL"),
+        symbols=(
+            "USOIL",
+            "WTI",
+            "XTIUSD",
+            "OILUSD",
+            "OIL",
+            # Brent crude is the same underlying commodity as WTI on every
+            # documented factor tier, reached through a different broker
+            # benchmark spelling (UKOIL, BRENT, and their broker-decorated
+            # forms such as UKOIL.).
+            "UKOIL",
+            "BRENT",
+        ),
         focus_names=("USOIL", "WTI", "XTIUSD", "OILUSD"),
         direct=(
             FundamentalDomain.CRUDE_OIL,

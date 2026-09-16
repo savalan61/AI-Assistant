@@ -417,7 +417,11 @@ Already implemented today:
   contract is read-only and tenant-scoped, works for arbitrary broker symbols
   (with or without a broker suffix), and holds no cache, database catalog,
   scheduler or ingestion. The XAUUSD/USOIL/NASDAQ fundamental relevance profiles
-  remain optional intelligence enhancements layered on top of a resolved symbol.
+  remain optional intelligence enhancements layered on top of a resolved symbol,
+  and — since the Step 54 relevance fix — the profiles document the Brent
+  spellings (UKOIL, BRENT, and decorated forms such as UKOIL.) too, so a Brent
+  position's calendar relevance comes from its documented factor tiers instead
+  of failing closed for having no currency leg.
 - portfolio intelligence (symbol exposure, directional balance, deterministic
   risk classification)
 - financial context (one read-only context for future AI consumption)
