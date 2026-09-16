@@ -11,6 +11,7 @@ verified live response shape (2026-09-16 smoke test):
 with a global release_time-ascending feed that IGNORES the ``date`` parameter.
 No pytest asyncio plugin is used; nothing in this file is async.
 """
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -20,7 +21,7 @@ import pytest
 from fastapi import HTTPException
 
 import app.core.dependencies as deps
-from app.core.config import settings as app_settings
+from app.core.config import EconomicCalendarSource, Settings, settings as app_settings
 from app.providers.economic_calendar import EconomicEvent, EventImpact
 from app.providers.fake_economic_calendar import FakeEconomicCalendarProvider
 from app.providers.quantgist_economic_calendar import QuantGistEconomicCalendarProvider
@@ -649,6 +650,9 @@ def test_development_without_a_key_keeps_the_deterministic_fake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(app_settings, "APP_ENV", "development", raising=True)
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.AUTO, raising=True
+    )
     monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", "", raising=True)
 
     service = deps.get_economic_calendar_service()
@@ -659,7 +663,12 @@ def test_development_without_a_key_keeps_the_deterministic_fake(
 def test_development_with_a_key_selects_the_quantgist_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The default source (auto) is the historical behaviour: in development a
+    # configured key selects the QuantGist development/test tier.
     monkeypatch.setattr(app_settings, "APP_ENV", "development", raising=True)
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.AUTO, raising=True
+    )
     monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", TEST_API_KEY, raising=True)
 
     service = deps.get_economic_calendar_service()
@@ -673,6 +682,9 @@ def test_non_development_environments_fail_closed_even_with_a_key(
     monkeypatch: pytest.MonkeyPatch, environment: str
 ) -> None:
     monkeypatch.setattr(app_settings, "APP_ENV", environment, raising=True)
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.AUTO, raising=True
+    )
     monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", TEST_API_KEY, raising=True)
 
     # A delayed, quota-limited development source must never be served to a
@@ -682,3 +694,138 @@ def test_non_development_environments_fail_closed_even_with_a_key(
 
     assert excinfo.value.status_code == 503
     assert excinfo.value.detail == "Economic calendar data source is not configured"
+
+
+# --- configured source selection (Step 46) ---------------------------------------------
+#
+# The economic calendar is MANDATORY for every Agent request, so the source a
+# deployment serves is an explicit selection that fails closed (503) instead of
+# degrading to a different source. These cases are the whole matrix
+# (source x environment); none of them touches the network.
+
+GENERIC_SOURCE_DETAIL = "Economic calendar data source is not configured"
+
+
+def test_auto_remains_the_committed_default() -> None:
+    # An existing .env (which carries no ECONOMIC_CALENDAR_SOURCE) must keep the
+    # historical behaviour, so the default is the environment-driven selection
+    # rather than a hard-coded source.
+    default = Settings.model_fields["ECONOMIC_CALENDAR_SOURCE"].default
+
+    assert default is EconomicCalendarSource.AUTO
+
+
+def test_development_with_an_explicit_placeholder_source_ignores_a_configured_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_settings, "APP_ENV", "development", raising=True)
+    monkeypatch.setattr(
+        app_settings,
+        "ECONOMIC_CALENDAR_SOURCE",
+        EconomicCalendarSource.DEVELOPMENT_FAKE,
+        raising=True,
+    )
+    monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", TEST_API_KEY, raising=True)
+
+    service = deps.get_economic_calendar_service()
+
+    # An explicit selection wins over the ambient key, so a developer can always
+    # get deterministic placeholder data without touching the key.
+    assert service.source == FakeEconomicCalendarProvider.source
+
+
+def test_development_with_an_explicit_quantgist_source_uses_the_free_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_settings, "APP_ENV", "development", raising=True)
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.QUANTGIST, raising=True
+    )
+    monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", TEST_API_KEY, raising=True)
+
+    service = deps.get_economic_calendar_service()
+
+    assert service.source == "quantgist-free-development"
+
+
+def test_development_with_an_explicit_quantgist_source_without_a_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(app_settings, "APP_ENV", "development", raising=True)
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.QUANTGIST, raising=True
+    )
+    monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", "", raising=True)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.dependencies"):
+        with pytest.raises(HTTPException) as excinfo:
+            deps.get_economic_calendar_service()
+
+    # Choosing a source whose configuration is missing is an error, never a
+    # silent fallback to another source.
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == GENERIC_SOURCE_DETAIL
+    # The operator gets the precise, value-free reason; the client never does.
+    assert "QUANTGIST_API_KEY is not configured" in caplog.text
+    assert TEST_API_KEY not in caplog.text
+
+
+def test_the_production_seam_fails_closed_until_a_vendor_is_registered(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Even in development: "production" names the seam a real vendor is
+    # registered behind, and until one exists selecting it must not quietly
+    # serve placeholder data.
+    monkeypatch.setattr(app_settings, "APP_ENV", "development", raising=True)
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.PRODUCTION, raising=True
+    )
+    monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", TEST_API_KEY, raising=True)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.dependencies"):
+        with pytest.raises(HTTPException) as excinfo:
+            deps.get_economic_calendar_service()
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == GENERIC_SOURCE_DETAIL
+    assert "no production economic-calendar provider is implemented" in caplog.text
+
+
+@pytest.mark.parametrize("environment", ["staging", "production", ""])
+@pytest.mark.parametrize(
+    ("source", "reason"),
+    [
+        (EconomicCalendarSource.AUTO, "no production economic-calendar source is configured"),
+        (EconomicCalendarSource.DEVELOPMENT_FAKE, "development-only"),
+        (EconomicCalendarSource.QUANTGIST, "development/test source only"),
+        (
+            EconomicCalendarSource.PRODUCTION,
+            "no production economic-calendar provider is implemented",
+        ),
+    ],
+)
+def test_no_calendar_source_is_served_outside_development(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    environment: str,
+    source: EconomicCalendarSource,
+    reason: str,
+) -> None:
+    monkeypatch.setattr(app_settings, "APP_ENV", environment, raising=True)
+    monkeypatch.setattr(app_settings, "ECONOMIC_CALENDAR_SOURCE", source, raising=True)
+    monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", TEST_API_KEY, raising=True)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.dependencies"):
+        with pytest.raises(HTTPException) as excinfo:
+            deps.get_economic_calendar_service()
+
+    # Every cell fails closed with the SAME client-facing detail, so a caller
+    # cannot probe the deployment's configuration; the precise reason is logged
+    # for the operator instead.
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == GENERIC_SOURCE_DETAIL
+    assert reason in caplog.text
+    # Secret hygiene: the configured key is present in every cell above and must
+    # never reach a log line or a response detail.
+    assert TEST_API_KEY not in caplog.text
+    assert TEST_API_KEY not in str(excinfo.value)

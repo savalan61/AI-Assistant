@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.core.dependencies as deps
 from app.api.economic_intelligence_router import router
-from app.core.config import settings as app_settings
+from app.core.config import EconomicCalendarSource, settings as app_settings
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.database import get_db
@@ -109,6 +109,9 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # Pin the calendar source selection: a developer's local .env may hold a real
     # QuantGist key, and these tests describe the deterministic fake's contract.
     monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", "", raising=True)
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.AUTO, raising=True
+    )
 
 
 @pytest.fixture()
@@ -428,6 +431,27 @@ def test_placeholder_calendar_fails_closed_outside_development(
 
     # No production calendar source exists yet, so the endpoint refuses rather
     # than returning fabricated events to a broker's customers.
+    assert status == 503
+    assert body == {"detail": "Economic calendar data source is not configured"}
+    # It failed before doing any work.
+    assert record == []
+
+
+def test_production_source_selection_fails_closed_until_a_vendor_exists(
+    intelligence_env, patched_positions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = patched_positions((XAUUSD,))
+    monkeypatch.setattr(app_settings, "APP_ENV", "production", raising=True)
+    # The production slot is the deliberate seam a real vendor is registered
+    # behind. Selecting it without one refuses instead of quietly serving the
+    # development source, so a production deployment can be configured
+    # explicitly and fail loudly.
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.PRODUCTION, raising=True
+    )
+
+    status, body = get_intelligence(intelligence_env, intelligence_env["customer_a_id"])
+
     assert status == 503
     assert body == {"detail": "Economic calendar data source is not configured"}
     # It failed before doing any work.

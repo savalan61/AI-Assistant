@@ -1,4 +1,5 @@
 import logging
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -9,6 +10,32 @@ logger = logging.getLogger(__name__)
 # The dotenv file Settings reads. One constant so the unknown-key warning below
 # inspects exactly the file pydantic-settings consumes.
 ENV_FILE = ".env"
+
+
+class EconomicCalendarSource(StrEnum):
+    """The configured economic-calendar source for this deployment.
+
+    The economic calendar is mandatory for every Agent request, so this is an
+    explicit selection that fails closed rather than degrading to another
+    source:
+
+    * AUTO - the environment decides (the historical behaviour): development
+      uses the QuantGist free tier when an API key is configured, otherwise the
+      deterministic fake; any other environment has no production source and
+      therefore refuses.
+    * DEVELOPMENT_FAKE - the deterministic placeholder events (development only).
+    * QUANTGIST - the QuantGist free tier, a delayed and quota-limited
+      development/test stand-in and never this project's commercial vendor
+      (development only).
+    * PRODUCTION - the production vendor slot. No production vendor is
+      implemented yet, so this names the seam a real one is registered behind;
+      until then selecting it fails closed instead of serving development data.
+    """
+
+    AUTO = "auto"
+    DEVELOPMENT_FAKE = "development_fake"
+    QUANTGIST = "quantgist"
+    PRODUCTION = "production"
 
 
 class Settings(BaseSettings):
@@ -36,6 +63,20 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.openai.com/v1"
     LLM_MODEL: str = ""
     LLM_TIMEOUT_SECONDS: float = 30.0
+
+    # Which economic-calendar source this deployment serves. The calendar is
+    # MANDATORY for every Agent request, so the source is an explicit choice
+    # that fails closed instead of degrading: "auto" (the default) keeps the
+    # environment-driven selection (development: the QuantGist free tier when a
+    # key is configured, otherwise the deterministic fake; any other
+    # environment: no production source is configured, so it refuses), while
+    # "development_fake"/"quantgist" name a development/test source explicitly
+    # and must be used inside development only. "production" is the deliberate
+    # production seam: no production vendor is implemented yet, so selecting it
+    # refuses (503) until one is registered in the composition root. No value
+    # ever falls back to a different source. See EconomicCalendarSource and
+    # get_economic_calendar_service.
+    ECONOMIC_CALENDAR_SOURCE: EconomicCalendarSource = EconomicCalendarSource.AUTO
 
     # Economic-calendar source (DEVELOPMENT/TEST ONLY). The QuantGist free tier
     # is a temporary stand-in for a real calendar source, never the project's

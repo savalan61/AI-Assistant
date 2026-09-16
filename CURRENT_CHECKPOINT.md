@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 45 — Economic Intelligence in the Agent Pipeline (this checkpoint)
+Step 46 — Explicit Economic-Calendar Source Configuration (this checkpoint; not committed)
++ Step 45 — Economic Intelligence in the Agent Pipeline
 + Step 44 — QuantGist Economic Calendar Source (development/test)
 + Step 43 — Tenant-Safe Login
 + Step 42 — One User Identity (`login`)
@@ -17,7 +18,8 @@ Step 45 — Economic Intelligence in the Agent Pipeline (this checkpoint)
 
 Status:
 
-Step 45: VERIFIED + COMMITTED (b9785cb — "feat(agent): compose economic intelligence into the agent prompt")
+Step 46: VERIFIED — implemented, deliberately NOT committed (working tree modified; no push)
+Step 45: VERIFIED + COMMITTED (b9785cb + its checkpoint-status commit 9ba0d95; local, not pushed)
 Step 44: VERIFIED + COMMITTED + PUSHED (638f972)
 Step 43: VERIFIED + COMMITTED + PUSHED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9)
 Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
@@ -25,13 +27,17 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
-Step 45 (economic intelligence in the agent pipeline) — the change set this
-checkpoint describes — is implemented, verified and committed by b9785cb
+Step 46 (explicit economic-calendar source configuration, with a deliberate
+production seam) — the change set this checkpoint describes — is implemented and
+verified but deliberately NOT committed, so the working tree is modified (see
+its section below and the working-tree note at the end of this block). The last
+commits are Step 45 (economic intelligence in the agent pipeline): b9785cb
 ("feat(agent): compose economic intelligence into the agent prompt"), which
-carries the implementation, the tests and the
-documentation updates (PROJECT_CONTEXT.md, knowledge.md and this document); it
-is NOT pushed, so origin/master stays at the Step 44 commit until it is. Before
-it, Step 44 (the QuantGist development/test economic-calendar source) was
+carries the implementation, the tests and the documentation updates
+(PROJECT_CONTEXT.md, knowledge.md and this document), and its checkpoint-status
+commit 9ba0d95, which records that hash here. Both are local: they are NOT
+pushed, so origin/master stays at the Step 44 commit until they are. Before
+them, Step 44 (the QuantGist development/test economic-calendar source) was
 committed by "feat(calendar): add QuantGist development/test source" (638f972,
 which carries the adapter, its tests, the wiring, the configuration and the
 documentation) and pushed. Step 43 is
@@ -56,6 +62,41 @@ user seed script), the Step 37 checkpoint ("feat(financial): harden numeric
 representation"), the Step 36 MT5 tenant-session commit, the Step 35 security
 hardening commit and b95eaa1 ("feat(ai): add broker llm routing and agent
 controls", Steps 29–33).
+
+Step 46 makes which economic-calendar source a deployment serves an explicit
+configuration value (`ECONOMIC_CALENDAR_SOURCE`). The calendar is mandatory for
+every agent request, so a source is never chosen implicitly and an unusable one
+fails closed (503) with the established generic detail instead of degrading:
+`auto` (the default, which preserves every existing deployment) is the
+historical environment-driven selection — in development the QuantGist free tier
+when an API key is configured, otherwise the deterministic fake, and anywhere
+else a refusal, because no production source is configured; `development_fake`
+and `quantgist` name a development/test source explicitly and are served inside
+development only; and `production` is the deliberate production seam a real
+vendor is registered behind at the single resolution point, refusing until one
+exists rather than quietly serving development data as production data. An
+explicitly selected source with missing configuration (for example `quantgist`
+without a key) is also a refusal, never a fallback. An invalid value is a
+startup configuration error that names the setting and never echoes the value,
+and the operator gets the precise, value-free reason in a log line while the
+client always receives the same generic detail. No production vendor was
+invented, the QuantGist adapter is untouched, and no retry, cache, background
+job, tool calling or new provider was added. No schema change and no migration.
+
+Step 46 verification: focused suites 274 passed (the new cases are the full
+source x environment matrix at the composition root, the production-seam and
+missing-configuration refusals, the value-free logging and secret hygiene, the
+invalid/valid source values at settings loading, and one API case per affected
+endpoint: GET /economic-intelligence/today and POST /agent both refuse in
+production); full suite 948 passed, 2 warnings (both pre-existing third-party
+deprecations); compileall over app and tests clean; pyright 0 errors / 0 warnings
+on config.py, dependencies.py and the three changed application-adjacent test
+files (test_agent_api.py keeps only its 14 pre-existing diagnostics, none at or
+after the added lines); git diff --check clean; and a read-only runtime probe
+exercised the whole 32-cell matrix (4 environments x 4 sources x key set/unset),
+confirming the table above, 27 value-free log lines and no API key in any log
+line. The QuantGist provider and alembic/ are untouched (git diff --stat shows no
+lines).
 
 Step 45 wires the existing economic intelligence into the agent, so a customer's
 question is answered with today's economic calendar in the same prompt. The agent
@@ -185,12 +226,13 @@ No database migration was needed — these values are not persisted.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 924 passed, 2 warnings (both pre-existing third-party
+pytest tests/ -q → 948 passed, 2 warnings (both pre-existing third-party
 deprecation warnings: the anyio BlockingPortal alias and the starlette
 testclient httpx notice); verified 2026-09-16 on this exact tree, after the
-Step 44 and Step 45 work. Step 44 rewrote the QuantGist cases against the
-verified live API and took the suite to 897; Step 45 added the agent/calendar
-composition (+27, 924 total). Step 40 took it to 799 and Step 39A removed the
+Step 44, Step 45 and Step 46 work. Step 44 rewrote the QuantGist cases against
+the verified live API and took the suite to 897; Step 45 added the agent/calendar
+composition (924); Step 46 added the source x environment matrix and the
+production-seam cases (948). Step 40 took it to 799 and Step 39A removed the
 former Pydantic class-config deprecation, which is why the warning count is 2
 rather than 3.
 
@@ -215,16 +257,21 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-CLEAN — the Step 45 change set (the agent/calendar composition, its tests and
-the documentation updates) is committed by the Step 45 checkpoint commit, so
-nothing from that change set is left modified, staged or uncommitted.
+MODIFIED — the Step 46 change set (explicit economic-calendar source
+configuration, the deliberate production seam, its tests and .env.example) is
+implemented and verified but deliberately NOT committed, so the working tree
+holds it until a commit is explicitly requested: app/core/config.py,
+app/core/dependencies.py, .env.example,
+tests/test_quantgist_economic_calendar.py, tests/test_config_settings.py,
+tests/test_economic_intelligence_api.py and tests/test_agent_api.py.
 
 The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is two commits ahead of it (b9785cb and this
-checkpoint-status commit), which are not pushed.
+638f972, and local HEAD is two commits ahead of it (b9785cb, the Step 45
+implementation, and 9ba0d95, its checkpoint-status commit), which are not
+pushed.
 
 ## Completed Stages
 
@@ -1056,6 +1103,54 @@ Status: VERIFIED + COMMITTED
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
 
+
+### Step 46 — Explicit Economic-Calendar Source Configuration (production seam)
+Status: VERIFIED — implemented, deliberately NOT committed (working tree modified; no push)
+
+Makes the economic-calendar source an explicit, validated configuration value.
+The calendar is MANDATORY for every agent request, so the source is never chosen
+implicitly and an unusable one fails closed instead of degrading. This step does
+NOT resolve Known Issues item 9: it makes "which source is this deployment
+serving?" answerable, and gives the eventual production vendor a single place to
+be registered, without inventing one.
+
+Includes:
+
+- app/core/config.py: EconomicCalendarSource (StrEnum: auto, development_fake,
+  quantgist, production) plus ECONOMIC_CALENDAR_SOURCE, defaulting to auto. An
+  invalid value is a startup configuration error rendered by the existing
+  sanitized loader (setting name only, never the value).
+- app/core/dependencies.py: get_economic_calendar_service resolves the configured
+  source and _calendar_provider_for is the single point where a source name
+  becomes a provider — the production seam. Behavior matrix (verified by tests
+  and by a read-only 32-cell runtime probe): auto keeps the historical selection
+  (development: QuantGist when QUANTGIST_API_KEY is configured, else the fake;
+  anywhere else: refuse); development_fake/quantgist are served inside
+  development only; production refuses everywhere because no production vendor is
+  implemented; an explicitly selected source with missing configuration refuses
+  as well. Every refusal answers the same generic 503 detail the endpoint has
+  always returned ("Economic calendar data source is not configured") and logs one
+  precise, value-free line naming the source, the environment and the reason, so
+  an operator can distinguish a misconfiguration from an outage.
+- .env.example: documents ECONOMIC_CALENDAR_SOURCE and its four values, and the
+  updated QuantGist section (the key only matters when the resolved source is
+  QuantGist; an empty key with source=quantgist refuses).
+- tests: the full source x environment matrix and the production-seam,
+  missing-key, logging and secret-hygiene cases in
+  tests/test_quantgist_economic_calendar.py; the invalid/valid source values in
+  tests/test_config_settings.py; one end-to-end refusal each in
+  tests/test_economic_intelligence_api.py and tests/test_agent_api.py (with the
+  source pinned in both files' autouse fixtures, so a developer's local .env
+  cannot change what they describe). Nothing touches the network.
+- verification: focused 274 passed; full suite 948 passed, 2 warnings (both
+  pre-existing third-party deprecations); compileall clean; pyright 0 errors / 0
+  warnings on the two changed application files and the changed test files except
+  test_agent_api.py's 14 pre-existing diagnostics (none at or after the added
+  lines); git diff --check clean.
+- unchanged: the QuantGist adapter, the Agent API contract, the scope guard,
+  usage limiter, egress policy, LLM router, run_mt5_call boundary, database
+  schema and migrations. No retry, caching, background job, tool calling or new
+  provider. The AI remains strictly READ-ONLY.
 
 ### Step 45 — Economic Intelligence in the Agent Pipeline (READ-ONLY)
 Status: VERIFIED + COMMITTED (b9785cb)
@@ -2065,6 +2160,13 @@ DELETE /users/{user_id} (super_admin only):
   its provenance marker travels into both the API responses and the agent
   prompt, so delayed or placeholder data cannot be presented as live market
   data.
+- Which calendar source a deployment serves is an explicit configuration value
+  (Step 46): ECONOMIC_CALENDAR_SOURCE (auto | development_fake | quantgist |
+  production, default auto) is resolved at the composition root, the
+  development/test sources are served inside development only, the production
+  slot refuses until a real vendor is registered at that single seam, and every
+  unusable selection answers the same generic 503 with the precise reason logged
+  server-side and no configuration value disclosed.
 - POST /agent exposes the agent over HTTP (authenticated; broker_id from the
   database User; no broker_id/user_id accepted in the body) and is read-only.
 - Agent guard chain exists and is enforced in this order: scope guard
@@ -2108,7 +2210,10 @@ DELETE /users/{user_id} (super_admin only):
 - Outbound LLM data is governed by an explicit, configurable
   OutboundDataPolicy resolved at the composition root; account identity is
   never sent regardless of policy.
-- The development economic calendar fails closed outside APP_ENV=development.
+- The development economic calendar fails closed outside APP_ENV=development,
+  and since Step 46 the selected source is explicit: no source is ever chosen
+  implicitly for a deployment, and no unusable selection degrades to another
+  source (it refuses with 503).
 - Money, price and volume fields are Decimal in every provider/domain contract
   and in portfolio aggregation (exact arithmetic), converted at the MT5 boundary
   with Decimal(str(...)); account margin_level and candle tick volume
@@ -2199,11 +2304,14 @@ This limitation must be reported rather than hidden.
    .pytest_cache/; the Pydantic class-based Config deprecation was resolved by
    Step 39A).
 9. Economic calendar data source is unresolved. Economic intelligence is wired
-   to a development/test source only: FakeEconomicCalendarProvider by default,
-   or the QuantGist free tier when QUANTGIST_API_KEY is configured (Step 44) —
-   delayed data with a small daily quota, explicitly NOT a commercial vendor.
-   There is NO production economic-calendar provider, and neither source's
-   responses may be presented as live financial data. MT5's Python
+   to a development/test source only — FakeEconomicCalendarProvider, or the
+   QuantGist free tier when QUANTGIST_API_KEY is configured (Step 44), delayed
+   data with a small daily quota, explicitly NOT a commercial vendor — and since
+   Step 46 which one a deployment serves is an explicit configuration value
+   (ECONOMIC_CALENDAR_SOURCE, default auto) whose production slot refuses until
+   a real vendor is registered at that seam. There is NO production
+   economic-calendar provider, and neither development source's responses may
+   be presented as live financial data. MT5's Python
    integration (MetaTrader5==5.0.6180) does not expose the MQL5 Economic
    Calendar API at all (verified by introspection), and the evaluated
    third-party free tiers either gate the calendar behind a paid plan or
@@ -2299,19 +2407,19 @@ Steps 12–44, the role-migration ordering fix, the development user seed and th
 trade-history field fix are complete, committed and pushed (origin/master is
 638f972, Step 44).
 
-Step 45 (economic intelligence in the agent pipeline) is implemented, verified
-and committed by the Step 45 checkpoint commit and its checkpoint-status commit,
-which are local: origin/master remains 638f972 until they are pushed.
+Step 45 (economic intelligence in the agent pipeline) is committed locally
+(b9785cb, the implementation, and 9ba0d95, its checkpoint-status commit) and not
+pushed. Step 46 (explicit economic-calendar source configuration) is implemented
+and verified but deliberately NOT committed, so the working tree holds its change
+set: app/core/config.py, app/core/dependencies.py, .env.example,
+tests/test_quantgist_economic_calendar.py, tests/test_config_settings.py,
+tests/test_economic_intelligence_api.py and tests/test_agent_api.py.
 
-The immediate next stage is Step 46 (already approved by the operator): explicit
-economic-calendar source configuration with a deliberate production seam. The
-calendar is MANDATORY for every agent request, so which source a deployment
-serves must be an explicit configuration value: a configured source is selected
-(development/test sources only inside development) and any environment without a
-usable production source fails closed with the existing clear 503 instead of
-degrading. Step 46 deliberately does NOT invent a production vendor, does not
-change the QuantGist adapter, and adds no retry, caching, background job, tool
-calling or new provider.
+The immediate next action is deliberately NOT fixed here: Step 46 landed the
+explicit source selection and the production seam, so the next stage should be
+chosen explicitly (the three largest candidates remain a real production
+economic-calendar vendor — which now has one obvious place to be registered — the
+real free LLM providers, and the observability foundation).
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:

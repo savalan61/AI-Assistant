@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.core.dependencies as deps
 from app.api.agent_router import router
-from app.core.config import settings as app_settings
+from app.core.config import EconomicCalendarSource, settings as app_settings
 from app.core.mt5_session import MT5SessionManager
 from app.core.security import create_access_token
 from app.db.base import Base
@@ -196,8 +196,12 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # Pin the calendar source selection: POST /agent now composes today's
     # economic context, and a developer's local .env may hold a real QuantGist
     # key. Empty means the deterministic placeholder is used, so these tests
-    # stay offline and reproducible.
+    # stay offline and reproducible; the source is pinned too, so a local
+    # ECONOMIC_CALENDAR_SOURCE cannot change what these tests describe.
     monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", "", raising=True)
+    monkeypatch.setattr(
+        app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.AUTO, raising=True
+    )
 
 
 @pytest.fixture()
@@ -889,6 +893,26 @@ def test_calendar_failure_maps_to_the_existing_503(
     assert status == 503
     assert body == {"detail": "Agent service temporarily unavailable"}
     assert records["llm"].call_count == 0
+
+
+def test_every_agent_request_requires_a_usable_calendar_source(
+    agent_env, patched_providers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No development/test calendar source may serve a broker's customers, so
+    # outside development the agent refuses before any MT5 read or LLM call:
+    # the calendar is mandatory on every request, never an optional extra.
+    records = patched_providers()
+    monkeypatch.setattr(app_settings, "APP_ENV", "production", raising=True)
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    assert status == 503
+    # The established calendar-source detail, exactly as
+    # GET /economic-intelligence/today answers in this state (no secret, no
+    # provider, no configuration value is disclosed).
+    assert body == {"detail": "Economic calendar data source is not configured"}
+    assert records["llm"].call_count == 0
+    assert records["account_threads"] == []
 
 
 def test_response_contract_is_unchanged_by_the_calendar_composition(agent_env, patched_providers) -> None:

@@ -628,6 +628,12 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     instant per request, a dedicated calendar block carrying impact, relevance
     and provenance, mandatory on every request, with the existing generic 503 as
     its failure path (Step 45)
+25. Explicit economic-calendar source selection: ECONOMIC_CALENDAR_SOURCE
+    (auto | development_fake | quantgist | production, default auto) resolved at
+    the composition root, development/test sources served inside development
+    only, a production slot that refuses until a real vendor is registered, and
+    the same generic 503 for every unusable selection instead of degrading to
+    another source (Step 46)
 
 The repository remains strictly read-only with respect to trading.
 14. Current Development Stage

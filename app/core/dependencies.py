@@ -1,10 +1,12 @@
+import logging
 import threading
+from typing import NoReturn
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.core.config import EconomicCalendarSource, settings
 from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
@@ -121,36 +123,107 @@ def resolve_mt5_account_credentials(user: User, broker: Broker | None) -> MT5Acc
 # there is no process-wide provider or session to guard: the provider is
 # stateless and cheap to construct per request.
 #
-# Source selection (development/test only): when a QuantGist API key is
-# configured, the QuantGist free tier is used - explicitly a temporary
-# development source (delayed data, small quota), never the project's commercial
-# vendor. Without a key the deterministic fake stays selected, so development and
-# the test suite keep their existing behaviour and provenance marker. Either way
-# the provider's provenance marker is carried through every response so the data
-# can never be mistaken for live financial data.
+# The calendar is MANDATORY for every Agent request, so the source this
+# deployment serves is an explicit configuration value (ECONOMIC_CALENDAR_SOURCE)
+# and an unusable one fails closed (503) instead of silently degrading to another
+# source:
 #
-# Fail-closed guard: neither source may be served to a broker's customers.
-# Outside development there is still no production calendar source, so the
-# dependency refuses (503) instead of quietly returning placeholder data.
+#   * "auto" (the default) keeps the historical environment-driven selection: in
+#     development the QuantGist free tier when an API key is configured,
+#     otherwise the deterministic fake; anywhere else there is no production
+#     source configured, so it refuses.
+#   * "development_fake" and "quantgist" name development/test sources
+#     explicitly and are served inside development only: the fake is placeholder
+#     data and QuantGist is a delayed, quota-limited stand-in, so neither may be
+#     presented to a broker's customers.
+#   * "production" is the deliberate production seam. No production vendor is
+#     implemented (see CURRENT_CHECKPOINT.md known issue 9): a production
+#     provider is registered in the single branch below when one is chosen, and
+#     until then selecting it fails closed rather than serving development data.
+#
+# Either development source carries its own provenance marker through every
+# response (and into the agent prompt), so its data can never be mistaken for
+# live financial data.
 _CALENDAR_PLACEHOLDER_ALLOWED_ENVS = frozenset({"development"})
 
+# One generic client-facing detail for every unusable-source case: which setting
+# or environment caused it stays server-side, like every other configuration
+# failure in this project.
+_CALENDAR_SOURCE_UNAVAILABLE_DETAIL = "Economic calendar data source is not configured"
 
-def get_economic_calendar_service() -> EconomicCalendarService:
-    if settings.APP_ENV not in _CALENDAR_PLACEHOLDER_ALLOWED_ENVS:
-        raise HTTPException(
-            status_code=503,
-            detail="Economic calendar data source is not configured",
-        )
-    provider: EconomicCalendarProvider
-    if settings.QUANTGIST_API_KEY.strip():
-        provider = QuantGistEconomicCalendarProvider(
+_calendar_logger = logging.getLogger(__name__)
+
+
+def _calendar_source_unavailable(source: str, reason: str) -> NoReturn:
+    """Refuse to serve calendar data, naming the reason to the operator only.
+
+    The precise, value-free reason is logged, because a misconfigured source
+    would otherwise be indistinguishable from an outage; the client keeps
+    getting the same generic 503 the endpoint has always returned.
+    """
+    _calendar_logger.warning(
+        "Economic calendar source %r is not usable in APP_ENV %r (%s); "
+        "refusing to serve calendar data",
+        source,
+        settings.APP_ENV,
+        reason,
+    )
+    raise HTTPException(status_code=503, detail=_CALENDAR_SOURCE_UNAVAILABLE_DETAIL)
+
+
+def _calendar_provider_for(source: EconomicCalendarSource) -> EconomicCalendarProvider:
+    """Build the provider for one source — the one place a source becomes a provider.
+
+    The PRODUCTION branch is the deliberate seam: a real production calendar
+    provider is registered there when the operator chooses one. Until then the
+    branch refuses, so no deployment can accidentally serve development data as
+    production data.
+    """
+    if source == EconomicCalendarSource.DEVELOPMENT_FAKE:
+        return FakeEconomicCalendarProvider()
+    if source == EconomicCalendarSource.QUANTGIST:
+        return QuantGistEconomicCalendarProvider(
             api_key=settings.QUANTGIST_API_KEY,
             base_url=settings.QUANTGIST_BASE_URL,
             timeout_seconds=settings.QUANTGIST_TIMEOUT_SECONDS,
         )
-    else:
-        provider = FakeEconomicCalendarProvider()
-    return EconomicCalendarService(provider)
+    return _calendar_source_unavailable(
+        "production", "no production economic-calendar provider is implemented"
+    )
+
+
+def get_economic_calendar_service() -> EconomicCalendarService:
+    """Resolve the configured calendar source for this deployment.
+
+    Selection is explicit and fails closed: an unusable source raises the
+    established generic 503 rather than falling back to another source, because
+    the calendar is mandatory for every Agent request.
+    """
+    in_development = settings.APP_ENV in _CALENDAR_PLACEHOLDER_ALLOWED_ENVS
+    source = settings.ECONOMIC_CALENDAR_SOURCE
+
+    if source == EconomicCalendarSource.AUTO:
+        if not in_development:
+            _calendar_source_unavailable(
+                "auto", "no production economic-calendar source is configured"
+            )
+        source = (
+            EconomicCalendarSource.QUANTGIST
+            if settings.QUANTGIST_API_KEY.strip()
+            else EconomicCalendarSource.DEVELOPMENT_FAKE
+        )
+
+    if source == EconomicCalendarSource.DEVELOPMENT_FAKE and not in_development:
+        _calendar_source_unavailable(
+            "development_fake", "the deterministic placeholder is development-only"
+        )
+    if source == EconomicCalendarSource.QUANTGIST:
+        if not in_development:
+            _calendar_source_unavailable("quantgist", "development/test source only")
+        if not settings.QUANTGIST_API_KEY.strip():
+            _calendar_source_unavailable("quantgist", "QUANTGIST_API_KEY is not configured")
+
+    return EconomicCalendarService(_calendar_provider_for(source))
 
 
 # Agent LLM wiring. The production seam is the broker-aware router: a broker

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 import app.core.config as config_module
-from app.core.config import ENV_FILE, Settings, load_settings, settings
+from app.core.config import ENV_FILE, EconomicCalendarSource, Settings, load_settings, settings
 
 # Obvious stand-in for "a secret someone pasted into the wrong env key".
 FAKE_SECRET = "not-a-real-secret-9c1f-a7b2"
@@ -112,6 +112,37 @@ def test_known_settings_are_still_validated_strictly(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="AGENT_MAX_MESSAGE_LENGTH"):
         load_settings(env_file=path)
+
+
+# --- the economic-calendar source is validated strictly -----------------------
+
+
+def test_invalid_economic_calendar_source_fails_closed_without_echoing_the_value(
+    tmp_path: Path,
+) -> None:
+    """An unknown calendar source is a configuration error, never a silent default.
+
+    The calendar is mandatory for every Agent request, so a typo in this setting
+    must surface as a startup failure naming the setting rather than as a
+    deployment that serves a source nobody chose.
+    """
+    path = _env_file(tmp_path, f"ECONOMIC_CALENDAR_SOURCE={FAKE_SECRET}\n")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        load_settings(env_file=path)
+
+    message = str(excinfo.value)
+    assert "ECONOMIC_CALENDAR_SOURCE" in message
+    assert FAKE_SECRET not in message
+
+
+@pytest.mark.parametrize("source", ["auto", "development_fake", "quantgist", "production"])
+def test_every_documented_economic_calendar_source_is_accepted(tmp_path: Path, source: str) -> None:
+    path = _env_file(tmp_path, f"ECONOMIC_CALENDAR_SOURCE={source}\n")
+
+    loaded = load_settings(env_file=path)
+
+    assert loaded.ECONOMIC_CALENDAR_SOURCE is EconomicCalendarSource(source)
 
 
 # --- the ordinary paths keep working ------------------------------------------
