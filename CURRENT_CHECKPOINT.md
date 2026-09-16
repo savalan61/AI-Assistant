@@ -19,7 +19,7 @@ Step 47 — News & Fundamental Intelligence (this checkpoint)
 
 Status:
 
-Step 47: VERIFIED (implementation, tests, .env.example and documentation; committed by the Step 47 commit, whose hash the following checkpoint-status commit records here)
+Step 47: VERIFIED + COMMITTED (c44953d — "feat(fundamental): add news and fundamental intelligence" + its checkpoint-status commit; local, not pushed)
 Step 46: VERIFIED + COMMITTED (ebbb86b — "feat(calendar): add explicit source configuration")
 Step 45: VERIFIED + COMMITTED (b9785cb + its checkpoint-status commit 9ba0d95; local, not pushed)
 Step 44: VERIFIED + COMMITTED + PUSHED (638f972)
@@ -35,10 +35,10 @@ deterministic news relevance, the FundamentalIntelligenceService context, the
 per-position fundamental exposure, the JWT-protected
 GET /fundamental-intelligence/today endpoint and the fundamental block in the
 agent prompt) — the change set this checkpoint describes — is implemented,
-verified and committed by the Step 47 commit ("feat(fundamental): add news and
-fundamental intelligence"), which carries the implementation, the tests,
-.env.example and the documentation updates (PROJECT_CONTEXT.md, knowledge.md and
-this document); the follow-up checkpoint-status commit records that hash here.
+verified and committed by c44953d ("feat(fundamental): add news and fundamental
+intelligence"), which carries the implementation, the tests, .env.example and the
+documentation updates (PROJECT_CONTEXT.md, knowledge.md and this document); this
+checkpoint-status commit records that hash here.
 Before it, Step 46 (explicit economic-calendar source configuration, with a deliberate
 production seam) — the change set the previous checkpoint describes — is implemented,
 verified and committed by ebbb86b ("feat(calendar): add explicit source
@@ -1222,8 +1222,7 @@ Status: VERIFIED + COMMITTED
 
 
 ### Step 47 — News & Fundamental Intelligence (READ-ONLY)
-Status: VERIFIED + COMMITTED (the Step 47 commit; its hash is recorded by the
-follow-up checkpoint-status commit)
+Status: VERIFIED + COMMITTED (c44953d)
 
 Adds the first fundamental-intelligence capability as a real vertical slice:
 relevant news beside the mandatory calendar, deterministic relevance for the
