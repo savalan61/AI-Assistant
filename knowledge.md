@@ -237,8 +237,10 @@ get_current_user() in app/core/dependencies.py resolves a Bearer JWT to the
 database-backed active User
 get_current_broker_manager() (super_admin or admin) and
 get_current_super_admin() add database-backed role authorization
-All MT5-touching endpoints (market-data, account-info, positions) and
-POST /users require authentication
+Every endpoint except POST /auth/login and GET /health requires authentication:
+the MT5 read surface (market-data, account-info, positions, trade-history), the
+AI surface (POST /agent, economic-intelligence/today, portfolio-intelligence),
+the broker LLM configuration endpoints, and all user-management endpoints
 
 Login is tenant-safe (Step 43). Because `login` is the MT5 account/login
 number and is unique only per broker, two brokers may legitimately share one
@@ -467,15 +469,43 @@ Do not modify MT5 lifecycle or blocking behavior during unrelated tasks.
 
 11. Current API
 
-Current read-only, JWT-protected endpoints:
+CURRENT_CHECKPOINT.md is authoritative for exact contracts and is the
+maintained record; the list below is kept current for orientation. Every
+endpoint except the two unauthenticated ones requires a Bearer JWT, and a
+role-gated endpoint reads the role from the database User row, never from the
+token.
+
+Unauthenticated:
 
 POST /auth/login  { "broker": <broker code>, "login": <login>, "password": <app password> }
+GET /health (infrastructure liveness probe; does not reflect MT5 readiness)
+
+Any authenticated user:
+
 GET /market-data/{symbol}
 GET /account-info
 GET /positions
 GET /trade-history?from=<UTC ISO>&to=<UTC ISO>
-POST /users (Broker Admin only)
-GET /health (unauthenticated infrastructure probe; does not reflect MT5 readiness)
+POST /agent
+GET /economic-intelligence/today
+GET /portfolio-intelligence
+
+Broker manager (admin or super_admin):
+
+POST /users (optional explicit role; "super_admin" is refused for every caller)
+GET /users (role-scoped visibility: super_admin sees admins and customers, admin sees customers)
+PUT /users/{user_id}/mt5-credentials
+GET /users/{user_id}/mt5-credentials (safe metadata only)
+
+super_admin only:
+
+POST /users/admins
+GET /users/{user_id}
+PATCH /users/{user_id}
+DELETE /users/{user_id}
+GET /broker/llm-config
+PUT /broker/llm-config
+POST /broker/llm-config/test
 
 Current HTTP layer is responsible for:
 
@@ -485,14 +515,21 @@ calling the service
 converting service/provider failures into HTTP responses
 returning the HTTP/Pydantic response schema
 
-Error mapping for the MT5 endpoints:
+Error mapping:
 
-401 unauthenticated/invalid token
-404 market data unavailable for the requested symbol (market-data only)
-409 duplicate user (POST /users)
-422 missing/malformed query parameters (trade-history from/to)
 400 non-UTC-aware window boundary or from >= to (trade-history)
-503 MT5 infrastructure/availability failure
+401 unauthenticated/invalid/expired token; every login rejection
+403 authenticated but insufficient role (manager- and super_admin-only routes)
+404 market data unavailable for the requested symbol; unknown or cross-broker
+    user id; no LLM configuration set for the broker
+409 duplicate user inside the tenant (login/email/phone); the broker's only
+    super_admin protected from demotion or deletion; LLM configuration modified
+    concurrently or disabled
+422 schema/validation failure (missing or malformed input, extra fields
+    refused, out-of-range windows); agent request outside financial scope; LLM
+    endpoint not permitted; super_admin role requested
+429 agent daily quota exhausted; login throttle tripped
+503 MT5, provider, encryption-key or LLM-credential unavailability
 
 GET /positions returns {"positions": [...]} and GET /trade-history returns
 {"trades": [...]} for a required UTC-aware window; an empty result is a
@@ -512,9 +549,9 @@ Current test directory:
 
 tests/
 
-The suite currently has 200 passing tests (verified 2026-09-14 with
-pytest tests/ -q; the 3 remaining warnings are pre-existing third-party
-deprecation warnings).
+The suite currently has 827 passing tests (verified 2026-09-16 with pytest -q;
+the 2 remaining warnings are pre-existing third-party deprecation warnings: the
+anyio BlockingPortal alias and the starlette testclient httpx notice).
 
 A root-level:
 
@@ -527,6 +564,8 @@ Current Fake Providers:
 app/providers/fake_market_data.py
 app/providers/fake_position.py
 app/providers/fake_trade_history.py
+app/providers/fake_economic_calendar.py
+app/providers/fake_llm.py
 
 Note: the Fake Providers are used to test service/API behavior without MT5;
 authentication endpoints are tested against a SQLite/AIOSQLite-backed
@@ -542,7 +581,8 @@ credentials
 environment-specific configuration
 13. Current Project Status
 
-Completed:
+Completed — this ledger is frozen at item 14; CURRENT_CHECKPOINT.md carries the
+authoritative and complete stage history:
 
 1. Provider contract
 2. MT5 provider
@@ -553,14 +593,34 @@ Completed:
 7. MarketDataService unit tests
 8. MT5 lifecycle (lazy process-wide singleton, thread-safe init, failed init
    not cached, FastAPI lifespan startup/shutdown, graceful shutdown)
-9. JWT authentication (hashing, tokens, tenant-safe login endpoint,
-   get_current_user, broker-admin authorization)
-10. User roles (broker_admin/customer) and POST /users customer creation
+9. JWT authentication (hashing, tokens, login endpoint, get_current_user,
+   broker-admin authorization)
+10. User roles (broker_admin/customer at the time; the role model became
+    super_admin / admin / customer in Step 21A) and POST /users customer creation
 11. Read-only MT5 account information (contract, provider, service, API)
 12. Read-only MT5 open positions (contract, provider, service, API)
 13. Consolidated MT5 blocking boundary (app/core/blocking.py, run_mt5_call)
     used by market-data, account-info, and positions
 14. Read-only MT5 trade history (contract, provider, service, API)
+
+Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
+"Completed Stages" for the full record):
+
+15. Tenant-scoped user management: role-scoped GET /users listing, super_admin
+    user CRUD, optional-role POST /users and admin creation
+16. Economic intelligence, portfolio intelligence and financial context
+    (Steps 23–25, READ-ONLY)
+17. Read-only AI agent: agent boundary, LLM provider abstraction, real adapter,
+    DI wiring, scope guard and per-user daily limit (Steps 26–31)
+18. Broker LLM configuration with encrypted credentials, the LLM router and the
+    shared free-pool boundary (Steps 32–33)
+19. Security and agent hardening: SSRF policy, required exp/sub, broker
+    suspension enforcement, login throttle, prompt/egress limits (Step 35)
+20. MT5 tenant-scoped sessions (Step 36); Decimal money end to end (Step 37);
+    per-user provisioned MT5 investor credentials (Steps 38–39)
+21. One user identity: the single `login` column (Step 42)
+22. Tenant-safe login: mandatory broker code, broker-scoped lookup,
+    tenant-scoped throttle key, uniform failures and timing equalisation (Step 43)
 
 The repository remains strictly read-only with respect to trading.
 14. Current Development Stage
@@ -765,13 +825,19 @@ Do not use broad exception handling without a clear reason.
 
 21. AI Coding Agent Workflow
 
+AGENTS.md defines the mandatory reading order (AGENTS.md, PROJECT_CONTEXT.md,
+CURRENT_CHECKPOINT.md) and takes precedence over this document; knowledge.md is
+background, not a required first step.
+
 When an AI coding agent receives a task:
 
-1. Read knowledge.md
+1. Read the files AGENTS.md requires
         ↓
 2. Inspect the actual repository
         ↓
-3. Compare repository state with knowledge.md
+3. Compare the repository state with the documentation (CURRENT_CHECKPOINT.md
+   is authoritative for current state; this document's frozen sections are
+   history)
         ↓
 4. Identify the smallest required change
         ↓
@@ -890,13 +956,11 @@ The goal is to create a system that can grow safely from a working MVP into a re
 
 26. Known Cleanup Item
 
-Pytest generated:
+Pytest generates .pytest_cache/ in the project root.
 
-.pytest_cache/
-
-This is currently not ignored by .gitignore.
-
-This should be addressed during a future cleanup task.
+The root .gitignore still has no entry for it, but pytest also writes
+.pytest_cache/.gitignore containing "*", so the cache can never be committed by
+accident: this is a cosmetic cleanup, not a real hygiene risk.
 
 Do not mix this cleanup into unrelated feature work unless explicitly requested.
 
