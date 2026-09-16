@@ -38,6 +38,29 @@ class EconomicCalendarSource(StrEnum):
     PRODUCTION = "production"
 
 
+class NewsSource(StrEnum):
+    """The configured news source for this deployment.
+
+    News is fundamental context for the Agent, so its source is explicit and
+    fails closed rather than degrading:
+
+    * AUTO - the environment decides: development uses the deterministic news
+      fake; any other environment has NO news source configured, which the
+      fundamental context reports explicitly as unavailable (never as "no news").
+    * DEVELOPMENT_FAKE - the deterministic placeholder news items (development
+      only).
+    * PRODUCTION - the production vendor slot. No production news vendor is
+      implemented, so selecting this names the seam a real one is registered
+      behind and refuses (503) until then, instead of pretending no news exists.
+
+    No value ever falls back to a different source.
+    """
+
+    AUTO = "auto"
+    DEVELOPMENT_FAKE = "development_fake"
+    PRODUCTION = "production"
+
+
 class Settings(BaseSettings):
     # Reads from .env file; no secrets are hard-coded.
     APP_NAME: str = "AI Financial Assistant"
@@ -89,6 +112,19 @@ class Settings(BaseSettings):
     QUANTGIST_API_KEY: str = ""
     QUANTGIST_BASE_URL: str = "https://api.quantgist.com/v1"
     QUANTGIST_TIMEOUT_SECONDS: float = 15.0
+
+    # Which news source this deployment serves (see NewsSource). "auto" keeps the
+    # environment-driven selection: the deterministic fake in development, and no
+    # news source anywhere else - which the fundamental context reports as
+    # explicitly unavailable rather than as "no news", so an unconfigured feed
+    # can never be mistaken for an absence of events. An explicit
+    # "development_fake" outside development, or "production" before a real
+    # vendor is registered, refuses (503) instead of falling back.
+    NEWS_SOURCE: NewsSource = NewsSource.AUTO
+    # Hard cap on news items retrieved and rendered per request. The news service
+    # validates an item and truncates the list deterministically to this cap, so
+    # one request can never pull an unbounded amount of outbound context.
+    NEWS_MAX_ITEMS: int = 20
 
     # Maximum Agent requests per authenticated user per UTC day. Configurable
     # so deployments can tune it; checked in-process before any MT5 read or

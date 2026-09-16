@@ -86,6 +86,11 @@ Current implemented provider contracts (not database models):
   vendor is registered; neither development source is a production source, and
   see CURRENT_CHECKPOINT.md Known Issues item 9)
 - the vendor-neutral LLM provider contract (app/providers/llm.py)
+- NewsProvider (app/providers/news.py; the wired implementation is the
+  deterministic development/test fake FakeNewsProvider — no network, explicit
+  placeholder provenance — selected explicitly through NEWS_SOURCE (Step 47),
+  whose production slot refuses until a real vendor is registered; see
+  CURRENT_CHECKPOINT.md Known Issues item 15)
 
 Future/domain entities planned:
 
@@ -282,8 +287,10 @@ Current JWT-protected, read-only endpoints:
 - GET /users → role-based, tenant-scoped user listing
 - GET/PATCH/DELETE /users/{user_id} → super_admin-only single-user read, partial
   update and delete inside the caller's broker
-- POST /agent, GET /economic-intelligence/today, GET /portfolio-intelligence,
-  GET/PUT /broker-llm-config → the read-only AI surface and broker LLM settings
+- POST /agent, GET /economic-intelligence/today,
+  GET /fundamental-intelligence/today?symbol=<optional instrument>,
+  GET /portfolio-intelligence, GET/PUT /broker-llm-config → the read-only AI
+  surface and broker LLM settings
 - PUT /users/{user_id}/mt5-credentials → provision a user's MT5 investor
   (read-only) credential; admin: customers only, super_admin: any user in its
   broker. Write-only password, encrypted at rest, never returned.
@@ -355,15 +362,23 @@ Already implemented today:
   receives today's economic calendar alongside the financial context and asks
   the model once; the calendar is mandatory, so a calendar-source failure is the
   existing generic 503 rather than a degraded answer)
+- fundamental intelligence (Step 47): a vendor-neutral news source
+  (deterministic development/test feed; no production vendor), deterministic
+  news relevance built on the existing calendar classifier, today's fundamental
+  context combining the mandatory calendar with relevant news and each open
+  position's factual exposure (explicit UNKNOWN when it cannot be established),
+  a JWT-protected GET /fundamental-intelligence/today endpoint, and that same
+  context composed into every agent prompt
 
 Eventually the system may support:
 
 - P&L analysis
 - technical analysis
-- fundamental analysis
-- news
+- deeper fundamental analysis (reports, historical comparison)
 - economic calendar data beyond the development/test source (no production
   calendar provider exists yet; CURRENT_CHECKPOINT.md Known Issues item 9)
+- real news beyond the deterministic development/test feed (no production news
+  vendor is integrated; CURRENT_CHECKPOINT.md Known Issues item 15)
 - daily reports
 - natural-language interaction over additional channels (web/mobile/Telegram/WhatsApp)
 

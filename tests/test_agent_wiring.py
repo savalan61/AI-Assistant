@@ -15,7 +15,7 @@ import pytest
 from fastapi import HTTPException
 
 import app.core.dependencies as deps
-from app.core.config import settings
+from app.core.config import NewsSource, settings
 from app.core.mt5_session import MT5AccountCredentials
 from app.db.models import User, UserRole
 from app.providers.fake_llm import FakeLLMProvider
@@ -26,6 +26,7 @@ from app.providers.openai_compatible_llm import OpenAICompatibleLLMProvider
 from app.services.agent import AgentService, OutboundDataPolicy
 from app.services.broker_llm_config import BrokerLLMConfigurationError
 from app.services.economic_intelligence import EconomicIntelligenceService
+from app.services.fundamental_intelligence import FundamentalIntelligenceService
 
 
 # The "cipher" value is a test-only marker; it is never a real secret.
@@ -279,6 +280,28 @@ def test_agent_service_is_built_with_the_economic_intelligence_service(
     # service, so today's calendar reaches the prompt through the same
     # composition path GET /economic-intelligence/today already uses.
     assert isinstance(service._economic, EconomicIntelligenceService)
+
+
+def test_agent_service_is_built_with_the_fundamental_intelligence_service(
+    monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
+) -> None:
+    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+        return None
+
+    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
+    # Pin the news source the same way the calendar source is pinned elsewhere:
+    # the deterministic development feed, never a local machine's selection.
+    monkeypatch.setattr(settings, "APP_ENV", "development", raising=True)
+    monkeypatch.setattr(settings, "NEWS_SOURCE", NewsSource.AUTO, raising=True)
+
+    service = asyncio.run(deps.get_agent_service(make_user(), object()))
+
+    # Step 47: the agent receives the fundamental-intelligence service, which
+    # composes the SAME economic context the calendar step produces with news
+    # and position exposure. It adds no calendar read and no MT5 read of its own.
+    assert isinstance(service._fundamental, FundamentalIntelligenceService)
+    assert service._fundamental.news_source == "fake-development-placeholder"
 
 
 def test_openai_adapter_is_a_provider_the_pool_accepts() -> None:

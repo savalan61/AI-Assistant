@@ -4,7 +4,7 @@ This is the agent layer's job: turn the user request plus the read-only
 financial context into plain text. The provider therefore never needs to know
 about FinancialContext, and this module never knows about any provider.
 
-Five deliberate restrictions on what is sent:
+Six deliberate restrictions on what is sent:
 
 * only facts already present in the context are rendered — nothing is inferred
   here, and no forecast, recommendation or trading suggestion is composed;
@@ -16,6 +16,14 @@ Five deliberate restrictions on what is sent:
   financial-data switches below — the three switches still govern the customer
   financial data they always did. Per-position relevance reasons stay in the
   contract and are deliberately not rendered, keeping the block bounded;
+* fundamental intelligence (Step 47) is rendered as a second public-data block
+  from the existing FundamentalContext: relevant news (publication time,
+  publisher, title and a bounded excerpt) with its discrete relevance and the
+  source's provenance, plus each open position's factual exposure status. The
+  block is labelled as source facts so the model can see where material ends and
+  its own interpretation begins, an unavailable news source is stated as
+  unavailable rather than as "no news", and UNKNOWN exposure is rendered as
+  UNKNOWN (missing information is never presented as an absence of risk);
 * account identity is omitted (login, holder name, server, account number).
   The model needs the numbers, not the identifiers, so unnecessary personal
   data is not shipped to an external service. This is structural, not a switch;
@@ -37,6 +45,7 @@ from app.providers.trade_history import TradeHistoryEntry
 from app.services.agent.egress import OutboundDataPolicy
 from app.services.economic_intelligence import EconomicIntelligenceContext
 from app.services.financial_context import FinancialContext
+from app.services.fundamental_intelligence import FundamentalContext
 from app.services.portfolio_intelligence import SymbolExposure
 
 # System-side framing. Read-only and conservative by construction: the model is
@@ -64,6 +73,21 @@ _NO_EVENTS = "- none (no economic events are published for today)"
 _ECONOMIC_OMITTED_NOTE = (
     "Economic calendar: omitted because the financial context exceeded the prompt size limit."
 )
+
+# Fundamental block: an empty feed, no holdings, and its size-reduction note.
+# "No items were published by this source" is a statement about the source, not
+# a claim that nothing happened; an unavailable source is rendered separately.
+_NO_NEWS = "- none (this source published no news items for today)"
+_NO_EXPOSURE = "- none (no open positions)"
+_FUNDAMENTAL_OMITTED_NOTE = (
+    "Fundamental intelligence: omitted because the financial context exceeded the prompt size limit."
+)
+
+# Bound on the news excerpt rendered into the prompt. The provider boundary
+# accepts a longer excerpt (for the API response); the prompt keeps only a
+# bounded prefix, with an explicit marker so the truncation is visible.
+_PROMPT_SUMMARY_CHARS = 200
+_TRUNCATED = "..."
 
 # Delimiters around the untrusted request. Escaped inside the request itself so
 # the user text cannot terminate the block and be read as framing.
@@ -177,6 +201,64 @@ def _economic_block(economic: EconomicIntelligenceContext) -> list[str]:
     return lines
 
 
+def _bounded_summary(summary: str) -> str:
+    """Bounded excerpt for the prompt (an explicit marker shows the truncation)."""
+    if len(summary) <= _PROMPT_SUMMARY_CHARS:
+        return summary
+    return summary[:_PROMPT_SUMMARY_CHARS] + _TRUNCATED
+
+
+def _fundamental_block(fundamental: FundamentalContext) -> list[str]:
+    """Render today's fundamental context: labelled source facts, no analysis.
+
+    Source facts are rendered and explicitly labelled as such, so the model can
+    tell published material from its own interpretation. Provenance travels with
+    both sources, an unavailable news source is stated as unavailable (never as
+    "no news"), and a position exposure that could not be established stays
+    UNKNOWN rather than reading as "no risk".
+    """
+    scope = (
+        f"for {fundamental.focus_symbol}"
+        if fundamental.focus_symbol is not None
+        else "for the instruments in play"
+    )
+    instruments = ", ".join(fundamental.instruments) if fundamental.instruments else "none"
+    news_source = fundamental.news_data_source if fundamental.news_available else "unavailable"
+    lines = [
+        f"Fundamental intelligence {scope} (instruments in play: {instruments}; "
+        f"calendar source: {fundamental.calendar.data_source}; news source: {news_source}; "
+        f"UTC window {fundamental.window_from.isoformat()} .. "
+        f"{fundamental.window_to.isoformat()}):",
+        "News (published source facts, not analysis; relevance is a discrete relatedness level):",
+    ]
+    if not fundamental.news_available:
+        lines.append(f"- news unavailable ({fundamental.news_unavailable_reason})")
+    elif not fundamental.news:
+        lines.append(_NO_NEWS)
+    else:
+        for entry in fundamental.news:
+            matched = (
+                ", ".join(entry.matched_instruments)
+                if entry.matched_instruments
+                else "no instrument in play"
+            )
+            lines.append(
+                f"- {entry.item.published_at.isoformat()} relevance {entry.relevance.value} for "
+                f"{matched} | {entry.item.publisher} | {entry.item.title} | "
+                f"{_bounded_summary(entry.item.summary)}"
+            )
+    lines.append("Position fundamental exposure (factual status, not advice):")
+    if not fundamental.positions:
+        lines.append(_NO_EXPOSURE)
+    else:
+        for exposure in fundamental.positions:
+            lines.append(
+                f"- {exposure.symbol} {exposure.type.value} {exposure.volume:.2f}: "
+                f"{exposure.status.value} {exposure.relevance.value} - {exposure.reason}"
+            )
+    return lines
+
+
 def _render_content(
     request: str,
     context: FinancialContext,
@@ -185,6 +267,8 @@ def _render_content(
     include_trades: bool,
     economic: EconomicIntelligenceContext | None = None,
     economic_omitted: bool = False,
+    fundamental: FundamentalContext | None = None,
+    fundamental_omitted: bool = False,
 ) -> str:
     """Render the prompt body deterministically for the given inclusion mode."""
     portfolio = context.portfolio_intelligence
@@ -253,6 +337,15 @@ def _render_content(
         # Only claimed when a calendar block was actually part of the prompt.
         lines.append("")
         lines.append(_ECONOMIC_OMITTED_NOTE)
+
+    # Fundamental intelligence is rendered after the calendar so the position
+    # exposure lines can refer to the events listed above it.
+    if fundamental is not None:
+        lines.append("")
+        lines.extend(_fundamental_block(fundamental))
+    elif fundamental_omitted:
+        lines.append("")
+        lines.append(_FUNDAMENTAL_OMITTED_NOTE)
     return "\n".join(lines)
 
 
@@ -261,14 +354,16 @@ def build_prompt(
     context: FinancialContext,
     policy: OutboundDataPolicy | None = None,
     economic: EconomicIntelligenceContext | None = None,
+    fundamental: FundamentalContext | None = None,
 ) -> LLMPrompt:
-    """Render ``request``, ``context`` and today's calendar into one prompt.
+    """Render ``request``, ``context``, today's calendar and the fundamental
+    context into one prompt.
 
-    Pure and deterministic: the same request, context, policy and economic
-    context always produce the same prompt, so a provider sees a stable,
-    reproducible input. ``economic`` is optional: without it (a deployment with
-    no calendar capability, or an existing caller) the prompt is exactly what it
-    was before the economic block existed.
+    Pure and deterministic: the same request, context, policy and contexts
+    always produce the same prompt, so a provider sees a stable, reproducible
+    input. ``economic`` and ``fundamental`` are optional: without them (a
+    deployment with no such capability, or an existing caller) the prompt is
+    exactly what it was before the corresponding block existed.
 
     Size handling is an ordered, stated rule rather than silent truncation:
 
@@ -276,20 +371,32 @@ def build_prompt(
        ``AGENT_MAX_PROMPT_TRADES`` (with the omission count stated in the body);
     2. if the rendered prompt still exceeds ``AGENT_MAX_PROMPT_CHARS``, the
        trade block is dropped entirely and the body says so (unchanged);
-    3. if it still exceeds the limit, the economic-calendar block is dropped too
+    3. if it still exceeds the limit, the fundamental block is dropped and the
+       body says so (bounded public context before the mandatory calendar);
+    4. if it still exceeds the limit, the economic-calendar block is dropped too
        and the body says so;
-    4. if the remainder alone still exceeds the limit, ``PromptTooLargeError``
+    5. if the remainder alone still exceeds the limit, ``PromptTooLargeError``
        is raised so the caller fails cleanly instead of sending a payload of
        unbounded size.
     """
     effective_policy = policy if policy is not None else OutboundDataPolicy.from_settings()
 
     content = _render_content(
-        request, context, effective_policy, include_trades=True, economic=economic
+        request,
+        context,
+        effective_policy,
+        include_trades=True,
+        economic=economic,
+        fundamental=fundamental,
     )
     if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
         content = _render_content(
-            request, context, effective_policy, include_trades=False, economic=economic
+            request,
+            context,
+            effective_policy,
+            include_trades=False,
+            economic=economic,
+            fundamental=fundamental,
         )
         if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
             content = _render_content(
@@ -297,11 +404,21 @@ def build_prompt(
                 context,
                 effective_policy,
                 include_trades=False,
-                economic_omitted=economic is not None,
+                economic=economic,
+                fundamental_omitted=fundamental is not None,
             )
             if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
-                raise PromptTooLargeError(
-                    "financial context is too large to render a bounded prompt"
+                content = _render_content(
+                    request,
+                    context,
+                    effective_policy,
+                    include_trades=False,
+                    economic_omitted=economic is not None,
+                    fundamental_omitted=fundamental is not None,
                 )
+                if len(content) > settings.AGENT_MAX_PROMPT_CHARS:
+                    raise PromptTooLargeError(
+                        "financial context is too large to render a bounded prompt"
+                    )
 
     return LLMPrompt(instructions=ASSISTANT_INSTRUCTIONS, content=content)

@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Step 46 — Explicit Economic-Calendar Source Configuration (this checkpoint)
+Step 47 — News & Fundamental Intelligence (this checkpoint)
++ Step 46 — Explicit Economic-Calendar Source Configuration
 + Step 45 — Economic Intelligence in the Agent Pipeline
 + Step 44 — QuantGist Economic Calendar Source (development/test)
 + Step 43 — Tenant-Safe Login
@@ -18,6 +19,7 @@ Step 46 — Explicit Economic-Calendar Source Configuration (this checkpoint)
 
 Status:
 
+Step 47: VERIFIED (implementation, tests, .env.example and documentation; committed by the Step 47 commit, whose hash the following checkpoint-status commit records here)
 Step 46: VERIFIED + COMMITTED (ebbb86b — "feat(calendar): add explicit source configuration")
 Step 45: VERIFIED + COMMITTED (b9785cb + its checkpoint-status commit 9ba0d95; local, not pushed)
 Step 44: VERIFIED + COMMITTED + PUSHED (638f972)
@@ -27,8 +29,18 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
-Step 46 (explicit economic-calendar source configuration, with a deliberate
-production seam) — the change set this checkpoint describes — is implemented,
+Step 47 (news and fundamental intelligence: the NewsProvider contract and its
+deterministic development/test source, the explicit NEWS_SOURCE selection, the
+deterministic news relevance, the FundamentalIntelligenceService context, the
+per-position fundamental exposure, the JWT-protected
+GET /fundamental-intelligence/today endpoint and the fundamental block in the
+agent prompt) — the change set this checkpoint describes — is implemented,
+verified and committed by the Step 47 commit ("feat(fundamental): add news and
+fundamental intelligence"), which carries the implementation, the tests,
+.env.example and the documentation updates (PROJECT_CONTEXT.md, knowledge.md and
+this document); the follow-up checkpoint-status commit records that hash here.
+Before it, Step 46 (explicit economic-calendar source configuration, with a deliberate
+production seam) — the change set the previous checkpoint describes — is implemented,
 verified and committed by ebbb86b ("feat(calendar): add explicit source
 configuration"), which carries the configuration, the composition-root seam, its
 tests, .env.example and the documentation updates (PROJECT_CONTEXT.md,
@@ -64,6 +76,102 @@ user seed script), the Step 37 checkpoint ("feat(financial): harden numeric
 representation"), the Step 36 MT5 tenant-session commit, the Step 35 security
 hardening commit and b95eaa1 ("feat(ai): add broker llm routing and agent
 controls", Steps 29–33).
+
+Step 47 delivers news and fundamental intelligence as one vertical slice, so a
+customer's question can be answered with what is happening to an instrument and
+to their own positions today, and not only with the calendar and their numbers.
+A vendor-neutral `NewsProvider` contract (app/providers/news.py) carries bounded
+factual items only — UTC publication time, publisher, title, a bounded excerpt,
+an optional link, declared instrument/currency/category tags — with the source's
+provenance marker, window-bounded retrieval and a caller-supplied cap, exactly
+mirroring the calendar boundary. The wired implementation is a deterministic
+development/test fake (`fake-development-placeholder`, no network, no clock, a
+fixed catalog materialized on the requested UTC dates), and there is NO
+production news vendor: nothing was invented, nothing scrapes, and no scheduler,
+cache or retry was added. Which source a deployment serves is explicit
+(`NEWS_SOURCE`: auto | development_fake | production, default auto) and resolved
+at the composition root beside the calendar seam; the development source is
+served inside development only, and `production` is the deliberate seam a real
+vendor is registered behind, refusing until one exists. The deliberate
+difference from the calendar is what an unconfigured deployment means: the
+calendar is mandatory, so an unusable calendar source refuses (503), while no
+news source is a supported state that the fundamental context reports as
+explicitly UNAVAILABLE with its reason — never as "no news" — and an explicitly
+selected but unusable news source still refuses with its own generic 503 detail
+rather than falling back.
+
+Step 47 keeps exactly one relevance mechanism: `is_metal_instrument` and the
+level ranking were exported from the existing calendar classifier, and news
+relevance reuses the same `RelevanceLevel` vocabulary, the same symbol
+currency-leg tokenizer and the same conservatism (POTENTIALLY_RELEVANT is the
+strongest level a symbol string may evidence; RELEVANT stays reserved for a
+future instrument catalog). Declared source tags win; when an item declares
+none, a small, documented, whole-word keyword map detects a currency reference
+from the title, so an untagged "Federal Reserve minutes due" item is still
+considered for XAUUSD instead of being silently ignored, while an item with no
+identifiable reference stays NOT_OBVIOUSLY_RELEVANT for every instrument
+together with the factual reason. XAUUSD is the first use case, handled through
+the same rules as the calendar (USD is its quote currency because it is a
+USD-denominated metal; XAU is its base metal). Relevance is a discrete category:
+there is no score, no probability, no direction and no recommendation anywhere in
+the layer.
+
+`FundamentalIntelligenceService` composes the MANDATORY calendar context the
+request already has with relevant news and the caller's own positions into a
+`FundamentalContext` carrying `as_of`, the same half-open UTC window, the
+instruments in play (the requested focus instrument plus what the caller
+actually holds), each source's provenance, the per-item relevance and matched
+instruments, and one factual exposure record per open position. It performs no
+MT5 read of its own: the positions travel inside the calendar context (which now
+also exposes the ordered snapshot it was built from), so one request still
+performs exactly one calendar read and one position read. Each position's
+exposure lists the calendar event ids and news item ids that were found relevant
+to it, and is `UNKNOWN` with a stated reason whenever it cannot be established —
+a symbol with no identifiable currency leg, or a day with no calendar drivers
+and no news source — because missing information must never read as an absence
+of risk. The deterministic layer emits facts, timestamps, provenance, relevance,
+exposure and UNKNOWN only; any interpretation remains the LLM layer's job on top
+of that labelled context.
+
+GET /fundamental-intelligence/today (JWT-protected, `?symbol=` optional) exposes
+that context for the authenticated user only: tenant identity comes solely from
+the database user (no broker_id/user_id parameter exists, and the focus symbol is
+a label for relevance, never a scope), the mandatory calendar context is built
+first and always, the blocking composition runs through the existing
+run_mt5_call boundary, a blank symbol is 422, and MT5/calendar/news
+infrastructure failures become the endpoint's own generic 503 with no provider
+internals in the detail. In the agent, the fundamental context is composed
+AROUND the same calendar context and rendered as a second public-data block that
+labels its news as published source facts (so the model can tell source material
+from its own interpretation), states an unavailable source as unavailable, states
+an empty feed as this source publishing nothing today, renders UNKNOWN as
+UNKNOWN, carries both sources' provenance, and bounds each excerpt. The agent's
+size discipline gained one ordered step between the existing two: the trade block
+is dropped first, then the fundamental block, then the calendar block — each
+omission stated in the body — and only then does PromptTooLargeError fail the
+request. Calendar data and news are public information with no account identity,
+so the three LLM_SEND_* egress switches keep governing exactly the customer
+financial data they always did; no protection was weakened, no scope guard,
+usage limiter, router or read-only guarantee changed, no tool/function calling or
+agent framework was added, the QuantGist adapter is untouched, and there is no
+schema change and no migration.
+
+Step 47 verification: the six new test modules and the three extended ones were
+run focused (485 passed) and the trading-safety, secret-safety, tenant-isolation
+and configuration set passed 444; full suite 1134 passed, 2 warnings (both
+pre-existing third-party deprecations); compileall over app and tests clean;
+pyright 0 errors / 0 warnings on every changed application file and on all six
+new test modules, with the two extended legacy API test files keeping only their
+pre-existing `object()`-session/`dict[str, object]` pattern (25 diagnostics
+before and after, one of which is the new wiring test written identically to its
+six neighbours — no suppression anywhere); git diff --check clean; a read-only
+probe rendered the real fundamental block for the flagship question (XAUUSD plus
+a held EURUSD: five placeholder news items with discrete relevance and matched
+instruments, both sources' provenance, and KNOWN exposure with driver counts per
+position); trading-safety greps confirm no order/position-mutation function
+exists anywhere in app/; and secret scans of the new modules and of every
+response/log line find no API key or credential. No schema change and no
+migration (alembic/ and app/db/ are untouched).
 
 Step 46 makes which economic-calendar source a deployment serves an explicit
 configuration value (`ECONOMIC_CALENDAR_SOURCE`). The calendar is mandatory for
@@ -228,15 +336,17 @@ No database migration was needed — these values are not persisted.
 
 Test result at this checkpoint:
 
-pytest tests/ -q → 948 passed, 2 warnings (both pre-existing third-party
+pytest tests/ -q → 1134 passed, 2 warnings (both pre-existing third-party
 deprecation warnings: the anyio BlockingPortal alias and the starlette
 testclient httpx notice); verified 2026-09-16 on this exact tree, after the
-Step 44, Step 45 and Step 46 work. Step 44 rewrote the QuantGist cases against
-the verified live API and took the suite to 897; Step 45 added the agent/calendar
-composition (924); Step 46 added the source x environment matrix and the
-production-seam cases (948). Step 40 took it to 799 and Step 39A removed the
-former Pydantic class-config deprecation, which is why the warning count is 2
-rather than 3.
+Step 44, Step 45, Step 46 and Step 47 work. Step 44 rewrote the QuantGist cases
+against the verified live API and took the suite to 897; Step 45 added the
+agent/calendar composition (924); Step 46 added the source x environment matrix
+and the production-seam cases (948); Step 47 added the news provider/service,
+relevance, fundamental-service, fundamental-API, agent-fundamental and news
+source-configuration suites (948 → 1134). Step 40 took it to 799 and Step 39A
+removed the former Pydantic class-config deprecation, which is why the warning
+count is 2 rather than 3.
 
 Additional Step 37 verification: a live serialization probe confirmed Decimal
 fields render as JSON numbers (not strings), and a float/Decimal mixing scan
@@ -259,18 +369,26 @@ remains strictly READ-ONLY. No new issues were introduced by this step.
 
 Working tree after this checkpoint:
 
-CLEAN — the Step 46 change set (explicit economic-calendar source
-configuration, the deliberate production seam, its tests and .env.example) is
-committed by ebbb86b, so nothing from that change set is left modified, staged
-or uncommitted.
+CLEAN — the Step 47 change set (the news provider contract, the deterministic
+development news source, the explicit NEWS_SOURCE selection, the fundamental
+intelligence service and its relevance/exposure layer, the
+GET /fundamental-intelligence/today endpoint, the agent prompt composition, the
+new and extended tests, .env.example and the documentation) is committed by the
+Step 47 commit and its checkpoint-status commit, so nothing from that change set
+is left modified, staged or uncommitted. Before it, the Step 46 change set
+(explicit economic-calendar source configuration, the deliberate production
+seam, its tests and .env.example) was committed by ebbb86b.
 
 The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is three commits ahead of it (b9785cb, the Step 45
-implementation, 9ba0d95, its checkpoint-status commit, and ebbb86b, Step 46),
-which are not pushed.
+638f972, and local HEAD is eight commits ahead of it, none of them pushed:
+b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
+ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
+authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
+intelligence ahead of technical analysis) and the two Step 47 commits (the
+implementation and this checkpoint-status record).
 
 ## Completed Stages
 
@@ -1103,6 +1221,107 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
+### Step 47 — News & Fundamental Intelligence (READ-ONLY)
+Status: VERIFIED + COMMITTED (the Step 47 commit; its hash is recorded by the
+follow-up checkpoint-status commit)
+
+Adds the first fundamental-intelligence capability as a real vertical slice:
+relevant news beside the mandatory calendar, deterministic relevance for the
+instruments actually in play (XAUUSD first), each open position's factual
+fundamental exposure, an HTTP endpoint for it, and the same context composed into
+every agent prompt. It is deterministic, read-only and has no production news
+vendor (see Known Issues item 15).
+
+Includes:
+
+- app/providers/news.py: the vendor-neutral NewsProvider contract with the
+  typed NewsItem snapshot (item_id, published_at, publisher, title, a bounded
+  summary, an optional url, declared instruments/currencies/categories) and a
+  bounded get_news(from, to, instruments=(), limit=None) read. Every field is
+  factual; there is no sentiment, score, forecast or vendor object.
+- app/providers/fake_news.py: FakeNewsProvider, the deterministic
+  development/test source (source = "fake-development-placeholder"): a fixed
+  placeholder catalog materialized on the UTC dates the requested half-open
+  window touches, with date-scoped ids, no network, no clock, no files, and a
+  deliberate mix of tag shapes (tagged items, an untagged central-bank item, and
+  an item with no identifiable reference at all) so the relevance layer is
+  exercised honestly.
+- app/services/news/: NewsService, the single business entry point — UTC
+  window validation (naive or inverted windows are rejected), provider payload
+  validation that fails closed on a naive timestamp or an excerpt above
+  MAX_SUMMARY_CHARS (600), a local re-filter against the half-open window so a
+  vendor's filtering semantics cannot leak an out-of-window item, deterministic
+  ordering by (published_at, item_id), and a hard cap at the deployment's
+  NEWS_MAX_ITEMS.
+- app/core/config.py + app/core/dependencies.py: NewsSource (auto |
+  development_fake | production, default auto) plus NEWS_MAX_ITEMS (default 20),
+  and get_news_service()/get_fundamental_intelligence_service() at the
+  composition root. auto in development serves the deterministic fake; auto
+  anywhere else means NO news source (a supported state the context reports as
+  unavailable); development_fake outside development and production everywhere
+  refuse with the generic 503 detail "News data source is not configured" while
+  logging one precise, value-free reason for the operator. No fallback ever
+  happens, and the news seam reads no credential setting.
+- app/services/fundamental_intelligence/relevance.py: deterministic news
+  relevance built ON the existing calendar classifier (RelevanceLevel, the
+  symbol tokenizer, the shared is_metal_instrument rule and the level ranking),
+  with declared tags winning, a small documented whole-word keyword map for
+  untagged items, and NOT_OBVIOUSLY_RELEVANT plus a factual reason whenever
+  relevance cannot be established.
+- app/services/fundamental_intelligence/focus.py: deterministic focus-instrument
+  detection for the agent request (a token qualifies only when it reconstructs
+  exactly from known currency tokens, so XAUUSD qualifies and a bare USD, a
+  commodity name like "gold" or a suffix variant like XAUUSD1 does not). It is a
+  label for relevance and never a scope decision.
+- app/services/fundamental_intelligence/fundamental_intelligence_service.py:
+  FundamentalIntelligenceService.build_context(calendar, focus_symbol) →
+  FundamentalContext (as_of, the calendar's own half-open window, focus symbol,
+  instruments in play, the calendar context, news availability/provenance/
+  reason, per-item relevance and matched instruments, and one
+  PositionFundamentalExposure per open position with KNOWN/UNKNOWN status, a
+  factual reason and the calendar/news driver ids). No MT5 read of its own and
+  no LLM call; positions arrive with the calendar context.
+- app/api/fundamental_intelligence_router.py + app/main.py:
+  GET /fundamental-intelligence/today?symbol=<optional>. JWT-protected, tenant
+  identity only from the authenticated user, calendar built first and always,
+  composition offloaded through run_mt5_call, 422 for a blank symbol, and the
+  generic 503 ("Fundamental intelligence service temporarily unavailable") for
+  MT5/calendar/news infrastructure failures.
+- app/services/agent/: the fundamental context is built from the SAME calendar
+  context the request already has and rendered as a labelled public-data block
+  (news facts with relevance, matched instruments, provenance and a bounded
+  excerpt, plus factual position exposure); the reduction ladder gained one
+  ordered step (trades → fundamental → calendar → PromptTooLargeError).
+- app/services/economic_intelligence/: exports is_metal_instrument and
+  relevance_rank (reuse, not a parallel classifier) and carries the ordered
+  positions snapshot in EconomicIntelligenceContext (defaulted, so existing
+  construction is unchanged and the HTTP contract of GET
+  /economic-intelligence/today is untouched).
+- .env.example: documents NEWS_SOURCE and NEWS_MAX_ITEMS (including that no news
+  source is a supported state and that no production vendor exists), corrects the
+  stray leading line, and updates the prompt-reduction comment to the new ladder.
+- tests: tests/test_news_provider.py (25), tests/test_fundamental_relevance.py
+  (35), tests/test_fundamental_intelligence.py (43),
+  tests/test_fundamental_intelligence_api.py (24),
+  tests/test_agent_fundamental_context.py (30) and
+  tests/test_news_source_configuration.py (17), plus extended cases in
+  tests/test_agent_api.py, tests/test_agent_wiring.py and
+  tests/test_config_settings.py. All deterministic and offline: no MT5, no
+  database beyond the per-test SQLite auth fixture, no news vendor, no network,
+  no LLM.
+- verification: focused 485 passed; safety/tenant/config set 444 passed; full
+  suite 1134 passed, 2 warnings (both pre-existing third-party deprecations);
+  compileall clean; pyright 0 errors / 0 warnings on the changed application
+  files and all six new test modules (the two extended legacy API test files keep
+  only their pre-existing diagnostics); git diff --check clean; read-only probe of
+  the rendered block; no API key or credential in any response, log line or new
+  module.
+- unchanged: the QuantGist adapter, the Agent API contract, the scope guard,
+  usage limiter, egress policy, LLM router, run_mt5_call boundary, database
+  schema and migrations. No production vendor, scraping, scheduler, caching,
+  retry, tool/function calling or agent framework was added. The AI remains
+  strictly READ-ONLY.
+
 ### Step 46 — Explicit Economic-Calendar Source Configuration (production seam)
 Status: VERIFIED + COMMITTED (ebbb86b)
 
@@ -1742,6 +1961,26 @@ deterministic relevance classification (relevance.py)
     ↓
 AI-ready economic context
 
+## Current Fundamental Intelligence Flow
+
+Authenticated request (GET /fundamental-intelligence/today?symbol=<optional>)
+    ↓
+get_current_user()
+    ↓
+run_mt5_call (blocking boundary, app/core/blocking.py)
+    ↓
+EconomicIntelligenceService (the MANDATORY calendar/intelligence path above)
+    ↓
+FundamentalIntelligenceService (app/services/fundamental_intelligence/)
+    ├── news: NewsService → NewsProvider
+    │       └── FakeNewsProvider (deterministic development/test source)
+    │           (no production news vendor; the production slot refuses 503)
+    ├── deterministic news relevance (the existing calendar classifier's
+    │   vocabulary and metal/currency-leg rules — not a parallel mechanism)
+    └── position exposure from the positions the calendar context already read
+    ↓
+FundamentalContext (facts + provenance + relevance + exposure + UNKNOWN)
+
 ## Current Portfolio Intelligence Flow
 
 Authenticated request
@@ -1790,8 +2029,15 @@ FinancialContextService → FinancialContext (existing flows above)
 EconomicIntelligenceService → EconomicIntelligenceContext (today's UTC calendar
     window; the existing calendar/intelligence path — Step 45)
     ↓
-build_prompt(request, context, policy, economic) → LLMPrompt
-    (agent layer; account identity omitted, calendar provenance preserved)
+FundamentalIntelligenceService.build_context(calendar, focus_symbol)
+        → FundamentalContext (Step 47: relevant news, deterministic relevance,
+          per-position factual exposure; built from the SAME calendar context,
+          so no second calendar read and no second MT5 read; an unconfigured
+          news source and an UNKNOWN exposure stay explicit)
+    ↓
+build_prompt(request, context, policy, economic, fundamental) → LLMPrompt
+    (agent layer; account identity omitted, both sources' provenance preserved,
+     published material labelled as source facts)
     ↓
 LLMRouter (broker-aware selection)
     ├── broker's own configured LLM (BrokerLLMConfig) when active
@@ -1896,6 +2142,60 @@ today's (UTC day) events with per-position relevance:
   string alone; reasons are factual, never forecasts.
 - invalid min_impact → 422; unauthenticated → 401; provider failure → 503.
 - no BUY/SELL action, recommendation or price prediction is returned.
+
+## Fundamental Intelligence API Contract
+
+GET /fundamental-intelligence/today?symbol=<optional instrument> returns today's
+fundamental context for the authenticated user:
+
+    {
+      "broker_id": 1,
+      "as_of": "2026-09-16T09:15:00Z",
+      "window_from": "2026-09-16T00:00:00Z",
+      "window_to": "2026-09-17T00:00:00Z",
+      "focus_symbol": "XAUUSD",
+      "instruments": ["EURUSD", "XAUUSD"],
+      "calendar": {
+        "data_source": "fake-development-placeholder",
+        "events": [ {"event": {...}, "overall_relevance": "POTENTIALLY_RELEVANT",
+                      "positions": [ {"ticket": ..., "symbol": ..., "type": "BUY",
+                                       "relevance": "...", "reason": "..."} ]} ]
+      },
+      "news": {
+        "available": true,
+        "data_source": "fake-development-placeholder",
+        "unavailable_reason": null,
+        "items": [ {"item": {"item_id": "...", "published_at": "...",
+                              "publisher": "...", "title": "...", "summary": "...",
+                              "url": null, "instruments": [...], "currencies": [...],
+                              "categories": [...]},
+                     "overall_relevance": "POTENTIALLY_RELEVANT",
+                     "matched_instruments": ["XAUUSD"], "reason": "..."} ]
+      },
+      "positions": [ {"ticket": 123456789, "symbol": "XAUUSD", "type": "BUY",
+                      "volume": 0.10, "relevance": "POTENTIALLY_RELEVANT",
+                      "status": "KNOWN", "reason": "...",
+                      "calendar_event_ids": [...], "news_item_ids": [...]} ]
+    }
+
+- The mandatory calendar context is always part of the answer (the same context
+  and contract GET /economic-intelligence/today exposes), provenance included.
+- news.available=false means no news source is configured for this deployment:
+  items is empty and unavailable_reason explains that news could not be assessed.
+  It is deliberately different from a source that published nothing.
+- relevance is RELEVANT / POTENTIALLY_RELEVANT / NOT_OBVIOUSLY_RELEVANT; status
+  is KNOWN or UNKNOWN. UNKNOWN means the exposure could not be established (with
+  the reason stated), never that there is no risk.
+- Both data sources are currently "fake-development-placeholder": deterministic
+  development/test data, NOT live financial data. News has no production vendor
+  (Known Issues item 15).
+- Tenant identity comes only from the authenticated user; no broker_id/user_id
+  parameter exists, and `symbol` labels the relevance computation without
+  widening what is read. A blank symbol → 422; unauthenticated → 401; an unusable
+  news source → 503 "News data source is not configured"; MT5/calendar/news
+  failure → 503 "Fundamental intelligence service temporarily unavailable".
+- No BUY/SELL action, recommendation, probability or price prediction is
+  returned anywhere in the payload.
 
 ## Portfolio Intelligence API Contract
 
@@ -2166,6 +2466,41 @@ DELETE /users/{user_id} (super_admin only):
   slot refuses until a real vendor is registered at that single seam, and every
   unusable selection answers the same generic 503 with the precise reason logged
   server-side and no configuration value disclosed.
+- News (NewsItem/NewsProvider contract, FakeNewsProvider, NewsService,
+  GET /fundamental-intelligence/today) exists and is read-only: bounded factual
+  items with UTC publication times, declared instrument/currency/category tags
+  and an explicit provenance marker, retrieved for a half-open UTC window with a
+  caller-supplied cap. The wired source is the deterministic development/test
+  fake; no production news vendor exists (Known Issues item 15).
+- Fundamental intelligence (FundamentalContext, FundamentalIntelligenceService,
+  the news relevance layer and the position exposure records) exists and is
+  read-only and deterministic: it composes the MANDATORY calendar context the
+  request already has with relevant news and the caller's own positions, adds no
+  MT5 read of its own, and reports facts, provenance, discrete relevance,
+  exposure and UNKNOWN only — never a forecast, probability or recommendation.
+- Which news source a deployment serves is an explicit configuration value
+  (Step 47): NEWS_SOURCE (auto | development_fake | production, default auto).
+  Unlike the mandatory calendar, no news source is a supported state: the
+  fundamental context reports news as explicitly UNAVAILABLE with its reason
+  (never as "no news"), while an explicitly selected but unusable source refuses
+  with the generic 503 detail "News data source is not configured" and logs one
+  value-free reason for the operator. Nothing ever falls back to another source.
+- News and calendar data are public information with no account identity, so they
+  are not governed by the LLM_SEND_* egress switches; those switches keep
+  governing exactly the customer financial data they always did, and no account
+  identity is sent to the model under any policy.
+- Fundamental intelligence is composed into every agent request beside the
+  mandatory calendar block (Step 47): the fundamental context is built from that
+  same calendar context (no second calendar or MT5 read), the block labels its
+  news as published source facts, states an unavailable source as unavailable, an
+  empty feed as that source publishing nothing today and UNKNOWN exposure as
+  UNKNOWN, and bounds each excerpt. The prompt reduction ladder is now trades →
+  fundamental → calendar, each omission stated in the body, before
+  PromptTooLargeError fails the request.
+- The agent detects the instrument a request is about deterministically from its
+  text (a token that reconstructs exactly from known currency tokens, e.g.
+  XAUUSD); that label only decides which instruments are described in the
+  fundamental block and never widens which positions may be read.
 - POST /agent exposes the agent over HTTP (authenticated; broker_id from the
   database User; no broker_id/user_id accepted in the body) and is read-only.
 - Agent guard chain exists and is enforced in this order: scope guard
@@ -2218,9 +2553,11 @@ DELETE /users/{user_id} (super_admin only):
   with Decimal(str(...)); account margin_level and candle tick volume
   intentionally remain float. API JSON still exposes numbers, not strings, via
   the shared DecimalAsNumber serializer.
-- Steps 18–45, the role-migration ordering fix, the development user seed and
-  the trade-history field fix are committed (latest: the Step 45 checkpoint
-  commit; before it Step 44 "feat(calendar): add QuantGist development/test
+- Steps 18–47, the role-migration ordering fix, the development user seed and
+  the trade-history field fix are committed (latest: the Step 47 implementation
+  and its checkpoint-status commit, which follow the roadmap commits 94b1858 and
+  c84d334; before them the Step 46 pair ebbb86b/c95ae6c and the Step 45 pair
+  b9785cb/9ba0d95; before it Step 44 "feat(calendar): add QuantGist development/test
   source" (638f972), Step 43 "feat(auth): make login tenant-safe" (5afd895),
   Step 42 (95d00d9) and Step 41 "feat(users): complete super admin user crud"
   (1577672); before those "fix(config): harden environment settings loading"
@@ -2262,7 +2599,7 @@ DELETE /users/{user_id} (super_admin only):
   setting and never renders its value (in str and full traceback), the dotenv
   file is selected through model_config (the Pylance _env_file diagnostic is
   structurally impossible), and the deprecated class-based Config is gone.
-- Test suite verified 2026-09-16 on this exact tree: pytest tests/ -q → 924 passed, 2 warnings.
+- Test suite verified 2026-09-16 on this exact tree: pytest tests/ -q → 1134 passed, 2 warnings.
 - Live end-to-end verification on the demo MT5 account: GET /account-info,
   GET /positions and GET /trade-history all answer 200 with real data (no
   credential, server or symbol detail is recorded anywhere).
@@ -2271,9 +2608,10 @@ DELETE /users/{user_id} (super_admin only):
   Config warning was eliminated by Step 39A.
 - compileall over app, tests, and scripts is clean.
 - git diff --check is clean.
-- Working tree is clean. The Step 46 checkpoint commit (ebbb86b) and the two
-  Step 45 commits (b9785cb and 9ba0d95) are local: they have NOT been pushed, so
-  local HEAD is three commits ahead of origin/master (638f972) until they are.
+- Working tree is clean. The Step 47 commits, the two roadmap commits
+  (94b1858, c84d334), the Step 46 pair (ebbb86b, c95ae6c) and the Step 45 pair
+  (b9785cb, 9ba0d95) are local: they have NOT been pushed, so local HEAD is eight
+  commits ahead of origin/master (638f972) until they are.
 
 Static/type verification:
 
@@ -2355,6 +2693,17 @@ This limitation must be reported rather than hidden.
     one extra serialized MT5 read. Reusing one snapshot would mean changing the
     economic-intelligence service contract and was deliberately out of Step 45's
     scope.
+15. There is no production news source. Fundamental intelligence is wired to the
+    deterministic development/test fake (FakeNewsProvider), which is explicitly
+    NOT a vendor, publishes clearly-marked placeholder items and never reaches a
+    network. A deployment selects the source explicitly (NEWS_SOURCE, default
+    auto) and the production slot refuses (503) until a real, licensed vendor is
+    registered at that seam; an unconfigured deployment reports news as
+    explicitly unavailable rather than as "no news". Choosing and licensing a
+    news vendor — including redistribution rights for the broker's customers —
+    is an open architectural/product decision, exactly like the economic-calendar
+    vendor in item 9. Nothing in this step may be described as a production news
+    capability.
 
 Resolved:
 
@@ -2406,17 +2755,27 @@ Steps 12–44, the role-migration ordering fix, the development user seed and th
 trade-history field fix are complete, committed and pushed (origin/master is
 638f972, Step 44).
 
-Step 46 (explicit economic-calendar source configuration) is committed by
-ebbb86b ("feat(calendar): add explicit source configuration"). Together with
-Step 45 (b9785cb, the implementation, and 9ba0d95, its checkpoint-status commit)
-these three commits are local: origin/master remains 638f972 until they are
-pushed, so the working tree is clean.
+Step 47 (news and fundamental intelligence) is committed by the Step 47
+implementation commit plus its checkpoint-status commit, which record the news
+provider contract and its deterministic development source, the explicit
+NEWS_SOURCE selection, the fundamental context and its relevance/exposure layer,
+the GET /fundamental-intelligence/today endpoint and the agent prompt
+composition. Before them, the roadmap commits (94b1858, the authoritative
+roadmap, and c84d334, its reorder that puts fundamental intelligence ahead of
+technical analysis), Step 46 (ebbb86b and its checkpoint-status commit c95ae6c)
+and Step 45 (b9785cb, the implementation, and 9ba0d95, its checkpoint-status
+commit) are local: origin/master remains 638f972 until they are pushed, so the
+working tree is clean.
 
-The immediate next action is deliberately NOT fixed here: Step 46 landed the
-explicit source selection and the production seam, so the next stage should be
-chosen explicitly (the three largest candidates remain a real production
-economic-calendar vendor — which now has one obvious place to be registered — the
-real free LLM providers, and the observability foundation).
+The immediate next action is deliberately NOT fixed here: Step 47 delivered the
+first half of the roadmap's P1 (news plus the deterministic fundamental context,
+exposure and agent integration), and what remains of P1 — a portfolio/report
+level fundamental view, richer per-instrument mapping and any additional
+channel-facing surface — should be chosen explicitly, as should the three
+standing candidates (a real production economic-calendar vendor, a real licensed
+news vendor behind the existing news seam, and the real free LLM providers).
+Per the roadmap, P2 (instrument catalog and multi-timeframe market data) comes
+after P1's fundamental capability is usable.
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
@@ -2448,6 +2807,10 @@ none may be started without an explicit instruction:
   when (known issue 12)
 - API-key rotation: a controlled re-encryption flow for stored broker
   credentials (known issue 12)
+- the news production data source (known issue 15): select and license a real
+  news vendor behind the existing NEWS_SOURCE production seam, with the
+  redistribution rights a broker product requires — still required before
+  fundamental intelligence can carry real news
 - the economic calendar production data source (known issue 9) — still required
   before economic intelligence can carry real data
 - prompt safety screening before generation (deterministic refusal of
@@ -2476,9 +2839,11 @@ app/providers/account_info.py, app/providers/economic_calendar.py,
 app/providers/llm.py, app/providers/llm_pool.py, app/providers/llm_router.py,
 app/providers/openai_compatible_llm.py, app/providers/market_data.py), the MT5
 providers and the tenant session boundary (app/core/mt5_session.py),
-the consolidated blocking boundary (app/core/blocking.py), the
-intelligence services (app/services/economic_intelligence/,
+the consolidated blocking boundary (app/core/blocking.py),the intelligence services (app/services/economic_intelligence/,
+app/services/fundamental_intelligence/, app/services/news/,
 app/services/portfolio_intelligence/, app/services/financial_context/), the
+public-data provider contracts (app/providers/economic_calendar.py,
+app/providers/news.py) and their deterministic development sources, the
 agent boundary and its guard chain (app/services/agent/, including egress.py),
 the outbound-endpoint policy (app/core/url_security.py), the login throttle
 (app/services/auth/), the broker LLM configuration service and resolver

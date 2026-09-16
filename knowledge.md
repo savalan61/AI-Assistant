@@ -634,6 +634,19 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     only, a production slot that refuses until a real vendor is registered, and
     the same generic 503 for every unusable selection instead of degrading to
     another source (Step 46)
+26. News and fundamental intelligence as one vertical slice (Step 47): a
+    vendor-neutral NewsProvider contract with a deterministic development/test
+    feed (no network, explicit placeholder provenance), an explicit NEWS_SOURCE
+    selection (auto | development_fake | production, default auto) whose
+    production slot refuses until a real vendor is registered, deterministic
+    news relevance built on the existing calendar classifier rather than a
+    parallel one, FundamentalIntelligenceService composing the MANDATORY
+    calendar context with relevant news and each open position's factual
+    exposure (explicit UNKNOWN when it cannot be established, never read as "no
+    risk"), the JWT-protected GET /fundamental-intelligence/today endpoint, and
+    the fundamental block in the agent prompt (bounded, labelled as published
+    source facts, provenance carried); there is still no production news vendor
+    (CURRENT_CHECKPOINT.md known issue 15)
 
 The repository remains strictly read-only with respect to trading.
 14. Current Development Stage

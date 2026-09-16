@@ -7,7 +7,9 @@ from app.services.economic_intelligence.relevance import (
     PositionRelevance,
     RelevanceLevel,
     classify_relevance,
+    is_metal_instrument,
     overall_relevance,
+    relevance_rank,
     symbol_currencies,
 )
 
@@ -18,6 +20,8 @@ __all__ = [
     "PositionRelevance",
     "RelevanceLevel",
     "classify_relevance",
+    "is_metal_instrument",
     "overall_relevance",
+    "relevance_rank",
     "symbol_currencies",
 ]

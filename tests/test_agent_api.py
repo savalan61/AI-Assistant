@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.core.dependencies as deps
 from app.api.agent_router import router
-from app.core.config import EconomicCalendarSource, settings as app_settings
+from app.core.config import EconomicCalendarSource, NewsSource, settings as app_settings
 from app.core.mt5_session import MT5SessionManager
 from app.core.security import create_access_token
 from app.db.base import Base
@@ -202,6 +202,10 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         app_settings, "ECONOMIC_CALENDAR_SOURCE", EconomicCalendarSource.AUTO, raising=True
     )
+    # Pin the news source selection the same way (Step 47): POST /agent also
+    # composes today's fundamental context, so the deterministic development
+    # feed is described here rather than whatever a local .env selects.
+    monkeypatch.setattr(app_settings, "NEWS_SOURCE", NewsSource.AUTO, raising=True)
 
 
 @pytest.fixture()
@@ -922,6 +926,110 @@ def test_response_contract_is_unchanged_by_the_calendar_composition(agent_env, p
 
     # The wire contract is exactly as before: the calendar context feeds the
     # prompt only and is not added to the response.
+    context = body["context"]
+    assert isinstance(context, dict)
+    assert set(body.keys()) == TOP_LEVEL_KEYS
+    assert set(context.keys()) == CONTEXT_KEYS
+
+
+# --- fundamental intelligence composition (Step 47) -----------------------------------------
+
+
+class FailingNewsProvider:
+    """News provider whose reads fail, simulating an unavailable source."""
+
+    source = "test-failing-news"
+
+    def __init__(self) -> None:
+        pass
+
+    def get_news(
+        self,
+        from_time: object,
+        to_time: object,
+        *,
+        instruments: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[object, ...]:
+        raise RuntimeError("news source unavailable")
+
+
+@pytest.fixture()
+def failing_news(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(deps, "FakeNewsProvider", FailingNewsProvider)
+
+
+def test_todays_fundamental_context_reaches_the_llm_prompt(agent_env, patched_providers) -> None:
+    records = patched_providers()
+
+    status, _ = post_agent(
+        agent_env, agent_env["customer_a_id"], {"message": "What news matters for XAUUSD today?"}
+    )
+
+    assert status == 200
+    prompt = records["llm"].prompts[0].content
+    # The request named XAUUSD, so the fundamental block is focused on it, and
+    # the deterministic development feed reaches the prompt with its provenance.
+    assert "Fundamental intelligence for XAUUSD" in prompt
+    assert "Position fundamental exposure" in prompt
+    assert "fake-development-placeholder" in prompt
+    assert "(placeholder)" in prompt
+
+
+def test_the_mandatory_calendar_context_is_still_present_beside_the_fundamental_block(
+    agent_env, patched_providers
+) -> None:
+    records = patched_providers()
+
+    status, _ = post_agent(agent_env, agent_env["customer_a_id"], {"message": "Any events today?"})
+
+    assert status == 200
+    prompt = records["llm"].prompts[0].content
+    # Every agent request still passes through the economic-calendar context.
+    assert "Economic calendar for today" in prompt
+    assert "Fundamental intelligence" in prompt
+
+
+def test_a_selected_production_news_source_fails_closed(
+    agent_env, patched_providers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = patched_providers()
+    # No production news vendor exists, so an explicitly selected slot refuses
+    # rather than quietly serving development placeholder news.
+    monkeypatch.setattr(app_settings, "NEWS_SOURCE", NewsSource.PRODUCTION, raising=True)
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    assert status == 503
+    # The established news-source detail: no secret, provider or value disclosed.
+    assert body == {"detail": "News data source is not configured"}
+    assert records["llm"].call_count == 0
+    assert records["account_threads"] == []
+
+
+def test_news_source_failure_maps_to_the_existing_503(
+    agent_env, patched_providers, failing_news
+) -> None:
+    records = patched_providers()
+
+    status, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    # The existing error boundary: a news/provider failure is translated by the
+    # endpoint into the generic 503, and no answer is fabricated.
+    assert status == 503
+    assert body == {"detail": "Agent service temporarily unavailable"}
+    assert records["llm"].call_count == 0
+
+
+def test_response_contract_is_unchanged_by_the_fundamental_composition(
+    agent_env, patched_providers
+) -> None:
+    patched_providers()
+
+    _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "my balance?"})
+
+    # The fundamental context feeds the prompt only: the response carries no new
+    # field, no news payload and no calendar payload.
     context = body["context"]
     assert isinstance(context, dict)
     assert set(body.keys()) == TOP_LEVEL_KEYS

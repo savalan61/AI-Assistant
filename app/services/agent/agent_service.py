@@ -18,6 +18,11 @@ Design notes:
 * the economic-calendar component (Step 45) is the existing
   EconomicIntelligenceService, injected the same way the financial context is:
   the agent composes, it does not fetch calendar data itself;
+* the fundamental-intelligence component (Step 47) is composed AROUND that same
+  mandatory calendar context, so one request performs exactly one calendar read
+  and one position read. It adds relevant news, deterministic relevance and each
+  position's factual exposure — facts, provenance and UNKNOWN only, never a
+  forecast, a probability or a recommendation;
 * no HTTP endpoint — this is an internal service/domain boundary;
 * no agent framework (LangChain, LangGraph, ...) and no tool use;
 * read-only by construction: the only capabilities held here are reading a
@@ -34,6 +39,10 @@ from app.services.financial_context import (
     DEFAULT_TRADE_HISTORY_DAYS,
     FinancialContext,
     FinancialContextService,
+)
+from app.services.fundamental_intelligence import (
+    FundamentalIntelligenceService,
+    detect_focus_symbol,
 )
 
 
@@ -57,9 +66,11 @@ class AgentService:
 
     Depends on FinancialContextService (the single financial-context
     architecture), an optional EconomicIntelligenceService (the single
-    economic-intelligence architecture) and an injected LLMProvider, so the
-    agent never touches MT5, the database, the calendar or a provider directly,
-    and never duplicates their logic.
+    economic-intelligence architecture), an optional
+    FundamentalIntelligenceService (the single fundamental-intelligence
+    architecture, composed around that calendar context) and an injected
+    LLMProvider, so the agent never touches MT5, the database, the calendar, the
+    news source or a provider directly, and never duplicates their logic.
     """
 
     def __init__(
@@ -68,6 +79,7 @@ class AgentService:
         llm_provider: LLMProvider,
         data_policy: OutboundDataPolicy | None = None,
         economic_intelligence_service: EconomicIntelligenceService | None = None,
+        fundamental_intelligence_service: FundamentalIntelligenceService | None = None,
     ):
         self._context = financial_context_service
         self._llm = llm_provider
@@ -81,6 +93,11 @@ class AgentService:
         # source: None means the prompt carries no economic block at all, and
         # the production composition root always supplies it.
         self._economic = economic_intelligence_service
+        # Fundamental intelligence (Step 47) composes the mandatory calendar
+        # context with news and position exposure. Optional for the same reason:
+        # None means the prompt carries no fundamental block, and it can only be
+        # built when a calendar context exists — it never fetches one itself.
+        self._fundamental = fundamental_intelligence_service
 
     def handle(
         self,
@@ -97,10 +114,17 @@ class AgentService:
         default. ``now`` injects the reference time (defaults to the current
         UTC time) so callers and tests stay deterministic.
 
-        The same ``now`` drives both read-only contexts: the trade-history
-        window and today's UTC economic-calendar window are computed from one
-        reference instant, so they can never disagree about which day "today"
-        is. When the caller passes no ``now``, the agent resolves it once here.
+        The same ``now`` drives every read-only context: the trade-history
+        window, today's UTC economic-calendar window and the fundamental window
+        are all derived from one reference instant, so they can never disagree
+        about which day "today" is. When the caller passes no ``now``, the agent
+        resolves it once here.
+
+        The fundamental context is built from the calendar context the request
+        already has (never from a second calendar or position read). The
+        instrument the request is about is detected deterministically from its
+        text (see fundamental_intelligence.focus); that label only decides which
+        instruments are described, never which positions may be read.
 
         The reads block (MT5 and the calendar provider), so an API caller must
         offload this call through the consolidated MT5 blocking boundary.
@@ -122,8 +146,13 @@ class AgentService:
             if self._economic is not None
             else None
         )
+        fundamental = (
+            self._fundamental.build_context(economic, focus_symbol=detect_focus_symbol(request))
+            if self._fundamental is not None and economic is not None
+            else None
+        )
         answer = self._llm.complete(
-            build_prompt(request, context, self._data_policy, economic)
+            build_prompt(request, context, self._data_policy, economic, fundamental)
         )
         return AgentResponse(
             request=request,

@@ -6,7 +6,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import EconomicCalendarSource, settings
+from app.core.config import EconomicCalendarSource, NewsSource, settings
 from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
@@ -14,6 +14,7 @@ from app.db.models import Broker, User, UserRole
 from app.providers import (
     EconomicCalendarProvider,
     FakeEconomicCalendarProvider,
+    FakeNewsProvider,
     LLMProvider,
     LLMProviderPool,
     LLMRouter,
@@ -35,7 +36,9 @@ from app.services.broker_llm_config import (
 from app.services.economic_calendar import EconomicCalendarService
 from app.services.economic_intelligence import EconomicIntelligenceService
 from app.services.financial_context import FinancialContextService
+from app.services.fundamental_intelligence import FundamentalIntelligenceService
 from app.services.market import MarketDataService
+from app.services.news import NewsService
 from app.services.portfolio_intelligence import PortfolioIntelligenceService
 from app.services.positions import PositionService
 from app.services.trade_history import TradeHistoryService
@@ -224,6 +227,62 @@ def get_economic_calendar_service() -> EconomicCalendarService:
             _calendar_source_unavailable("quantgist", "QUANTGIST_API_KEY is not configured")
 
     return EconomicCalendarService(_calendar_provider_for(source))
+
+
+# News wiring (Step 47). Same shape as the calendar seam: an explicit
+# NEWS_SOURCE resolved here, development/test sources served inside development
+# only, and no silent fallback. The deliberate difference is what "auto" means
+# outside development: the calendar is MANDATORY for every agent request (so an
+# unusable calendar source refuses), while there is simply NO news source
+# configured there - which the fundamental context reports as explicitly
+# unavailable, never as "no news".
+_NEWS_SOURCE_UNAVAILABLE_DETAIL = "News data source is not configured"
+
+_news_logger = logging.getLogger(__name__)
+
+
+def _news_source_unavailable(source: str, reason: str) -> NoReturn:
+    """Refuse to serve news, naming the reason to the operator only."""
+    _news_logger.warning(
+        "News source %r is not usable in APP_ENV %r (%s); refusing to serve news",
+        source,
+        settings.APP_ENV,
+        reason,
+    )
+    raise HTTPException(status_code=503, detail=_NEWS_SOURCE_UNAVAILABLE_DETAIL)
+
+
+def get_news_service() -> NewsService | None:
+    """Resolve the configured news source (None = no news source configured).
+
+    An explicitly selected but unusable source refuses (503) instead of falling
+    back; an environment with no news source at all returns None, which the
+    fundamental context reports as explicitly unavailable rather than empty.
+    """
+    in_development = settings.APP_ENV in _CALENDAR_PLACEHOLDER_ALLOWED_ENVS
+    source = settings.NEWS_SOURCE
+
+    if source == NewsSource.AUTO:
+        if not in_development:
+            return None
+        source = NewsSource.DEVELOPMENT_FAKE
+
+    if source == NewsSource.DEVELOPMENT_FAKE:
+        if not in_development:
+            _news_source_unavailable("development_fake", "development/test source only")
+        return NewsService(FakeNewsProvider(), max_items=settings.NEWS_MAX_ITEMS)
+
+    return _news_source_unavailable("production", "no production news provider is implemented")
+
+
+def get_fundamental_intelligence_service() -> FundamentalIntelligenceService:
+    """Compose the fundamental context from the existing calendar path and news.
+
+    The service holds no MT5 provider: the positions arrive with the mandatory
+    economic-intelligence context at request time, so news relevance and exposure
+    are added without a second MT5 read.
+    """
+    return FundamentalIntelligenceService(news_service=get_news_service())
 
 
 # Agent LLM wiring. The production seam is the broker-aware router: a broker
@@ -537,6 +596,9 @@ async def get_agent_service(
     """
     credentials = await get_mt5_credentials(current_user, session)
     llm_provider = await get_llm_provider(current_user.broker_id, session)
+    # Built once and shared by both consumers, so one request performs exactly
+    # one calendar read and one position read for its calendar context.
+    economic_intelligence = get_economic_intelligence_service(credentials)
     return AgentService(
         financial_context_service=FinancialContextService(
             account_service=get_account_info_service(credentials),
@@ -553,5 +615,11 @@ async def get_agent_service(
         # calendar architecture. That path fails closed outside development
         # (no calendar source may serve a broker's customers), and a provider
         # failure surfaces as the established generic 503.
-        economic_intelligence_service=get_economic_intelligence_service(credentials),
+        economic_intelligence_service=economic_intelligence,
+        # Step 47: fundamental intelligence (news + relevance + position
+        # exposure) is composed AROUND that same calendar context, so it adds no
+        # calendar request and no MT5 read of its own. An explicitly selected but
+        # unusable news source still fails closed here, exactly as it does for
+        # GET /fundamental-intelligence/today.
+        fundamental_intelligence_service=get_fundamental_intelligence_service(),
     )

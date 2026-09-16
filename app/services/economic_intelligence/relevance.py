@@ -117,6 +117,17 @@ def symbol_currencies(symbol: str) -> tuple[str, ...]:
     return tuple(token for _, token in located)
 
 
+def is_metal_instrument(symbol: str) -> bool:
+    """True when the instrument's base token is a traded metal (XAU/XAG/XPT/XPD).
+
+    Shared by the calendar classifier and the fundamental/news relevance layer so
+    both apply the same "USD-denominated metal" rule instead of two divergent
+    ones.
+    """
+    currencies = symbol_currencies(symbol)
+    return bool(currencies) and currencies[0] in _METAL_TOKENS
+
+
 def _result(position: Position, level: RelevanceLevel, reason: str) -> PositionRelevance:
     return PositionRelevance(
         ticket=position.ticket,

@@ -43,7 +43,14 @@ def _event_intelligence(event: EconomicEvent, positions: tuple[Position, ...]) -
 
 
 class EconomicIntelligenceContext(NamedTuple):
-    """Everything a future Agent needs to explain today's events to the user."""
+    """Everything a future Agent needs to explain today's events to the user.
+
+    ``positions`` is the ordered position snapshot this context was built from
+    (Step 47). It is exposed so a composing service - the fundamental
+    intelligence layer - can reason about the same positions without a second
+    MT5 read; the HTTP contract of GET /economic-intelligence/today does not
+    change. Defaulted so existing constructions keep working.
+    """
 
     as_of: datetime
     window_from: datetime
@@ -51,6 +58,7 @@ class EconomicIntelligenceContext(NamedTuple):
     data_source: str
     position_symbols: tuple[str, ...]
     events: tuple[EventIntelligence, ...]
+    positions: tuple[Position, ...] = ()
 
 
 class EconomicIntelligenceService:
@@ -93,4 +101,7 @@ class EconomicIntelligenceService:
             data_source=self._calendar.source,
             position_symbols=position_symbols,
             events=events_intelligence,
+            # One position read per request feeds both the per-event relevance
+            # above and any composing context (the fundamental layer).
+            positions=ordered_positions,
         )

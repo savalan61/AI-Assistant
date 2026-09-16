@@ -17,7 +17,14 @@ from pathlib import Path
 import pytest
 
 import app.core.config as config_module
-from app.core.config import ENV_FILE, EconomicCalendarSource, Settings, load_settings, settings
+from app.core.config import (
+    ENV_FILE,
+    EconomicCalendarSource,
+    NewsSource,
+    Settings,
+    load_settings,
+    settings,
+)
 
 # Obvious stand-in for "a secret someone pasted into the wrong env key".
 FAKE_SECRET = "not-a-real-secret-9c1f-a7b2"
@@ -143,6 +150,52 @@ def test_every_documented_economic_calendar_source_is_accepted(tmp_path: Path, s
     loaded = load_settings(env_file=path)
 
     assert loaded.ECONOMIC_CALENDAR_SOURCE is EconomicCalendarSource(source)
+
+
+# --- the news source is validated strictly, and defaults to the environment ---
+
+
+def test_the_news_source_defaults_to_auto() -> None:
+    # "auto" is what keeps every existing deployment working: the deterministic
+    # development feed in development, and no news source anywhere else (which
+    # the fundamental context reports as explicitly unavailable).
+    assert settings.NEWS_SOURCE is NewsSource.AUTO
+    assert settings.NEWS_MAX_ITEMS >= 1
+
+
+def test_invalid_news_source_fails_closed_without_echoing_the_value(tmp_path: Path) -> None:
+    """An unknown news source is a configuration error, never a silent default.
+
+    An explicitly selected source that cannot be served refuses at request time;
+    a value nobody chose is rejected at startup, naming the setting only.
+    """
+    path = _env_file(tmp_path, f"NEWS_SOURCE={FAKE_SECRET}\n")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        load_settings(env_file=path)
+
+    message = str(excinfo.value)
+    assert "NEWS_SOURCE" in message
+    assert FAKE_SECRET not in message
+
+
+@pytest.mark.parametrize("source", ["auto", "development_fake", "production"])
+def test_every_documented_news_source_is_accepted(tmp_path: Path, source: str) -> None:
+    path = _env_file(tmp_path, f"NEWS_SOURCE={source}\n")
+
+    loaded = load_settings(env_file=path)
+
+    assert loaded.NEWS_SOURCE is NewsSource(source)
+
+
+def test_invalid_news_item_cap_fails_closed(tmp_path: Path) -> None:
+    path = _env_file(tmp_path, f"NEWS_MAX_ITEMS={FAKE_SECRET}\n")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        load_settings(env_file=path)
+
+    assert "NEWS_MAX_ITEMS" in str(excinfo.value)
+    assert FAKE_SECRET not in str(excinfo.value)
 
 
 # --- the ordinary paths keep working ------------------------------------------

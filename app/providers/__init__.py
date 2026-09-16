@@ -7,6 +7,7 @@ from app.providers.economic_calendar import (
 )
 from app.providers.fake_economic_calendar import FakeEconomicCalendarProvider
 from app.providers.fake_llm import FakeFreeLLMProvider, FakeLLMProvider
+from app.providers.fake_news import FakeNewsProvider
 from app.providers.fake_position import FakePositionProvider
 from app.providers.fake_trade_history import FakeTradeHistoryProvider
 from app.providers.llm import LLMFallbackError, LLMPrompt, LLMProvider, LLMProviderKind
@@ -17,6 +18,7 @@ from app.providers.mt5_account_info import MT5AccountInfoProvider
 from app.providers.mt5_market_data import MT5MarketDataProvider
 from app.providers.mt5_positions import MT5PositionProvider
 from app.providers.mt5_trade_history import MT5TradeHistoryProvider
+from app.providers.news import NewsItem, NewsProvider
 from app.providers.openai_compatible_llm import OpenAICompatibleLLMProvider
 from app.providers.position import Position, PositionProvider, PositionType
 from app.providers.quantgist_economic_calendar import QuantGistEconomicCalendarProvider
@@ -32,6 +34,7 @@ __all__ = [
     "FakeEconomicCalendarProvider",
     "FakeFreeLLMProvider",
     "FakeLLMProvider",
+    "FakeNewsProvider",
     "FakePositionProvider",
     "FakeTradeHistoryProvider",
     "LLMFallbackError",
@@ -45,6 +48,8 @@ __all__ = [
     "MT5MarketDataProvider",
     "MT5PositionProvider",
     "MT5TradeHistoryProvider",
+    "NewsItem",
+    "NewsProvider",
     "OpenAICompatibleLLMProvider",
     "Position",
     "PositionProvider",
