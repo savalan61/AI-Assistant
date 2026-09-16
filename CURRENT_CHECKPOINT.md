@@ -17,7 +17,7 @@ Step 45 — Economic Intelligence in the Agent Pipeline (this checkpoint)
 
 Status:
 
-Step 45: VERIFIED + COMMITTED (the Step 45 checkpoint commit — its hash is recorded in the checkpoint-status commit that follows it)
+Step 45: VERIFIED + COMMITTED (b9785cb — "feat(agent): compose economic intelligence into the agent prompt")
 Step 44: VERIFIED + COMMITTED + PUSHED (638f972)
 Step 43: VERIFIED + COMMITTED + PUSHED (5afd89510af4ec5e63d4bcbf805bc9e73405f1e9)
 Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
@@ -26,8 +26,9 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 Checkpoint commit:
 
 Step 45 (economic intelligence in the agent pipeline) — the change set this
-checkpoint describes — is implemented, verified and committed by the Step 45
-checkpoint commit, which carries the implementation, the tests and the
+checkpoint describes — is implemented, verified and committed by b9785cb
+("feat(agent): compose economic intelligence into the agent prompt"), which
+carries the implementation, the tests and the
 documentation updates (PROJECT_CONTEXT.md, knowledge.md and this document); it
 is NOT pushed, so origin/master stays at the Step 44 commit until it is. Before
 it, Step 44 (the QuantGist development/test economic-calendar source) was
@@ -222,8 +223,8 @@ The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is the Step 45 change set (the checkpoint commit plus
-its checkpoint-status commit), which is not pushed.
+638f972, and local HEAD is two commits ahead of it (b9785cb and this
+checkpoint-status commit), which are not pushed.
 
 ## Completed Stages
 
@@ -1057,7 +1058,7 @@ Status: VERIFIED + COMMITTED
 
 
 ### Step 45 — Economic Intelligence in the Agent Pipeline (READ-ONLY)
-Status: VERIFIED + COMMITTED (the Step 45 checkpoint commit; hash in the checkpoint-status commit)
+Status: VERIFIED + COMMITTED (b9785cb)
 
 Composes the EXISTING economic intelligence into the existing agent pipeline. It
 adds no calendar logic to the agent, no tool/function calling, no agent
