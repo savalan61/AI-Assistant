@@ -667,7 +667,8 @@ Completed since the ledger was frozen (summary only; see CURRENT_CHECKPOINT.md
     providers, config, schema and trading behaviour are untouched; no cache, no
     second catalog read, no live API request. Cost: one extra terminal read per
     market-data request, which matters because MT5 serializes reads on the single
-    process-wide session (CURRENT_CHECKPOINT.md known issue 24)33. Profile-documented Brent spellings (Step 54 relevance fix): the crude-oil
+    process-wide session (CURRENT_CHECKPOINT.md known issue 24)
+33. Profile-documented Brent spellings (Step 54 relevance fix): the crude-oil
     profile (profiles.py) now documents UKOIL and BRENT (and their broker-
     decorated forms such as UKOIL., which the prefix rule already handled) as
     spellings of the same underlying commodity, so its documented factor tiers

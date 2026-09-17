@@ -2,7 +2,8 @@
 
 ## Current Status
 
-Fix — Economic Calendar Position Relevance via Instrument Profiles (this checkpoint)
+Fix — Instrument Profile Alias Coverage Audit (this checkpoint)
++ Fix — Economic Calendar Position Relevance via Instrument Profiles
 + Step 54 — General Broker Decoration Resolution
 + Step 53 — Market Data Symbol Resolution
 + Step 52 — Safe Broker-Suffix Resolution
@@ -29,9 +30,11 @@ Fix — Economic Calendar Position Relevance via Instrument Profiles (this check
 
 Status:
 
-Calendar relevance fix: VERIFIED (implementation, tests and documentation;
-committed together by the fix commit "fix(calendar): grade positions through
-instrument profiles"; local, not pushed)
+Instrument-profile alias coverage audit: VERIFIED + COMMITTED (b9c5ca8 —
+"feat(instruments): document verified broker alias spellings in profiles";
+local, not pushed)
+Calendar relevance fix: VERIFIED + COMMITTED (0253c30 — "fix(calendar): grade
+positions through instrument profiles"; local, not pushed)
 Step 54: VERIFIED + COMMITTED (b454784 — "fix(instruments): resolve decorated
 broker spellings without a suffix list"; local, not pushed)
 Step 53: VERIFIED + COMMITTED (e884767 — "fix(market-data): resolve symbols
@@ -58,12 +61,23 @@ Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
 
+The instrument-profile alias coverage audit change set (the verified broker
+spellings added to the existing oil and NASDAQ-100 profile root lists — data,
+not engine — the ten new parametrized spelling cases, and this documentation) —
+the change set this checkpoint describes — is implemented, verified and
+committed as ONE focused commit ("feat(instruments): document verified broker
+alias spellings in profiles", b9c5ca8) carrying the diff, the tests and this
+documentation together, following the established single-commit convention. No
+new profile, engine, resolution rule, provider, contract, configuration, LLM or
+schema change: only documented spellings of already-profiled instruments were
+added to a table that already existed.
+
 The calendar-relevance fix change set (the Brent symbol roots added to the
 existing crude-oil profile, the seven new focused relevance cases, and this
-documentation) — the change set this checkpoint describes — is implemented,
-verified and committed as ONE focused commit ("fix(calendar): grade positions
-through instrument profiles") carrying the diff, the tests and this
-documentation together, following the established single-commit convention. No
+documentation) is implemented, verified and committed as ONE focused commit
+("fix(calendar): grade positions through instrument profiles", 0253c30) carrying
+the diff, the tests and this documentation together, following the established
+single-commit convention. No
 relevance engine, resolution rule, provider, contract, configuration, LLM or
 schema change: the existing Step 48 profile path now also reaches Brent
 spellings because the profile table documents them.
@@ -616,13 +630,16 @@ the GET /fundamental-intelligence/today endpoint, the agent prompt composition,
 the tests and the documentation) was committed by the Step 47 commit and its
 checkpoint-status commit. Before it, the Step 46 change set
 (explicit economic-calendar source configuration, the deliberate production
-seam, its tests and .env.example) was committed by ebbb86b.
+seam, its tests and .env.example) was committed by ebbb86b. The
+calendar-relevance fix change set is committed by `0253c30` and the data-only
+instrument-profile alias coverage audit by `b9c5ca8`, each as one focused commit
+carrying its own tests and documentation.
 
 The Step 42 `login` rename and its document update were carried by the Step 42
 checkpoint commit. Steps 41 (`1577672`, "feat(users): complete super admin user
 crud"), 42 (`95d00d9`), 43 (`5afd895`), the two documentation commits after it
 (`9dbfb7e`, `74cbba5`) and Step 44 (`638f972`) are pushed: origin/master is
-638f972, and local HEAD is eighteen commits ahead of it, none of them pushed:
+638f972, and local HEAD is twenty-one commits ahead of it, none of them pushed:
 b9785cb (Step 45 implementation), 9ba0d95 (its checkpoint-status commit),
 ebbb86b (Step 46), c95ae6c (Step 46 checkpoint-status commit), 94b1858 (the
 authoritative roadmap), c84d334 (the roadmap reorder that puts fundamental
@@ -635,8 +652,11 @@ research context composed into the agent), the Step 50 commit (`6c2df3e`, MT5
 instrument discovery and resolution), the Step 51 commit (`c9a5a39`, instrument
 resolution inside financial research), the Step 52 commit (`9ab52d5`, safe
 broker-suffix resolution), the Step 53 commit (`e884767`, market-data symbol
-resolution through the instrument catalog) and the Step 54 commit (`b454784`,
-general broker-decorated spellings).
+resolution through the instrument catalog), the Step 54 commit (`b454784`,
+general broker-decorated spellings), the Step 54 checkpoint-status commit
+(`d4fc636`), the calendar-relevance fix (`0253c30`, the Brent roots added to the
+existing crude-oil profile) and the instrument-profile alias coverage audit
+(`b9c5ca8`, the verified broker spellings added as profile data).
 
 ## Completed Stages
 
@@ -1469,8 +1489,55 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
+### Fix — Instrument Profile Alias Coverage Audit
+
+Status: VERIFIED + COMMITTED (b9c5ca8 — "feat(instruments): document verified
+broker alias spellings in profiles"; one focused commit carrying the data edit,
+the tests and this documentation — the established single-commit convention)
+
+A read-only audit of real MT5 broker catalogs looked for documented spellings of
+already-profiled instruments that the static profile table did not cover. Two
+families were missing: crude oil (no ICE Brent ticker and no common WTI alias
+beyond the roots the Brent fix added) and NASDAQ-100 (no USTECH, NDXUSD or
+NASDAQ100 alias). A position held under any of those spellings failed closed in
+calendar and news relevance exactly as UKOIL. did before the Brent fix, because
+the profile lookup never matched it.
+
+Includes:
+
+- app/services/instrument_intelligence/profiles.py: the EXISTING oil profile
+  documents USCRUDE, XBRUSD, BRENTUSD and UKBRAND, and the EXISTING NASDAQ-100
+  profile documents NASDAQ100, USTECH and NDXUSD. Data only — no new profile,
+  no engine change; broker-decorated forms (XBRUSD.cash, USTECH.r) inherit
+  through the unchanged Step 54 prefix rule.
+- tests/test_instrument_profiles.py: ten new parametrized spelling cases (seven
+  oil/Brent aliases, three index aliases), each pinning a new root to its
+  profile.
+
+Deliberately NOT roots, so the fail-closed posture is preserved: futures and ETF
+tickers (CL, NQ, QQQ) are different instrument classes, and no profile was
+invented for an instrument the table does not cover (US30, US500, GER40,
+SPX500, FX pairs, crypto). Gold quoted in EUR/GBP (XAUEUR, XAUGBP) is deferred to
+a currency-layer decision, because the currency-relevance layer would mis-read
+the quote leg; UKOIL/BRENT remain spellings rather than focus names, so focus
+detection is unchanged.
+
+Untouched: the relevance engine and its decision structure, the profile lookup,
+the resolution rules, both relevance contracts, providers, the
+research/agent/market-data composition, configuration, schema, migrations and
+the read-only posture. No live API request, and no double-match was introduced
+(verified across 50 real broker spellings when the change was made).
+
+Verification: the instrument-profile and instrument-relevance suites are green
+(118 focused cases); compileall over app and tests was clean; Pyright reported 0
+errors and 0 warnings on the changed files; git diff --check clean;
+trading-safety and secret-safety scans clean. The full suite stood at 1605
+passed when the commit was made; its one clock-dependent case is recorded as
+known issue 26.
+
+
 ### Fix — Economic Calendar Position Relevance via Instrument Profiles
-Status: VERIFIED + COMMITTED (the fix commit "fix(calendar): grade positions
+Status: VERIFIED + COMMITTED (0253c30 — "fix(calendar): grade positions
 through instrument profiles"; one focused commit carrying implementation, tests
 and documentation — the established single-commit convention)
 
@@ -1490,7 +1557,8 @@ Includes:
   the profile module itself sanctions — no new profile system, no engine change,
   no invented instrument. A later coverage audit of real broker catalogs
   extended the same table with the verified aliases USCRUDE, XBRUSD, BRENTUSD,
-  UKBRAND (oil) and NASDAQ100, USTECH, NDXUSD (NASDAQ-100); futures/ETF tickers
+  UKBRAND (oil) and NASDAQ100, USTECH, NDXUSD (NASDAQ-100) in its own data-only
+  commit (b9c5ca8, the section above); futures/ETF tickers
   (CL, NQ, QQQ) are deliberately not roots and XAUEUR/XAUGBP await a
   currency-layer decision.
 - tests/test_instrument_relevance.py (7 new cases): UKOIL. + FOMC reaching the
@@ -3699,6 +3767,14 @@ This limitation must be reported rather than hidden.
     instrument keeps the fail-closed verdict — which is the intended trust
     posture, but it means calendar relevance for the long tail of broker
     symbols stays limited until profiles are extended.
+26. One economic-intelligence API test is clock-dependent: the offline QuantGist
+    fixture in tests/test_economic_intelligence_api.py hardcodes the row's
+    `release_date` to 2026-09-16 while the same test asserts that TODAY'S UTC
+    date appears in the returned timestamp, so the case passes only on that one
+    calendar day (re-run on 2026-09-17: 1604 passed, 1 failed — that case). The
+    fixture's own docstring says the row is meant to be dated from the requested
+    date, so the date should be derived from the request/clock rather than
+    hardcoded. Test-only: no application behaviour is involved.
 22. Broker-suffix resolution (Step 52, extended in Step 54) requires the
     candidate to be the requested name plus a decoration: a separator with an
     empty or short alphanumeric tail, or a short alphabetic lowercase tag. An

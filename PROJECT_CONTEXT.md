@@ -421,7 +421,11 @@ Already implemented today:
   and — since the Step 54 relevance fix — the profiles document the Brent
   spellings (UKOIL, BRENT, and decorated forms such as UKOIL.) too, so a Brent
   position's calendar relevance comes from its documented factor tiers instead
-  of failing closed for having no currency leg.
+  of failing closed for having no currency leg. A later read-only coverage audit
+  of real broker catalogs extended the same table, as data only, with further
+  verified spellings (USCRUDE, XBRUSD, BRENTUSD, UKBRAND for oil; NASDAQ100,
+  USTECH, NDXUSD for the index), while futures/ETF tickers (CL, NQ, QQQ) are
+  deliberately not roots and no unprofiled instrument was given a profile.
 - portfolio intelligence (symbol exposure, directional balance, deterministic
   risk classification)
 - financial context (one read-only context for future AI consumption)
