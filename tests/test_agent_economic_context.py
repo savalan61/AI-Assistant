@@ -281,12 +281,12 @@ def test_calendar_provenance_is_preserved_in_the_prompt() -> None:
     assert "quantgist-free-development" in provider.prompts[0].content
 
 
-def test_each_event_carries_its_own_relevance_level() -> None:
+def test_each_retained_event_carries_its_own_relevance_level() -> None:
     economic = _RecordingEconomicService(
         make_economic_context(
             events=(
                 event_intelligence(CPI_EVENT, RelevanceLevel.POTENTIALLY_RELEVANT),
-                event_intelligence(IP_EVENT, RelevanceLevel.NOT_OBVIOUSLY_RELEVANT),
+                event_intelligence(IP_EVENT, RelevanceLevel.RELEVANT),
             )
         )
     )
@@ -299,7 +299,7 @@ def test_each_event_carries_its_own_relevance_level() -> None:
     cpi_line = next(line for line in content.splitlines() if CPI_EVENT.title in line)
     ip_line = next(line for line in content.splitlines() if IP_EVENT.title in line)
     assert "relevance POTENTIALLY_RELEVANT" in cpi_line
-    assert "relevance NOT_OBVIOUSLY_RELEVANT" in ip_line
+    assert "relevance RELEVANT" in ip_line
 
 
 def test_the_window_bounds_are_rendered_for_the_model() -> None:
@@ -331,7 +331,11 @@ def test_the_real_economic_service_flows_through_the_agent_prompt() -> None:
     content = provider.prompts[0].content
     # Deterministic placeholder events for today's UTC window.
     assert "US Consumer Price Index (CPI) YoY (placeholder)" in content
-    assert "Japan BoJ Interest Rate Decision (placeholder)" in content
+    # The relevance boundary: the JPY BoJ decision is NOT_OBVIOUSLY_RELEVANT for a
+    # XAUUSD position, so it is withheld from the evidence rather than handed to
+    # the model as material it could promote into the analysis.
+    assert "Japan BoJ Interest Rate Decision (placeholder)" not in content
+    assert "economic event(s) omitted" in content
     # Provenance of the placeholder source is carried into the prompt.
     assert "fake-development-placeholder" in content
     # XAUUSD holds USD, so a USD event is classified relevant to the position.

@@ -411,8 +411,11 @@ def test_research_preserves_the_step_48_grading() -> None:
         "relevance POTENTIALLY_RELEVANT (macro factor for XAUUSD: "
         "central-bank monetary policy)" in research_body
     )
-    # An item with no reference in play is stated, never guessed.
-    assert "relevance NOT_OBVIOUSLY_RELEVANT" in research_body
+    # An item with no reference in play is never presented as evidence: the
+    # relevance layer withholds it and the block states the withholding, so the
+    # model cannot promote it into the look-back analysis.
+    assert "relevance NOT_OBVIOUSLY_RELEVANT" not in research_body
+    assert "research item(s) omitted" in research_body
 
 
 def test_research_window_is_stated_and_precedes_the_calendar_window() -> None:

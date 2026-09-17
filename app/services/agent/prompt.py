@@ -29,6 +29,14 @@ Six deliberate restrictions on what is sent:
   factor: precious metals"), so the model can explain WHY an item matters to an
   instrument instead of guessing from keywords; items classified by the older
   symbol-string view render exactly as before;
+* the deterministic relevance layer is a hard boundary on the evidence itself,
+  not merely advice to the model: an item it graded NOT_OBVIOUSLY_RELEVANT for
+  every instrument in play is omitted from the calendar, fundamental and
+  research blocks (with the omission stated) instead of being handed over as
+  material the model can promote into the analysis. The boundary only ever
+  bounds what the layer actually assessed — with no instrument in play every
+  item is trivially NOT_OBVIOUSLY_RELEVANT, which is not a verdict, so the
+  published items are rendered exactly as before;
 * financial research (Step 49) is rendered as a third public-data block when the
   agent composed one: the same graded news — SAME item renderer, SAME discrete
   relevance levels, SAME factor notes — for the explicit look-back window that
@@ -55,7 +63,11 @@ from app.providers.llm import LLMPrompt
 from app.providers.position import Position
 from app.providers.trade_history import TradeHistoryEntry
 from app.services.agent.egress import OutboundDataPolicy
-from app.services.economic_intelligence import EconomicIntelligenceContext
+from app.services.economic_intelligence import (
+    EconomicIntelligenceContext,
+    EventIntelligence,
+    RelevanceLevel,
+)
 from app.services.financial_context import FinancialContext
 from app.services.fundamental_intelligence import (
     FinancialResearchContext,
@@ -89,6 +101,25 @@ _ABSENT = "-"
 _NO_EVENTS = "- none (no economic events are published for today)"
 _ECONOMIC_OMITTED_NOTE = (
     "Economic calendar: omitted because the financial context exceeded the prompt size limit."
+)
+
+# The relevance boundary. The deterministic relevance layer is what decides
+# whether an item belongs in the evidence handed to the model: an item it graded
+# NOT_OBVIOUSLY_RELEVANT for every instrument in play is withheld (with the
+# withholding stated), so the model cannot promote it into the analysis even
+# though it can still see it was published. The three states stay distinct — an
+# absent source, a source that published nothing, and a source whose items were
+# all unrelated — because they mean different things.
+_NO_RELEVANT_EVENTS = (
+    "- none (no economic event published for today is relevant to the instruments in play)"
+)
+_NO_RELEVANT_NEWS = (
+    "- none (no news item this source published for today is relevant to the "
+    "instruments in play)"
+)
+_RESEARCH_NO_RELEVANT_NEWS = (
+    "- none (no research item this source published in the look-back window is relevant "
+    "to the focus instrument)"
 )
 
 # Fundamental block: an empty feed, no holdings, and its size-reduction note.
@@ -199,12 +230,56 @@ def _trades_block(
     return lines, len(shown), len(ordered)
 
 
+def _is_relevance_evidence(level: RelevanceLevel) -> bool:
+    """True when the deterministic layer related an item to an instrument in play."""
+    return level is not RelevanceLevel.NOT_OBVIOUSLY_RELEVANT
+
+
+def _relevance_omitted_note(omitted: int, subject: str) -> str:
+    """The stated count of items withheld by the relevance boundary."""
+    return f"- ({omitted} {subject} omitted: not obviously relevant to any instrument in play)"
+
+
+def _relevant_events(economic: EconomicIntelligenceContext) -> tuple[EventIntelligence, ...]:
+    """The calendar events the relevance layer related to an instrument in play.
+
+    The boundary only bounds what was assessed: the calendar's verdicts are
+    computed against the open positions, so with no positions in play every
+    event is trivially NOT_OBVIOUSLY_RELEVANT and the full published calendar is
+    kept. The calendar therefore always reaches the model, and its relevance
+    verdicts are a filter on evidence rather than a claim about an empty account.
+    """
+    if not economic.position_symbols:
+        return economic.events
+    return tuple(
+        item for item in economic.events if _is_relevance_evidence(item.overall_relevance)
+    )
+
+
+def _relevant_news(
+    news: tuple[FundamentalNewsItem, ...], instruments_in_play: tuple[str, ...]
+) -> tuple[FundamentalNewsItem, ...]:
+    """The news items the relevance layer related to an instrument in play.
+
+    Same rule as the calendar: an item graded NOT_OBVIOUSLY_RELEVANT for every
+    instrument in play is not evidence for this request. With no instrument in
+    play the classification is vacuous, so the published items are kept rather
+    than silently withheld on the strength of a verdict about nothing.
+    """
+    if not instruments_in_play:
+        return news
+    return tuple(entry for entry in news if _is_relevance_evidence(entry.relevance))
+
+
 def _economic_block(economic: EconomicIntelligenceContext) -> list[str]:
     """Render today's economic calendar: public data, no account identity.
 
     The provenance marker is carried into the prompt exactly as it is into the
     API response, so a delayed or placeholder source can never be read as live
-    market data by the model either.
+    market data by the model either. Events the deterministic relevance layer
+    graded NOT_OBVIOUSLY_RELEVANT for every open position are withheld (the
+    count is stated), so the model cannot promote an unrelated release into the
+    fundamental analysis.
     """
     lines = [
         f"Economic calendar for today (source: {economic.data_source}; "
@@ -213,7 +288,11 @@ def _economic_block(economic: EconomicIntelligenceContext) -> list[str]:
     if not economic.events:
         lines.append(_NO_EVENTS)
         return lines
-    for item in economic.events:
+    events = _relevant_events(economic)
+    if not events:
+        lines.append(_NO_RELEVANT_EVENTS)
+        return lines
+    for item in events:
         event = item.event
         lines.append(
             f"- {event.timestamp.isoformat()} {event.currency} "
@@ -223,6 +302,9 @@ def _economic_block(economic: EconomicIntelligenceContext) -> list[str]:
             f"actual {event.actual if event.actual is not None else _ABSENT} "
             f"| {event.title}"
         )
+    omitted = len(economic.events) - len(events)
+    if omitted:
+        lines.append(_relevance_omitted_note(omitted, "economic event(s)"))
     return lines
 
 
@@ -276,13 +358,19 @@ def _fundamental_block(fundamental: FundamentalContext) -> list[str]:
         f"{fundamental.window_to.isoformat()}):",
         "News (published source facts, not analysis; relevance is a discrete relatedness level):",
     ]
+    news = _relevant_news(fundamental.news, fundamental.instruments)
     if not fundamental.news_available:
         lines.append(f"- news unavailable ({fundamental.news_unavailable_reason})")
     elif not fundamental.news:
         lines.append(_NO_NEWS)
+    elif not news:
+        lines.append(_NO_RELEVANT_NEWS)
     else:
-        for entry in fundamental.news:
+        for entry in news:
             lines.append(_news_line(entry))
+        omitted = len(fundamental.news) - len(news)
+        if omitted:
+            lines.append(_relevance_omitted_note(omitted, "news item(s)"))
     lines.append("Position fundamental exposure (factual status, not advice):")
     if not fundamental.positions:
         lines.append(_NO_EXPOSURE)
@@ -335,9 +423,16 @@ def _research_block(research: FinancialResearchContext) -> list[str]:
     elif not research.news:
         lines.append(_RESEARCH_NO_NEWS)
     else:
+        news = _relevant_news(research.news, research.focus_symbols)
+        if not news:
+            lines.append(_RESEARCH_NO_RELEVANT_NEWS)
+            return lines
         # The same renderer the fundamental block uses: one line format for all
         # graded news, whatever block carries it.
-        lines.extend(_news_line(entry) for entry in research.news)
+        lines.extend(_news_line(entry) for entry in news)
+        omitted = len(research.news) - len(news)
+        if omitted:
+            lines.append(_relevance_omitted_note(omitted, "research item(s)"))
     return lines
 
 
