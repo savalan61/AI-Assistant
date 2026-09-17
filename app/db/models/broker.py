@@ -4,7 +4,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 
-# Broker is the root tenant; all other entities are scoped to a broker.
+# The broker this deployment serves. This is a ONE-BROKER product: exactly one
+# brokers row must exist, and every request is bound to it (app/core/
+# dependencies.load_deployment_broker refuses to serve a database with none or
+# several), so this table is the deployment's canonical broker configuration —
+# name, MT5 server, suspended state — rather than a customer registry. Users and
+# the broker's LLM configuration reference it by id.
 class Broker(Base):
     __tablename__ = "brokers"
 

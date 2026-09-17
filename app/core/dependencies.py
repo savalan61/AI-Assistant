@@ -4,9 +4,11 @@ from typing import NoReturn
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import EconomicCalendarSource, NewsSource, settings
+from app.core.mt5_ownership import MT5OwnershipGuard, ownership_lock_path
 from app.core.mt5_session import MT5AccountCredentials, MT5SessionManager
 from app.core.security import SecurityError, decode_token
 from app.db.database import get_db
@@ -33,7 +35,7 @@ from app.services.auth import LoginThrottle
 from app.services.broker_llm_config import (
     BrokerLLMConfigurationError,
     LLMConnectionTester,
-    resolve_broker_llm_provider,
+    resolve_llm_provider,
 )
 from app.services.economic_calendar import EconomicCalendarService
 from app.services.economic_intelligence import EconomicIntelligenceService
@@ -55,10 +57,16 @@ from app.services.trade_history import TradeHistoryService
 # the only process-wide MT5 object. It is lazy and lock-guarded, and a failed
 # authentication is never cached (the manager forgets the identity so the next
 # request retries). Providers are no longer cached: they became cheap per-request
-# objects carrying the authenticated tenant's credentials, so no cached provider
-# can ever serve one tenant's data to another.
+# objects carrying the authenticated customer's credentials, so no cached provider
+# can ever serve one customer's data to another.
 _mt5_session_manager: MT5SessionManager | None = None
 _mt5_session_manager_lock = threading.Lock()
+
+# The single-owner guard for that session's terminal: process-global state, so it
+# is a lazy lock-guarded singleton like the manager above (see
+# get_mt5_ownership_guard).
+_mt5_ownership_guard: MT5OwnershipGuard | None = None
+_mt5_ownership_guard_lock = threading.Lock()
 
 
 def get_mt5_session_manager() -> MT5SessionManager:
@@ -66,8 +74,52 @@ def get_mt5_session_manager() -> MT5SessionManager:
     if _mt5_session_manager is None:
         with _mt5_session_manager_lock:
             if _mt5_session_manager is None:
-                _mt5_session_manager = MT5SessionManager()
+                # The deployment's terminal executable and IPC timeout enter here,
+                # at the composition root - never read inside the boundary - so
+                # the session manager stays a pure boundary that tests can drive
+                # without configuration. The timeout is converted to MT5's own
+                # unit (milliseconds) once, here.
+                timeout_ms = int(settings.MT5_TIMEOUT_SECONDS * 1000)
+                _mt5_session_manager = MT5SessionManager(
+                    terminal_path=settings.MT5_TERMINAL_PATH,
+                    timeout_ms=timeout_ms if timeout_ms > 0 else None,
+                )
     return _mt5_session_manager
+
+
+def get_mt5_ownership_guard() -> MT5OwnershipGuard:
+    """The process's MT5 terminal ownership guard (one per process).
+
+    Enforces the invariant the session manager cannot: the session lock is
+    thread-local to this process, so "exactly one process owns this terminal" has
+    to be held OUTSIDE the process - one exclusive OS file lock per terminal,
+    kept for the process lifetime (app/core/mt5_ownership.py). The lock is keyed
+    on MT5_TERMINAL_PATH, so a deployment that pins its own terminal is a
+    different owner from one that lets the package find it, and two processes
+    driving different terminals do not block each other.
+    """
+    global _mt5_ownership_guard
+    if _mt5_ownership_guard is None:
+        with _mt5_ownership_guard_lock:
+            if _mt5_ownership_guard is None:
+                _mt5_ownership_guard = MT5OwnershipGuard(
+                    lock_path=ownership_lock_path(settings.MT5_TERMINAL_PATH)
+                )
+    return _mt5_ownership_guard
+
+
+def reset_mt5_ownership_guard() -> None:
+    """Test/development seam: drop the guard so the next caller rebuilds it.
+
+    Any hold this process still has is released first, so a test that never
+    exited its lifespan cannot leave the process owning the terminal.
+    """
+    global _mt5_ownership_guard
+    with _mt5_ownership_guard_lock:
+        guard, _mt5_ownership_guard = _mt5_ownership_guard, None
+    if guard is not None:
+        while guard.owned:
+            guard.release()
 
 
 def shutdown_mt5_session() -> None:
@@ -94,38 +146,84 @@ def effective_mt5_login(user: User) -> str | None:
     return login if login.isdecimal() else None
 
 
-def effective_mt5_server(user: User, broker: Broker | None) -> str | None:
-    """The MT5 server this user's account lives on.
+def effective_mt5_server(broker: Broker | None) -> str | None:
+    """The MT5 server every customer of this deployment's broker trades on.
 
-    The user's own server wins; the broker's ``mt5_server`` remains the
-    fallback so a tenant-level configuration keeps working unchanged.
+    There is ONE broker and therefore one MT5 server: it is the broker's own
+    configuration (``brokers.mt5_server``) and nothing else can set it. A user
+    record has no server field at all, and no request may supply one, so a
+    customer's identity is always (the broker's server, that customer's login) —
+    which is what makes a customer unable to point their own reads at an MT5
+    server belonging to somebody else. A blank/unset value is simply "not
+    configured" and fails closed at the session boundary.
     """
-    explicit = (user.mt5_server or "").strip()
-    if explicit:
-        return explicit
-    return broker.mt5_server if broker is not None else None
+    configured = (broker.mt5_server or "").strip() if broker is not None else ""
+    return configured or None
 
 
 def resolve_mt5_account_credentials(user: User, broker: Broker | None) -> MT5AccountCredentials:
-    """Extract a tenant's MT5 identity from the authenticated database rows.
+    """Extract one customer's MT5 identity from trusted server-side rows only.
 
-    The login and server are the *effective* ones (see the helpers above): the
-    user's own ``login`` when it is numeric, and the user's own MT5 server when
-    present, otherwise the broker's server. ``mt5_password_encrypted`` is
-    the stored ciphertext of the MT5 INVESTOR (read-only) password — the trading
-    password is never accepted anywhere in this system. Nothing is decrypted
-    here — the ciphertext travels to the session boundary, which is the only
-    place the plaintext exists — and nothing raises: an incomplete record fails
-    closed there, with a message that never discloses which value was missing.
-    Tenant identity therefore always comes from the database User, never from a
-    request body or a token claim.
+    The identity is (this deployment's broker MT5 server, the user's own
+    ``login``): both halves come from the database, never from a request body, a
+    query parameter or a token claim, so no caller can select another customer's
+    account or another broker's server. ``login`` is the MT5 account number as
+    well as the application login; a non-numeric login is not an account number
+    and fails closed. ``mt5_password_encrypted`` is the stored ciphertext of the
+    customer's MT5 INVESTOR (read-only) password — the trading password is never
+    accepted anywhere in this system. Nothing is decrypted here: the ciphertext
+    travels to the session boundary, which is the only place the plaintext
+    exists, and nothing raises — an incomplete record fails closed there with a
+    message that never discloses which value was missing.
     """
     login = effective_mt5_login(user)
     return MT5AccountCredentials(
         login=int(login) if login is not None else None,
-        server=effective_mt5_server(user, broker),
+        server=effective_mt5_server(broker),
         password_encrypted=user.mt5_password_encrypted,
     )
+
+
+# --- the one broker this deployment serves ----------------------------------
+#
+# This is a ONE-BROKER product: the deployment IS one broker's assistant, so the
+# broker is not a per-request (or per-deployment-name) selector — it is the one
+# row in the brokers table, and every authenticated request is bound to it here.
+#
+# Binding it in exactly one place is what keeps the boundary honest:
+#
+#   * no endpoint accepts a broker id, code, login, server or role from the client;
+#   * a user row belonging to any other broker can never authenticate, so such a
+#     row is inert rather than a second tenant;
+#   * the broker's suspended state fails closed for every request immediately;
+#   * a database that is not a one-broker database (no row, or several) fails
+#     closed instead of arbitrarily picking one.
+_deployment_logger = logging.getLogger(__name__)
+
+
+def _deployment_unavailable(reason: str) -> None:
+    """Log the precise reason server-side; the client keeps a generic answer."""
+    _deployment_logger.warning("The deployment's broker is not usable (%s); refusing the request", reason)
+
+
+async def load_deployment_broker(session: AsyncSession) -> Broker | None:
+    """The single broker row this deployment serves, or None when unusable.
+
+    Exactly one row is required. None means the deployment is misconfigured — no
+    broker at all, or several (a leftover from the multi-broker era, which would
+    make "which broker is this?" ambiguous) — and every caller fails closed.
+
+    An INACTIVE row is still returned: suspension has its own, existing answer
+    (401 for authentication, the established "unavailable" detail for the
+    provisioning paths), so the reason stays precise in the logs without
+    changing any status code the API already promised.
+    """
+    result = await session.execute(select(Broker).order_by(Broker.id.asc()))
+    brokers = result.scalars().all()
+    if len(brokers) != 1:
+        _deployment_unavailable(f"{len(brokers)} brokers rows exist, exactly one is required")
+        return None
+    return brokers[0]
 
 
 # Economic-calendar wiring. No MT5 terminal and no credentials are involved, so
@@ -321,15 +419,15 @@ def get_fundamental_intelligence_service() -> FundamentalIntelligenceService:
     return FundamentalIntelligenceService(news_service=get_news_service())
 
 
-# Agent LLM wiring. The production seam is the broker-aware router: a broker
-# with an active configuration uses its own provider, and a broker without one
-# uses the shared free pool. The router is built per request because the tenant
-# — and therefore the provider — differs per authenticated broker.
+# Agent LLM wiring. The production seam is the deployment's own configuration:
+# when this broker's LLM configuration is active it is used, and when the broker
+# has none the shared free pool applies. Both are resolved per request (the
+# configuration row can be changed at any time by the operator).
 #
 # Tests override this seam (deps.get_llm_provider) with the deterministic
 # FakeLLMProvider, keeping the suite offline and AgentService unchanged.
 def get_free_llm_pool() -> LLMProvider:
-    """The shared system fallback pool used when a broker has no active provider.
+    """The shared system fallback pool used when the broker has no configuration.
 
     Providers are tried in order, falling through only on transient failures:
 
@@ -389,21 +487,20 @@ def get_free_llm_pool() -> LLMProvider:
     return LLMProviderPool(providers)
 
 
-async def get_llm_provider(broker_id: int, session: AsyncSession) -> LLMProvider:
-    """Resolve the production LLM seam for one broker (composition boundary).
+async def get_llm_provider(session: AsyncSession) -> LLMProvider:
+    """Resolve the production LLM seam for this deployment (composition boundary).
 
-    ``broker_id`` comes from the authenticated database user, never from a
-    request body. A broker whose active configuration exists but cannot be used
-    fails safely here, so its traffic never silently moves onto the shared free
-    pool; a broker with no active configuration gets the free pool.
+    There is one broker, so there is one stored LLM configuration. A
+    configuration that exists but cannot be used fails safely here, so the
+    broker's traffic never silently moves onto the shared free pool; a broker
+    with no active configuration gets the free pool.
     """
     try:
-        broker_provider = await resolve_broker_llm_provider(session=session, broker_id=broker_id)
+        configured_provider = await resolve_llm_provider(session=session)
     except BrokerLLMConfigurationError:
         raise HTTPException(status_code=503, detail="Agent service temporarily unavailable")
     return LLMRouter(
-        broker_id=broker_id,
-        broker_provider=broker_provider,
+        configured_provider=configured_provider,
         free_pool=get_free_llm_pool(),
     )
 
@@ -530,12 +627,16 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise _unauthorized("User not found or inactive")
 
-    # The tenant must still be active. Login already checks this, but a token
-    # issued before a broker was suspended must stop working immediately rather
-    # than at the next login. The same generic detail is reused so the response
-    # never reveals whether the user, the broker, or the role caused it.
-    broker = await session.get(Broker, user.broker_id)
-    if broker is None or not broker.is_active:
+    # The deployment is bound to exactly ONE broker (the single brokers row), and
+    # only that broker's users exist. A user row belonging to any other broker is refused
+    # here — it is not a second customer, it is a row this deployment does not
+    # serve, and it can never authenticate. The broker must also still be
+    # active: login already checks that, but a token issued before the broker was
+    # suspended must stop working immediately rather than at the next login. One
+    # generic detail covers user, broker and role so the response never reveals
+    # which condition caused it.
+    broker = await load_deployment_broker(session)
+    if broker is None or not broker.is_active or user.broker_id != broker.id:
         raise _unauthorized("User not found or inactive")
 
     return user
@@ -573,10 +674,10 @@ async def get_current_super_admin(
     return current_user
 
 
-# --- tenant-scoped MT5 composition -----------------------------------------
+# --- customer-scoped MT5 composition -----------------------------------------
 #
 # Everything below depends on the authenticated user, so it is declared after
-# the authentication boundary. The tenant's MT5 credentials are resolved once
+# the authentication boundary. The customer's MT5 credentials are resolved once
 # per request (FastAPI caches a dependency's result within a request) and shared
 # by every MT5-backed service, so there is one broker read and no per-provider
 # duplication. Each provider is a cheap per-request object; the process-wide
@@ -585,14 +686,17 @@ async def get_mt5_credentials(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ) -> MT5AccountCredentials:
-    """Resolve the authenticated tenant's MT5 credentials.
+    """Resolve the authenticated customer's MT5 credentials.
 
-    ``current_user`` and the broker come from the database, never from the
-    request: a caller cannot select another tenant's MT5 account, server or
-    password. The value stays encrypted here; decryption happens only inside the
-    session boundary.
+    Both halves of the identity come from trusted data: the account number is
+    the authenticated user's own ``login`` row and the MT5 server is the
+    deployment broker's own configuration — never a request parameter. Because
+    get_current_user() has already bound the caller to the one broker this
+    deployment serves, the broker loaded here IS the caller's broker. The value
+    stays encrypted at this point; decryption happens only inside the session
+    boundary.
     """
-    broker = await session.get(Broker, current_user.broker_id)
+    broker = await load_deployment_broker(session)
     return resolve_mt5_account_credentials(current_user, broker)
 
 
@@ -631,9 +735,9 @@ def get_trade_history_service(
 def get_instrument_service(
     credentials: MT5AccountCredentials = Depends(get_mt5_credentials),
 ) -> InstrumentService:
-    # Same tenant-scoped MT5 composition path as the other broker-data services:
+    # Same customer-scoped MT5 composition path as the other broker-data services:
     # the provider is a cheap per-request object holding the authenticated
-    # tenant's credentials, and provider selection is explicit (and therefore
+    # customer's credentials, and provider selection is explicit (and therefore
     # replaceable in tests) rather than hidden behind a factory.
     provider = MT5InstrumentProvider(session_manager=get_mt5_session_manager(), credentials=credentials)
     return InstrumentService(provider)
@@ -645,15 +749,15 @@ def get_financial_research_service(
     """Compose the graded research context from the news seam and the catalog.
 
     Declared below the authentication boundary because it now needs this
-    tenant's own MT5 identity: it reuses the news seam unchanged (same
+    customer's own MT5 identity: it reuses the news seam unchanged (same
     NEWS_SOURCE selection, same development-only posture, same failure
     behaviour) AND the same instrument service GET /instruments uses, so a
-    caller-named instrument is resolved against the authenticated tenant's own
+    caller-named instrument is resolved against the authenticated customer's own
     broker catalog before anything is researched — one resolution architecture,
     one credential path, no duplicate lookup.
 
-    The research service itself still reads no positions and holds no tenant
-    identity, so it carries nothing tenant-sensitive by construction.
+    The research service itself still reads no positions and holds no customer
+    identity, so it carries nothing customer-sensitive by construction.
     """
     return FinancialResearchService(
         news_service=get_news_service(),
@@ -697,11 +801,11 @@ async def get_agent_service(
     authenticated user: the broker's own LLM configuration is resolved from
     that user's broker (never from the request body), and a broker with no
     active configuration uses the shared free pool. The financial context reads
-    the *same* tenant's MT5 session as every other endpoint, so AgentService
+    the *same* customer's MT5 session as every other endpoint, so AgentService
     depends on LLMProvider alone.
     """
     credentials = await get_mt5_credentials(current_user, session)
-    llm_provider = await get_llm_provider(current_user.broker_id, session)
+    llm_provider = await get_llm_provider(session)
     # Built once and shared by both consumers, so one request performs exactly
     # one calendar read and one position read for its calendar context.
     economic_intelligence = get_economic_intelligence_service(credentials)
@@ -717,7 +821,7 @@ async def get_agent_service(
         data_policy=get_outbound_data_policy(),
         # Step 45: today's economic intelligence is composed into the same
         # prompt through the EXISTING calendar/intelligence composition path
-        # (the one GET /economic-intelligence/today uses), so tenants see one
+        # (the one GET /economic-intelligence/today uses), so customers see one
         # calendar architecture. That path fails closed outside development
         # (no calendar source may serve a broker's customers), and a provider
         # failure surfaces as the established generic 503.
@@ -733,7 +837,7 @@ async def get_agent_service(
         # ONLY when the request names a focus instrument, for the look-back span
         # immediately before the calendar window — so it adds news the fundamental
         # block does not already carry without fetching any window twice. Since
-        # Step 51 it also resolves that focus instrument through this tenant's own
+        # Step 51 it also resolves that focus instrument through this customer's own
         # broker catalog before researching it.
         financial_research_service=get_financial_research_service(credentials),
     )

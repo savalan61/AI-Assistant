@@ -28,9 +28,22 @@ AI Financial Assistant / AI Broker Assistant
 
 ## Product Goal
 
-Build a production-oriented B2B AI financial assistant for brokers.
+Build a production-oriented AI financial assistant for ONE broker.
 
-The Broker provides the assistant to its customers.
+**Product decision (2026-09-17): the Agent is for ONE BROKER ONLY.**
+Multi-broker support is no longer a product requirement. The deployment is one
+broker's assistant for its customers; the broker is the single `brokers` row,
+resolved server-side, and no request can select a tenant.
+
+The customer's own data must remain isolated from every other customer's: the
+boundary that must hold is customer-to-customer, and it is pinned by
+tests/test_customer_mt5_isolation.py.
+
+The current MT5-based integration remains the current implementation. A future
+architecture MAY replace MT5 with official Broker APIs if the broker provides
+(a) an Account/Customer data API and (b) a Market Data/Price API — the existing
+provider contracts are the seam. That is a recorded possibility, not an
+implementation task.
 
 Future client channels may include:
 
@@ -43,9 +56,9 @@ The backend and AI agent should remain channel-independent.
 
 ## Business Model
 
-The main tenant is Broker.
+The ONE Broker is the operator of this deployment.
 
-A Broker creates and manages application users.
+The Broker creates and manages application users (its customers).
 
 Users do not self-register.
 
@@ -54,14 +67,16 @@ Application credentials and MT5 credentials are separate.
 Current model:
 
 - login = the user's single identity: the application/Agent login AND the MT5
-  account/login number (one column since Step 42; there is no separate username)
-- mt5_server = the user's MT5 server (administrator-provisioned)
+  account/login number (one column since Step 42; there is no separate username);
+  unique deployment-wide since the one-broker refactor)
+- mt5_server = the BROKER's configuration (the one MT5 server; there is no
+  per-user server column — the one-broker refactor dropped it)
 - password_hash = Agent/application password
 - mt5_password_encrypted = encrypted MT5 INVESTOR (read-only) password
 
-Broker initially supplies the credentials.
+The Broker initially supplies the credentials.
 
-A Broker may reset an application password but should not see the user's current password.
+The Broker may reset an application password but should not see the user's current password.
 
 ## Core Entities
 
@@ -69,9 +84,9 @@ Current implemented core entities (database models):
 
 - Broker
 - User (super_admin / admin / customer)
-- BrokerLLMConfig (a broker's own LLM provider, model, endpoint and encrypted
-  API key; exactly one row per broker, enforced by a unique constraint on
-  broker_id)
+- BrokerLLMConfig (the deployment broker's LLM provider, model, endpoint and
+  encrypted API key; exactly one row, enforced by a unique constraint on
+  broker_id against the single brokers row)
 
 Current implemented provider contracts (not database models):
 
@@ -102,14 +117,14 @@ The repository must be treated as the source of truth for the exact current mode
 
 ## Broker
 
-Broker is the tenant root.
+Broker is the deployment's single operator row (the one-broker refactor).
 
 Current known fields:
 
 - id
 - name
 - code
-- mt5_server
+- mt5_server (the ONE MT5 server every customer's account lives on)
 - is_active
 
 ## User
@@ -117,12 +132,11 @@ Current known fields:
 Current known fields:
 
 - id
-- broker_id
+- broker_id (integrity reference to the single brokers row)
 - login
 - email
 - phone
 - password_hash
-- mt5_server
 - mt5_password_encrypted
 - is_active
 - role (super_admin / admin / customer)
@@ -130,23 +144,26 @@ Current known fields:
 Important:
 
 - login is BOTH the application/Agent login and the MT5 account/login number;
-  it is a string so a leading zero survives. Credential resolution uses it
-  directly when it is numeric, and fails closed at the session boundary when it
-  is not.
+  it is a string so a leading zero survives, and it is unique deployment-wide
+  (one broker ⇒ one login namespace). Credential resolution uses it directly
+  when it is numeric, and fails closed at the session boundary when it is not.
 - password_hash is the application/Agent password
-- mt5_server holds the user's MT5 server. A broker administrator provisions it
-  (admin: customers only; super_admin: any user in its broker) through
-  PUT /users/{user_id}/mt5-credentials. It is nullable: when NULL, credential
-  resolution falls back to Broker.mt5_server. The MT5 account number is never
-  provisioned separately — it is the user's own login.
+- There is NO per-user mt5_server column (dropped by the one-broker refactor):
+  the MT5 server is Broker.mt5_server, the one server, and no request can
+  supply one. The MT5 account number is never provisioned separately either —
+  it is the user's own login. Provisioning (PUT /users/{user_id}/mt5-credentials)
+  writes ONLY the encrypted investor password.
 - mt5_password_encrypted is the encrypted MT5 INVESTOR (read-only) password. The
   trading/master password is never requested, stored or used, a customer can
   neither provision nor read the credential, and no API returns it.
-- role follows the three-role model (Step 21A): exactly one super_admin per
-  Broker (enforced by a database partial unique index), any number of admins,
-  and customers. It was broker_admin/customer before that migration.
+- role follows the three-role model (Step 21A): exactly ONE super_admin in the
+  deployment (enforced by a database partial unique index over the role value
+  itself), any number of admins, and customers. It was broker_admin/customer
+  before that migration.
 
-User tenant ownership is defined by broker_id.
+Customer isolation is customer-to-customer: every customer of the one broker
+has its own account, and no request field can redirect a read to another
+customer's.
 
 ## Trading Safety
 
@@ -226,7 +243,10 @@ symbol lookup never mutates terminal state (no symbol_select). Resolution and
 ordering are deterministic and belong to `InstrumentService`
 (app/services/instruments), which resolves a symbol exactly first and then by a
 unique case-insensitive match, lists/searches the catalog as a literal
-case-insensitive substring over symbol and description, and caps a listing at  200 instruments while reporting `total` and `truncated`. A requested symbol
+case-insensitive substring over symbol and description, and caps a listing at  200 instruments while reporting `total` and `truncated`. A multi-name
+resolution (`resolve_many`) applies those same rules against ONE catalog
+discovery per operation, so a request naming several suffixed instruments reads
+the broker's catalog once instead of once per instrument. A requested symbol
   that the broker does not list verbatim resolves through a unique
   case-insensitive match, and — since Step 52, extended in Step 54 — through a
   unique broker-DECORATED spelling of it (`XAUUSD` → `XAUUSD.r`, `XAUUSD.p`,
@@ -267,7 +287,10 @@ Providers and services are deliberately synchronous.
 
 All MT5-backed endpoints move the blocking operation outside the FastAPI
 event loop through the consolidated blocking boundary run_mt5_call in
-app/core/blocking.py (worker threadpool).
+app/core/blocking.py (worker threadpool). Blocking work that is NOT MT5 uses a
+separate boundary: run_llm_call, in the same module, runs the outbound model call
+on the event loop's default executor — a different pool — so a request waiting on
+a model never holds a worker thread an MT5 read needs.
 
 The provider contains MT5-specific integration logic.
 
@@ -277,26 +300,158 @@ The application must not expose MT5 implementation details unnecessarily.
 
 The current architecture includes:
 
-- tenant-scoped MT5 authentication: the request's own (server, login) identity is
-  resolved from the authenticated database user and the broker row, and the
+- customer-scoped MT5 authentication: the request's own (server, login) identity is
+  resolved from the authenticated database user and the ONE broker row (the
+  server is the broker's own configuration), and the
   password is decrypted only inside the session boundary
 - one process-wide MT5SessionManager (app/core/mt5_session.py) that owns the
   single global terminal connection: it holds the lock for a whole
-  acquire → raw-read span, reuses the session when the tenant already matches,
+  acquire → raw-read span, reuses the session when the customer already matches,
   switches accounts under that lock, and forgets the identity after any failed
   authentication or read
-- per-request provider objects carrying one tenant's credentials; the former
+- per-request provider objects carrying one customer's credentials; the former
   process-wide provider caches are gone
-- no startup warm-up (no tenant exists at boot); the session is established
+- no startup warm-up (no customer exists at boot); the session is established
   lazily by the first authenticated MT5 request
 - graceful shutdown releasing the single session from the FastAPI lifespan
 - blocking MT5 calls through the consolidated run_mt5_call boundary
-  (app/core/blocking.py)
+  (app/core/blocking.py), and the non-MT5 model call through the separate
+  run_llm_call boundary in the same module (a different thread pool)
 
 The MT5 Python API authenticates ONE account per process, so every MT5 read in
 the process is serialized on that single terminal. That is the documented cost
-of tenant safety; the production answer (one MT5 worker process per broker)
+of customer safety; the production answer (worker processes per account group)
 remains future work.
+
+### Confirmed process-global state
+
+- the MetaTrader5 package is imported in exactly one module,
+  app/core/mt5_session.py; no other module or provider touches it
+- _mt5_session_manager (app/core/dependencies.py) is a process-local lazy
+  singleton, created once under its own lock and shared by every request, and
+  _active_key records the (server, login) most recently authenticated
+- the session manager holds a threading.RLock for a whole acquire → raw-read
+  span, so concurrent customer reads are serialized and an account switch can
+  never land inside another customer's read (asserted by tests/test_mt5_session.py
+  and tests/test_customer_mt5_isolation.py)
+- account switching reuses the ONE terminal connection: first contact calls
+  initialize(login, password, server), a customer with a different (server, login)
+  calls login(...) on that same session. The Python API exposes no connection or
+  session handle on any read function, so there are no independent per-account
+  handles to multiplex inside one process
+- one exclusive OS lock per terminal is held for the process lifetime
+  (app/core/mt5_ownership.py), taken from the FastAPI lifespan before any MT5 work
+  and released only after the session is closed, and a process that cannot take it
+  refuses to start
+
+### Deployment invariant: one process owns the MT5 terminal (ENFORCED)
+
+The current architecture requires exactly ONE application process to own the MT5
+session/terminal. The session lock is in-process only, so it protects nothing
+across OS processes: two application processes pointed at the same terminal would
+authenticate it independently and one could read the account the other switched
+to. That invariant is now enforced by the application, not merely documented:
+
+- app/core/mt5_ownership.py takes an exclusive OS-level file lock for the process
+  lifetime. The kernel decides ownership, so there is no check-then-act window for
+  two processes to race through, and the OS releases the lock when the process
+  exits (including on a crash), so no stale lock is ever left for an operator to
+  clear.
+- The lock is per TERMINAL, keyed on MT5_TERMINAL_PATH: two deployments that pin
+  different terminals do not block each other, while two processes that would
+  drive the same terminal — including both leaving the path unset and letting the
+  package find it — cannot both start. It lives in the OS temporary directory,
+  which is per user, matching the terminal's own scope.
+- Ownership is acquired from the FastAPI lifespan before any MT5 work and released
+  last, after the session is closed, so no other process can start driving the
+  terminal while this one still holds a connection to it.
+- Failure is closed and explicit: MT5OwnershipError propagates out of the
+  lifespan, so the process refuses to start rather than serve MT5 reads it cannot
+  isolate. The message names the lock file and the setting to change, and carries
+  no credential.
+- This is a guard, not an architecture: no worker processes, no queue, no
+  gateway, no distributed lock. Deliberately running several processes against
+  several terminals stays roadmap work — the P8 topology decision, then P12 — and
+  must not be implemented speculatively. A centralized MT5 gateway is not
+  justified today.
+
+### Session identity verification
+
+The authenticated identity is verified, not trusted: before a read is served the
+terminal itself must confirm the requested (server, login) through
+`account_info()`. A mismatch (a broker-side re-login, a manual login at the
+terminal, another process sharing the terminal) re-authenticates under the lock,
+and an identity that still cannot be confirmed fails closed (503) and is
+forgotten, so the next request authenticates from a clean `initialize()`.
+Unreadable, absent or malformed account data counts as "not confirmed", never as
+a match. The login number is compared exactly and the server case-insensitively,
+with an absent server name falling back to the login match. Authentication is
+bounded by an explicit IPC timeout, and an optional terminal executable pins
+WHICH terminal is driven; both come from configuration (MT5_TERMINAL_PATH,
+MT5_TIMEOUT_SECONDS) and are omitted when unset. The cost is one extra local
+`account_info()` call per acquire. Customer-to-customer isolation through this
+boundary is pinned end to end by tests/test_customer_mt5_isolation.py.
+
+### Agent threading (two boundaries)
+
+The agent boundary is two phases so the API can thread them separately.
+`AgentService.prepare()` performs every blocking read (the MT5 financial context,
+the calendar and the research window) and returns a prepared request;
+`AgentService.respond()` renders the prompt from those resolved contexts (pure
+CPU) and makes the single outbound model call, touching no MT5, no session and no
+credential. `POST /agent` therefore runs `prepare` through run_mt5_call (the MT5
+worker is released as soon as it returns) and `respond` through run_llm_call, so
+a request waiting on the model holds no worker an MT5 read needs. `handle()`
+remains as the synchronous composition of both, for callers that own their own
+threading. The Broker LLM configuration connection tester's model probe runs
+through the same run_llm_call boundary, so no model round trip anywhere in the
+HTTP layer occupies an MT5 worker.
+
+### Production risks (identified, NOT fixed)
+
+- an accidental multi-process deployment breaks customer isolation (above)
+- read calls other than authentication still have no timeout (the package
+  exposes none per call), so a hung read still blocks the process-wide session
+- one request still performs several lock acquisitions: every MT5 read acquires
+  the session, so it pays its own identity verification, and one exact
+  `symbol_info` lookup is needed per requested instrument name (only the terminal
+  can say whether a spelling exists). The same-request duplicate READS that were
+  safe to remove are gone: the agent reads positions once and scores calendar
+  relevance against that same snapshot, research reuses the resolution it already
+  performed, and a multi-instrument resolution discovers the broker's catalog
+  ONCE per operation instead of once per instrument (`InstrumentService.resolve_many`).
+  The market-data symbol-resolution read before the candle read is deliberately
+  RETAINED: it is how the caller's spelling becomes the broker's own
+  (``xauusd`` -> ``XAUUSD.r``), so removing it would break every suffixed catalog
+  (CURRENT_CHECKPOINT.md known issue 24). A client-level answer no longer resets
+  the cached session identity: the provider classifies the terminal's own reply
+  (a symbol it says it does not offer, or no bars for the requested window, vs an
+  IPC/transport failure), and the session boundary keeps the verified identity
+  only for the former while a transport failure still drops it — every read,
+  either way, confirms that identity with the terminal before it is served (known
+  issues 32 and 33, resolved: the instrument and market-data providers each keep
+  their own client/availability threshold rather than sharing one). The codes
+  themselves were verified against the LIVE terminal, not only the installed
+  package: an unattached read reports (-10004, 'No IPC connection'), a
+  candle-read miss reports (-1, 'Terminal: Call failed'), and a symbol_info miss
+  reports (-4, 'Terminal: Not found') — the last of which corrected the original
+  instrument-side rule, and in every case the connection stayed usable
+  immediately after the miss
+- a customer whose stored server string does not match the server the terminal
+  reports now fails closed. That is the point of the verification, but it is the
+  one assumption not yet exercised against a real terminal
+
+### Scaling direction (future work — NOT implemented)
+
+The single-process topology is acceptable at the current stage. Account count
+alone does not determine the scaling requirement; peak concurrent MT5 reads and
+read duration do. Future scaling moves toward stateless FastAPI processes plus
+dedicated Windows MT5 worker processes with account affinity; a
+centralized MT5 gateway is not justified today. That is roadmap work (the P8
+topology decision, then P12) and must not be implemented
+speculatively. If the broker later offers official account/data and
+market-data APIs, replacing MT5 with them is the other recorded direction —
+a possibility, not a task.
 
 Do not redesign it unless explicitly instructed.
 
@@ -312,7 +467,7 @@ Current JWT-protected, read-only endpoints:
   ("xauusd" reads the broker's "XAUUSD", and a catalog that only lists
   "XAUUSD.r" is read for "XAUUSD.r"); unknown or ambiguous → the existing 404,
   MT5/catalog unavailable → the existing 503
-- GET /instruments → bounded instrument catalog from the authenticated tenant's
+- GET /instruments → bounded instrument catalog from the authenticated customer's
   own MT5 terminal; {instruments, total, truncated}, extra optional fields are
   null when the broker omits them, an empty match is 200 with
   {"instruments": []}, and the query is a literal substring `search`
@@ -331,16 +486,17 @@ Current JWT-protected, read-only endpoints:
   (omitted/null → customer; "admin" requires a super_admin caller; "super_admin"
   is refused for every caller)
 - POST /users/admins → super_admin-protected admin creation
-- GET /users → role-based, tenant-scoped user listing
+- GET /users → role-based user listing (super_admin: admins + customers,
+  never itself; admin: customers only)
 - GET/PATCH/DELETE /users/{user_id} → super_admin-only single-user read, partial
-  update and delete inside the caller's broker
+  update and delete
 - POST /agent, GET /economic-intelligence/today,
   GET /fundamental-intelligence/today?symbol=<optional instrument>,
   GET /financial-research/today?from=<UTC ISO>&to=<UTC ISO>&symbol=<instruments>
   (resolved against the caller's own broker catalog since Step 51: the broker's
   canonical symbols are echoed, an instrument the broker does not offer is a 404,
   an unavailable catalog or news source is a 503),
-  GET /instruments and GET /instruments/{symbol} → the tenant's own MT5
+  GET /instruments and GET /instruments/{symbol} → the customer's own MT5
   instrument catalog,
   GET /portfolio-intelligence, GET/PUT /broker-llm-config → the read-only AI
   surface and broker LLM settings
@@ -352,12 +508,13 @@ Current JWT-protected, read-only endpoints:
 
 Plus unauthenticated infrastructure:
 
-- POST /auth/login → JWT access token. Requires the broker code, the user's
-  login (the MT5 account/login number) and the application password: `login` is
-  unique only per broker, so the tenant is selected explicitly and the credential
-  lookup is scoped to that broker_id (Step 43). The tenant a request is
-  authorized for still comes from the database User record, never from the token.
-  A missing `broker` is a 422; there is no legacy login-only form.
+- POST /auth/login → JWT access token. Requires ONLY the user's login (the MT5
+  account/login number) and the application password: the deployment's one
+  broker is resolved server-side and `login` is unique deployment-wide, so
+  nothing the request carries can select a customer (the one-broker refactor
+  removed the former Step 43 `broker` field). The identity a request is
+  authorized for still comes from the database User record, never from the
+  token.
 - GET /health → simple liveness probe (does not reflect MT5 readiness)
 
 Expected error mapping currently includes:
@@ -373,11 +530,15 @@ Expected error mapping currently includes:
 
 Important security principles:
 
-- tenant isolation
-- explicit tenant selection at login (broker code + login + application
-  password); the lookup is scoped to the resolved broker, unknown/ambiguous
-  brokers fail closed, every rejection answers identically, and the throttle
-  counts failures per (broker, login) so tenants cannot lock each other out
+- customer isolation (customer-to-customer; the deployment has one broker, so
+  cross-broker isolation is no longer the boundary — customer identity is:
+  the one broker's server + each customer's own login, verified against the
+  terminal before every read, pinned by tests/test_customer_mt5_isolation.py)
+- one-broker binding: the broker is the single brokers row resolved
+  server-side (none or several rows ⇒ fail closed), `login` is unique
+  deployment-wide, every rejection at login answers identically, and the
+  throttle counts failures per (client IP, submitted login) so one customer
+  cannot lock another out
 - secure credential handling
 - no hard-coded credentials
 - .env must not be committed
@@ -414,7 +575,7 @@ Already implemented today:
 - instrument discovery (Step 50): every instrument the broker's MT5 account
   offers is resolvable/discoverable through a vendor-neutral contract and a
   deterministic service, so no feature has to hardcode a symbol list. The
-  contract is read-only and tenant-scoped, works for arbitrary broker symbols
+  contract is read-only and customer-scoped, works for arbitrary broker symbols
   (with or without a broker suffix), and holds no cache, database catalog,
   scheduler or ingestion. The XAUUSD/USOIL/NASDAQ fundamental relevance profiles
   remain optional intelligence enhancements layered on top of a resolved symbol,
@@ -429,10 +590,10 @@ Already implemented today:
 - portfolio intelligence (symbol exposure, directional balance, deterministic
   risk classification)
 - financial context (one read-only context for future AI consumption)
-- JWT authentication, three roles and tenant-scoped user management
+- JWT authentication, three roles and user management
   (super_admin CRUD, admin manages customers)
 - read-only AI agent (POST /agent) with a deterministic scope guard, a
-  per-user daily limit, broker-scoped encrypted LLM configuration and an LLM
+  per-user daily limit, the deployment's encrypted LLM configuration and an LLM
   router with a free-pool fallback boundary
 - economic intelligence composed into every agent request (Step 45: the agent
   receives today's economic calendar alongside the financial context and asks
@@ -458,9 +619,9 @@ Already implemented today:
   GET /financial-research/today endpoint taking an explicit UTC window and
   explicit focus instruments (for example XAUUSD,USOIL) and returning graded
   published-source news with provenance; unlike the fundamental context it
-  holds no account, position or tenant data, and it reuses the exact same
+  holds no account, position or customer data, and it reuses the exact same
   classification so the two surfaces can never disagree. Since Step 51 every
-  requested instrument is resolved against the authenticated tenant's own MT5
+  requested instrument is resolved against the authenticated customer's own MT5
   catalog first and only the broker's canonical spelling is graded — a name the
   broker does not offer is a deterministic 404 (`Instrument unavailable for the
   requested symbol`), never an unverified spelling researched anyway — and an

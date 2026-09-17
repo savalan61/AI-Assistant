@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.numeric import DecimalAsNumber
-from app.core.blocking import run_mt5_call
+from app.core.blocking import run_llm_call, run_mt5_call
 from app.core.config import settings
 from app.core.dependencies import get_agent_service, get_agent_usage_limiter, get_current_user
 from app.db.models import User
@@ -50,7 +50,7 @@ class AgentRequest(BaseModel):
 
     # Deliberately no broker_id/user_id field: extra="forbid" turns any such
     # supplied field into 422, so a caller can never widen or redirect the
-    # tenant scope. Tenant identity comes only from the authenticated user.
+    # customer scope. Tenant identity comes only from the authenticated user.
 
 
 # Numbers only: login, holder name and server are deliberately omitted — the
@@ -186,22 +186,30 @@ async def handle_agent_message(
         raise HTTPException(status_code=422, detail="Request is outside the assistant's financial scope")
 
     try:
-        limiter.check_and_consume(current_user.broker_id, current_user.id, datetime.now(UTC))
+        limiter.check_and_consume(current_user.id, datetime.now(UTC))
     except UsageLimitExceededError:
         # Generic message: no counters, identities or internals are exposed.
         raise HTTPException(status_code=429, detail="Daily agent request limit reached")
 
-    # The agent reads the financial context (blocking MT5), so the whole call is
-    # offloaded through the consolidated MT5 blocking boundary. RuntimeError
-    # means an MT5/LLM infrastructure failure (server error 503); the generic
-    # detail never leaks provider internals. Unexpected exceptions propagate.
+    # The agent runs as two phases on two boundaries, so a request waiting on the
+    # model never holds an MT5 worker:
+    #   1. prepare(): EVERY blocking read (the MT5 financial context, the calendar
+    #      and the news sources) -> the consolidated MT5 blocking boundary. The
+    #      worker is released as soon as this call returns.
+    #   2. respond(): prompt rendering plus the ONE outbound model call, which
+    #      touches no MT5 -> the outbound-LLM boundary, a different thread pool, so
+    #      the model round trip cannot starve MT5 reads.
+    # RuntimeError means an MT5/LLM infrastructure failure (server error 503); the
+    # generic detail never leaks provider internals. Unexpected exceptions
+    # propagate. Both phases share one try, so the mapping below is unchanged.
     try:
-        result = await run_mt5_call(
-            service.handle,
+        prepared = await run_mt5_call(
+            service.prepare,
             payload.message,
             current_user.broker_id,
             payload.trade_history_days,
         )
+        result = await run_llm_call(service.respond, prepared)
     except PromptTooLargeError:
         # The request was within its limits, but the financial context could not
         # be rendered into a bounded prompt even after the deterministic

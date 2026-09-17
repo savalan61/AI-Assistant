@@ -177,39 +177,39 @@ def portfolio_env(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="TP-A")
-            broker_b = Broker(name="Broker B", code="TP-B")
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="The Broker", code="TP-ONE", mt5_server="TheBroker-Live")
+            session.add(broker)
             await session.commit()
+            # Two CUSTOMERS of the one broker (two MT5 accounts) and the
+            # deployment's single super_admin.
             customer_a = User(
-                broker_id=broker_a.id,
+                broker_id=broker.id,
                 login="10001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             customer_b = User(
-                broker_id=broker_b.id,
+                broker_id=broker.id,
                 login="10002",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
-            super_b = User(
-                broker_id=broker_b.id,
-                login="super-b",
+            super_admin = User(
+                broker_id=broker.id,
+                login="9001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.SUPER_ADMIN,
             )
-            session.add_all([customer_a, customer_b, super_b])
+            session.add_all([customer_a, customer_b, super_admin])
             await session.commit()
             return {
-                "broker_a_id": broker_a.id,
-                "broker_b_id": broker_b.id,
+                "broker_id": broker.id,
                 "customer_a_id": customer_a.id,
                 "customer_b_id": customer_b.id,
-                "super_b_id": super_b.id,
+                "super_admin_id": super_admin.id,
             }
 
     ids = asyncio.run(seed())
@@ -319,31 +319,34 @@ def test_no_positions_returns_flat_risk_and_empty_exposure(
     assert body["risk"]["level"] == "FLAT"
 
 
-# --- tenant scope ---------------------------------------------------------------------
+# --- identity scope -------------------------------------------------------------------
 
 
-def test_tenant_identity_comes_from_the_authenticated_user(
+def test_the_reported_broker_is_the_deployments_only_broker(
     portfolio_env, patched_account, patched_positions
 ) -> None:
+    """Every customer reports the same broker — and their own account's numbers."""
     patched_account()
     patched_positions((XAUUSD_BUY,))
 
     _, body_a = get_portfolio(portfolio_env, portfolio_env["customer_a_id"])
     _, body_b = get_portfolio(portfolio_env, portfolio_env["customer_b_id"])
 
-    assert body_a["broker_id"] == portfolio_env["broker_a_id"]
-    assert body_b["broker_id"] == portfolio_env["broker_b_id"]
-    assert body_a["broker_id"] != body_b["broker_id"]
+    assert body_a["broker_id"] == portfolio_env["broker_id"]
+    assert body_b["broker_id"] == portfolio_env["broker_id"]
 
 
-def test_admin_roles_do_not_bypass_tenant_identity(portfolio_env, patched_account, patched_positions) -> None:
+def test_admin_roles_do_not_bypass_the_authenticated_identity(
+    portfolio_env, patched_account, patched_positions
+) -> None:
     patched_account()
     patched_positions((XAUUSD_BUY,))
 
-    # A super_admin authenticated against broker B is still scoped to broker B.
-    _, body = get_portfolio(portfolio_env, portfolio_env["super_b_id"])
+    # A super_admin is still just an authenticated user here: the response is
+    # composed for the deployment's broker, never for a broker it could name.
+    _, body = get_portfolio(portfolio_env, portfolio_env["super_admin_id"])
 
-    assert body["broker_id"] == portfolio_env["broker_b_id"]
+    assert body["broker_id"] == portfolio_env["broker_id"]
 
 
 def test_broker_id_and_user_id_query_parameters_cannot_change_scope(
@@ -362,7 +365,7 @@ def test_broker_id_and_user_id_query_parameters_cannot_change_scope(
         return {key: value for key, value in body.items() if key != "as_of"}
 
     assert without_as_of(with_params) == without_as_of(plain)
-    assert with_params["broker_id"] == portfolio_env["broker_a_id"]
+    assert with_params["broker_id"] == portfolio_env["broker_id"]
 
 
 # --- error handling ---------------------------------------------------------------------

@@ -28,11 +28,12 @@ Design notes:
   instrument and the look-back is enabled. Its window is the half-open span
   immediately BEFORE the calendar window, so research news and fundamental news
   can never overlap — one request still fetches each news window at most once;
-* the focused instrument is resolved through the tenant's own broker catalog
+* the focused instrument is resolved through the customer's own broker catalog
   before it is researched (Step 51). The agent owns no catalog logic: it asks
   the research service to resolve the detected names and researches only the
   ones the broker actually confirmed, so a label the broker does not offer is
   never presented to the model as a real instrument;
+* the boundary is TWO phases so the API can thread them separately: ``prepare()`` performs every blocking read (MT5 plus the calendar and news sources) and returns a prepared request, while ``respond()`` renders the prompt and makes the single outbound model call — pure application work that touches no MT5, and therefore must not occupy an MT5 worker thread while the model is thinking;
 * no HTTP endpoint — this is an internal service/domain boundary;
 * no agent framework (LangChain, LangGraph, ...) and no tool use;
 * read-only by construction: the only capabilities held here are reading a
@@ -45,14 +46,19 @@ from app.core.config import settings
 from app.providers.llm import LLMProvider
 from app.services.agent.egress import OutboundDataPolicy
 from app.services.agent.prompt import build_prompt
-from app.services.economic_intelligence import EconomicIntelligenceService
+from app.services.economic_intelligence import (
+    EconomicIntelligenceContext,
+    EconomicIntelligenceService,
+)
 from app.services.financial_context import (
     DEFAULT_TRADE_HISTORY_DAYS,
     FinancialContext,
     FinancialContextService,
 )
 from app.services.fundamental_intelligence import (
+    FinancialResearchContext,
     FinancialResearchService,
+    FundamentalContext,
     FundamentalIntelligenceService,
     detect_focus_symbol,
     detect_focus_symbols,
@@ -72,6 +78,25 @@ class AgentResponse(NamedTuple):
     broker_id: int
     context: FinancialContext
     answer: str
+
+
+class PreparedAgentRequest(NamedTuple):
+    """Everything one request resolved from the read-only contexts, before the model.
+
+    ``prepare()`` returns this and ``respond()`` consumes it. The split exists so
+    the API can run the two phases on two boundaries: the prepared state is a
+    value object — the resolved contexts plus the echoes the response envelope
+    needs — and carries no session, no credentials and no thread affinity, so the
+    phase that blocks on MT5 and the phase that blocks on the model can be
+    threaded independently.
+    """
+
+    request: str
+    broker_id: int
+    context: FinancialContext
+    economic: EconomicIntelligenceContext | None
+    fundamental: FundamentalContext | None
+    research: FinancialResearchContext | None
 
 
 # Focus instruments the research block is graded against per request. The first
@@ -126,17 +151,17 @@ class AgentService:
         # working unchanged.
         self._research = financial_research_service
 
-    def handle(
+    def prepare(
         self,
         request: str,
         broker_id: int,
         trade_history_days: int = DEFAULT_TRADE_HISTORY_DAYS,
         now: datetime | None = None,
-    ) -> AgentResponse:
-        """Answer ``request`` from the current financial context.
+    ) -> PreparedAgentRequest:
+        """Resolve ``request`` against the read-only contexts (the BLOCKING phase).
 
         ``broker_id`` must come from the authenticated database user; the agent
-        never derives tenant identity from the request text. The context's
+        never derives customer identity from the request text. The context's
         trade-history window stays configurable with the existing 30-day
         default. ``now`` injects the reference time (defaults to the current
         UTC time) so callers and tests stay deterministic.
@@ -153,13 +178,17 @@ class AgentService:
         text (see fundamental_intelligence.focus); that label only decides which
         instruments are described, never which positions may be read.
 
-        The reads block (MT5 and the calendar provider), so an API caller must
-        offload this call through the consolidated MT5 blocking boundary.
+        This phase blocks: it reads MT5 (account, positions, trade history) and
+        fetches the calendar and news sources — but it never calls the model. An
+        API caller must offload it through the consolidated MT5 blocking boundary,
+        and must call ``respond()`` separately so the model round trip does not
+        hold the worker this phase needs.
+
         Failures from the context service, the economic-calendar source or the
-        LLM provider propagate unchanged — this boundary neither swallows nor
-        reinterprets them, leaving translation to the caller's own layer (the
-        API maps a RuntimeError to its existing 503). The model is only asked
-        once both contexts exist, so a failed read never reaches the provider.
+        news source propagate unchanged — this boundary neither swallows nor
+        reinterprets them, leaving translation to the caller's own layer (the API
+        maps a RuntimeError to its existing 503). The model is asked only by
+        ``respond()``, so a failed read never reaches the provider.
         """
         # One reference instant for the whole request.
         reference = now if now is not None else datetime.now(UTC)
@@ -168,8 +197,14 @@ class AgentService:
             trade_history_days=trade_history_days,
             now=reference,
         )
+        # The position snapshot the financial context just read is handed to the
+        # economic layer, so the calendar relevance is scored against the SAME
+        # positions the response reports and the request performs ONE position
+        # read instead of two (both reads used to happen inside this phase, on
+        # the same customer session). No snapshot is cached or shared: it travels
+        # as an argument for this request only.
         economic = (
-            self._economic.build_today_context(now=reference)
+            self._economic.build_today_context(now=reference, positions=context.positions)
             if self._economic is not None
             else None
         )
@@ -203,17 +238,72 @@ class AgentService:
             if focus_symbols:
                 resolution = self._research.resolve_focus_symbols(focus_symbols)
                 if resolution.resolved:
+                    # The resolution read above is reused, so the catalog is not
+                    # read a second time inside build_research for the same
+                    # request; the broker-confirmed spellings it produced are
+                    # still the only ones graded.
                     research = self._research.build_research(
                         economic.window_from - timedelta(days=lookback_days),
                         economic.window_from,
-                        focus_symbols=resolution.resolved,
+                        resolution=resolution,
                     )
-        answer = self._llm.complete(
-            build_prompt(request, context, self._data_policy, economic, fundamental, research)
-        )
-        return AgentResponse(
+        return PreparedAgentRequest(
             request=request,
             broker_id=broker_id,
             context=context,
+            economic=economic,
+            fundamental=fundamental,
+            research=research,
+        )
+
+    def respond(self, prepared: PreparedAgentRequest) -> AgentResponse:
+        """Render the prepared request into a prompt and ask the model ONCE.
+
+        This phase performs NO MT5 read, opens no session and holds no
+        credential: it renders a prompt from the contexts ``prepare()`` already
+        resolved (pure CPU) and makes the single outbound model call. It must
+        therefore NOT be offloaded through the MT5 blocking boundary — the model
+        call blocks for the whole network round trip, and a worker thread busy
+        for that long is a worker the MT5 reads need. The API runs this phase
+        through the outbound-LLM boundary instead (app/core/blocking.py).
+
+        The prompt is rendered BEFORE the provider is asked, so the deterministic
+        size rules still run first: a context that cannot be bounded raises
+        ``PromptTooLargeError`` and the provider is never called.
+
+        Provider failures propagate unchanged; translation to HTTP stays in the
+        API layer (a RuntimeError maps to the existing 503).
+        """
+        answer = self._llm.complete(
+            build_prompt(
+                prepared.request,
+                prepared.context,
+                self._data_policy,
+                prepared.economic,
+                prepared.fundamental,
+                prepared.research,
+            )
+        )
+        return AgentResponse(
+            request=prepared.request,
+            broker_id=prepared.broker_id,
+            context=prepared.context,
             answer=answer,
         )
+
+    def handle(
+        self,
+        request: str,
+        broker_id: int,
+        trade_history_days: int = DEFAULT_TRADE_HISTORY_DAYS,
+        now: datetime | None = None,
+    ) -> AgentResponse:
+        """The two phases composed synchronously (unchanged contract).
+
+        Exactly ``respond(prepare(...))``, kept for callers that own their own
+        threading: internal callers, tests and the offline quality benchmark. A
+        caller that offloads THIS whole call through the MT5 boundary occupies an
+        MT5 worker for the model round trip as well, which is exactly why the HTTP
+        boundary calls the two phases separately (see the /agent router).
+        """
+        return self.respond(self.prepare(request, broker_id, trade_history_days, now))

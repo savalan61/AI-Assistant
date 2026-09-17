@@ -7,7 +7,10 @@ every field is derived from calendar data and position data, so the result is
 reproducible and safe to reason over.
 
 The user's open positions are read through the existing PositionService (the
-single position architecture); this service makes no MT5 call of its own.
+single position architecture); this service makes no MT5 call of its own. A
+caller that has already collected a position snapshot for the same request (the
+agent, from its financial context) may pass it in, so one request performs one
+positions read instead of two — see ``build_today_context``.
 """
 from datetime import UTC, datetime
 from typing import NamedTuple
@@ -70,6 +73,7 @@ class EconomicIntelligenceService:
         self,
         minimum_impact: EventImpact | None = None,
         now: datetime | None = None,
+        positions: tuple[Position, ...] | None = None,
     ) -> EconomicIntelligenceContext:
         """Build today's (UTC day) economic intelligence context.
 
@@ -78,6 +82,18 @@ class EconomicIntelligenceService:
         day window and ``as_of`` stay explicit and testable. Reads positions
         through PositionService, which performs a blocking read, so callers on
         the event loop must offload this call via the MT5 blocking boundary.
+
+        ``positions`` is an already-collected position snapshot for THIS request
+        (the one the caller's financial context just read). Supplying it reuses
+        that read instead of performing a second MT5 read within the same
+        request — which is what keeps one /agent request to a single positions
+        read. The snapshot must belong to the same authenticated customer and the
+        same request; this service never caches it, never shares it between
+        requests, and never reuses a snapshot from anywhere but its own caller
+        (``None``, the default for every standalone caller such as
+        GET /economic-intelligence/today, reads the positions now). The snapshot
+        is ordered and classified exactly as a fresh read was, so the context is
+        unchanged.
         """
         reference = now if now is not None else datetime.now(UTC)
         # get_today_window validates timezone-awareness (naive input fails loudly).
@@ -86,7 +102,8 @@ class EconomicIntelligenceService:
         if minimum_impact is not None:
             events = self._calendar.filter_by_minimum_impact(events, minimum_impact)
 
-        positions = self._positions.get_positions()
+        if positions is None:
+            positions = self._positions.get_positions()
         # Deterministic presentation: stable position order and a deduplicated,
         # sorted symbol set, independent of provider row order.
         ordered_positions = tuple(sorted(positions, key=lambda position: (position.symbol, position.ticket)))

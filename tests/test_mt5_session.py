@@ -7,6 +7,7 @@ in-process, so the decryption path under test is the real one.
 """
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,8 +21,12 @@ from app.core.mt5_session import (
 )
 from app.db.models import Broker, User
 
-# The only MT5 functions the session boundary may ever touch.
-ALLOWED_MT5_FUNCTIONS = {"initialize", "login", "last_error", "shutdown"}
+# The only MT5 functions the session boundary may ever touch. ``account_info``
+# is the read-only verification of the account the terminal is actually on.
+ALLOWED_MT5_FUNCTIONS = {"initialize", "login", "last_error", "shutdown", "account_info"}
+# A test can put this in ``reported_account`` to make the terminal answer
+# "nothing is connected" (the real API returns None in that state).
+NO_CONNECTED_ACCOUNT = object()
 TRADING_FUNCTIONS = {"order_send", "order_check", "positions_modify", "orders_modify"}
 
 SERVER_A = "BrokerA-Live"
@@ -44,16 +49,35 @@ class FakeMT5:
         initialize_error: Exception | None = None,
         login_error: Exception | None = None,
         shutdown_error: Exception | None = None,
+        account_info_error: Exception | None = None,
+        reported_account: object | None = None,
     ):
         self._initialize_results = list(initialize_results or [True])
         self._login_results = list(login_results or [True])
         self.initialize_error = initialize_error
         self.login_error = login_error
         self.shutdown_error = shutdown_error
+        self.account_info_error = account_info_error
+        # None means "report whatever account was last authenticated". A record
+        # here makes the terminal report that account permanently, whatever this
+        # process authenticates next, which is how an unconfirmable session is
+        # simulated. NO_CONNECTED_ACCOUNT makes it report nothing at all.
+        self.reported_account = reported_account
+        # A drift is cleared by the next successful authentication, exactly as a
+        # real terminal returns to the requested account after login().
+        self._drifted_account: object | None = None
         self.initialize_calls: list[dict[str, object]] = []
         self.login_calls: list[dict[str, object]] = []
         self.shutdown_calls = 0
         self.accessed: list[str] = []
+
+    def drift_to(self, *, login: int, server: str) -> None:
+        """Simulate a session that changed outside this process.
+
+        The reported account stays put until a successful initialize()/login()
+        puts the terminal back on the requested account.
+        """
+        self._drifted_account = SimpleNamespace(login=login, server=server)
 
     def _record(self, name: str) -> None:
         self.accessed.append(name)
@@ -64,18 +88,53 @@ class FakeMT5:
         if self.initialize_error is not None:
             raise self.initialize_error
         # The last configured result applies to any further call.
-        return self._initialize_results.pop(0) if len(self._initialize_results) > 1 else self._initialize_results[0]
+        result = (
+            self._initialize_results.pop(0)
+            if len(self._initialize_results) > 1
+            else self._initialize_results[0]
+        )
+        if result:
+            self._drifted_account = None
+        return result
 
     def login(self, **kwargs: object) -> object:
         self._record("login")
         self.login_calls.append(dict(kwargs))
         if self.login_error is not None:
             raise self.login_error
-        return self._login_results.pop(0) if len(self._login_results) > 1 else self._login_results[0]
+        result = self._login_results.pop(0) if len(self._login_results) > 1 else self._login_results[0]
+        if result:
+            self._drifted_account = None
+        return result
 
     def last_error(self) -> tuple[int, str]:
         self._record("last_error")
         return (-6, "simulated authorization failure")
+
+    def account_info(self) -> object:
+        """The terminal's own record of the account it is currently on.
+
+        By default it reports the identity this fake last authenticated, so the
+        boundary's verification passes for the tenant that asked for the read.
+        ``drift_to`` simulates a session that moved away, ``reported_account``
+        pins an account the terminal never leaves, and ``account_info_error``
+        simulates a terminal that cannot answer at all.
+        """
+        self._record("account_info")
+        if self.account_info_error is not None:
+            raise self.account_info_error
+        if self.reported_account is NO_CONNECTED_ACCOUNT:
+            return None
+        if self.reported_account is not None:
+            return self.reported_account
+        if self._drifted_account is not None:
+            return self._drifted_account
+        last_auth = self.login_calls[-1] if self.login_calls else None
+        if last_auth is None:
+            last_auth = self.initialize_calls[-1] if self.initialize_calls else None
+        if last_auth is None:
+            return None
+        return SimpleNamespace(login=last_auth["login"], server=last_auth["server"])
 
     def shutdown(self) -> None:
         self._record("shutdown")
@@ -219,6 +278,291 @@ def test_concurrent_tenants_are_serialized_and_never_share_a_session() -> None:
     assert len(observations) == 4
     # And no two reads were ever inside the session at the same time.
     assert max_inside == 1
+
+
+# --- identity verification: the cache is checked, never trusted ----------------
+
+
+def test_a_read_is_verified_against_the_account_the_terminal_reports() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+
+    with manager.acquire(credentials()):
+        pass
+
+    # The terminal itself was asked which account it is on before the read.
+    assert "account_info" in fake.accessed
+    assert manager.authenticated_account == (SERVER_A, 10001)
+
+
+def test_reused_session_is_verified_on_every_read_but_not_reauthenticated() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+
+    for _ in range(3):
+        with manager.acquire(credentials()):
+            pass
+
+    # One authentication, three verifications: reuse stays cheap, but the cache
+    # is never trusted blindly.
+    assert len(fake.initialize_calls) == 1
+    assert fake.login_calls == []
+    assert fake.accessed.count("account_info") == 3
+
+
+def test_session_that_moved_outside_this_process_is_reauthenticated() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(credentials()):
+        pass
+
+    # The terminal silently moved to another account (an external re-login, a
+    # manual login at the terminal, or another process using the same terminal).
+    fake.drift_to(login=99999, server=SERVER_B)
+
+    served = False
+    with manager.acquire(credentials()) as api:
+        served = True
+        assert api is fake
+
+    # The stale cache was detected and the requesting tenant re-authenticated on
+    # the live connection (login, not a second initialize) BEFORE the read ran.
+    assert served is True
+    assert [call["login"] for call in fake.login_calls] == [10001]
+    assert len(fake.initialize_calls) == 1
+    assert manager.authenticated_account == (SERVER_A, 10001)
+
+
+def test_unconfirmable_identity_is_refused_and_forgotten() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(credentials()):
+        pass
+
+    # The terminal keeps reporting an account we did not ask for, and
+    # re-authenticating does not change that: the read must not be served.
+    fake.reported_account = SimpleNamespace(login=99999, server=SERVER_B)
+
+    ran = False
+    with pytest.raises(MT5SessionError) as excinfo:
+        with manager.acquire(credentials()):
+            ran = True  # pragma: no cover - the acquire must fail first
+
+    assert ran is False
+    assert str(excinfo.value) == "MT5 session identity could not be confirmed"
+    # Re-authentication was attempted against the requesting tenant, then the
+    # unknown state was dropped so the next request starts from a clean session.
+    assert [call["login"] for call in fake.login_calls] == [10001]
+    assert manager.authenticated_account is None
+
+
+def test_terminal_reporting_a_different_server_is_not_a_match() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(credentials()):
+        pass
+
+    # The same login number on another server is a different account.
+    fake.reported_account = SimpleNamespace(login=10001, server="BrokerB-Live")
+
+    with pytest.raises(MT5SessionError):
+        with manager.acquire(credentials()):
+            pytest.fail("a different server must not be accepted as this tenant")
+
+    assert manager.authenticated_account is None
+
+
+def test_server_name_differences_in_case_are_not_a_false_alarm() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(credentials()):
+        pass
+
+    # A purely cosmetic difference must not lock a working tenant out.
+    fake.reported_account = SimpleNamespace(login=10001, server="BROKERA-LIVE")
+
+    with manager.acquire(credentials()):
+        pass
+
+
+@pytest.mark.parametrize("reported", [SimpleNamespace(login=10001, server=""), SimpleNamespace(login=10001)])
+def test_absent_server_name_falls_back_to_the_login_match(reported: object) -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(credentials()):
+        pass
+
+    # With nothing to compare against, the login number is the whole identity.
+    fake.reported_account = reported
+
+    with manager.acquire(credentials()):
+        pass
+
+
+def test_terminal_reporting_no_connected_account_fails_closed() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(credentials()):
+        pass
+
+    fake.reported_account = NO_CONNECTED_ACCOUNT
+
+    with pytest.raises(MT5SessionError):
+        with manager.acquire(credentials()):
+            pytest.fail("an unconnected terminal must not serve a read")
+
+    assert manager.authenticated_account is None
+
+
+def test_unreadable_terminal_account_fails_closed_and_recovers() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(credentials()):
+        pass
+
+    fake.account_info_error = OSError("simulated IPC failure")
+
+    with pytest.raises(MT5SessionError):
+        with manager.acquire(credentials()):
+            pytest.fail("an unverifiable session must not serve a read")
+
+    assert manager.authenticated_account is None
+
+    # Once the terminal answers again the next read authenticates from scratch.
+    fake.account_info_error = None
+    with manager.acquire(credentials()):
+        pass
+    assert len(fake.initialize_calls) == 2
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [SimpleNamespace(login="not-a-number", server=SERVER_A), SimpleNamespace(server=SERVER_A)],
+)
+def test_malformed_terminal_account_data_is_not_a_match(reported: object) -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(credentials()):
+        pass
+
+    fake.reported_account = reported
+
+    with pytest.raises(MT5SessionError):
+        with manager.acquire(credentials()):
+            pytest.fail("malformed account data must never count as a match")
+
+    assert manager.authenticated_account is None
+
+
+def test_identity_failure_message_carries_no_credentials() -> None:
+    creds = credentials()
+    ciphertext = creds.password_encrypted or ""
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+    with manager.acquire(creds):
+        pass
+
+    fake.reported_account = SimpleNamespace(login=99999, server=SERVER_B)
+    with pytest.raises(MT5SessionError) as excinfo:
+        with manager.acquire(creds):
+            pass  # pragma: no cover - the acquire must fail first
+
+    message = str(excinfo.value)
+    assert PASSWORD not in message
+    assert ciphertext not in message and "gAAAAA" not in message
+    # Not even which accounts were involved: the message stays generic.
+    assert "10001" not in message and "99999" not in message
+    assert SERVER_A not in message and SERVER_B not in message
+
+
+# --- the terminal executable and the IPC timeout are explicit when configured --
+
+
+def test_configured_terminal_path_and_timeout_reach_initialize() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(
+        mt5_api=fake, terminal_path="C:\\MT5\\terminal64.exe", timeout_ms=7000
+    )
+
+    with manager.acquire(credentials()):
+        pass
+
+    # ``path`` pins WHICH terminal is driven; ``timeout`` is MT5's milliseconds.
+    assert fake.initialize_calls == [
+        {
+            "login": 10001,
+            "password": PASSWORD,
+            "server": SERVER_A,
+            "path": "C:\\MT5\\terminal64.exe",
+            "timeout": 7000,
+        }
+    ]
+
+
+def test_configured_timeout_reaches_login_but_path_is_initialize_only() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(
+        mt5_api=fake, terminal_path="C:\\MT5\\terminal64.exe", timeout_ms=7000
+    )
+
+    with manager.acquire(credentials(login=10001, server=SERVER_A)):
+        pass
+    with manager.acquire(credentials(login=20002, server=SERVER_B)):
+        pass
+
+    assert fake.login_calls == [
+        {"login": 20002, "password": PASSWORD, "server": SERVER_B, "timeout": 7000}
+    ]
+
+
+def test_unconfigured_terminal_and_timeout_keep_the_package_defaults() -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake)
+
+    with manager.acquire(credentials()):
+        pass
+
+    assert fake.initialize_calls == [{"login": 10001, "password": PASSWORD, "server": SERVER_A}]
+
+
+@pytest.mark.parametrize("path,timeout_ms", [("   ", 0), (None, -1)])
+def test_blank_path_and_non_positive_timeout_mean_package_defaults(
+    path: str | None, timeout_ms: int
+) -> None:
+    fake = FakeMT5()
+    manager = MT5SessionManager(mt5_api=fake, terminal_path=path, timeout_ms=timeout_ms)
+
+    with manager.acquire(credentials()):
+        pass
+
+    assert fake.initialize_calls == [{"login": 10001, "password": PASSWORD, "server": SERVER_A}]
+
+
+def test_composition_root_passes_the_configured_terminal_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settings reach the boundary from the composition root, not inside it."""
+    monkeypatch.setattr(deps, "_mt5_session_manager", None, raising=True)
+    received: dict[str, object] = {}
+
+    class RecordingManager(MT5SessionManager):
+        def __init__(
+            self,
+            mt5_api: object = None,
+            *,
+            terminal_path: str | None = None,
+            timeout_ms: int | None = None,
+        ) -> None:
+            received["terminal_path"] = terminal_path
+            received["timeout_ms"] = timeout_ms
+            super().__init__(mt5_api=mt5_api, terminal_path=terminal_path, timeout_ms=timeout_ms)
+
+    monkeypatch.setattr(deps, "MT5SessionManager", RecordingManager)
+    monkeypatch.setattr(app_settings, "MT5_TERMINAL_PATH", "C:\\MT5\\terminal64.exe", raising=True)
+    monkeypatch.setattr(app_settings, "MT5_TIMEOUT_SECONDS", 7.5, raising=True)
+
+    deps.get_mt5_session_manager()
+
+    # The seconds setting becomes MT5's own unit (milliseconds) exactly once.
+    assert received == {"terminal_path": "C:\\MT5\\terminal64.exe", "timeout_ms": 7500}
 
 
 # --- fail closed -------------------------------------------------------------

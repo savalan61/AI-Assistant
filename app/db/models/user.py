@@ -17,7 +17,7 @@ from app.db.base import Base
 
 
 class UserRole(StrEnum):
-    """User roles within a broker tenant.
+    """User roles in this one-broker deployment.
 
     A StrEnum (not plain strings) so the role is a typed value everywhere and
     new roles can only be introduced deliberately. The database stores the
@@ -25,12 +25,13 @@ class UserRole(StrEnum):
     semantics.
 
     Semantics:
-    - SUPER_ADMIN: exactly one per Broker (enforced by a partial unique
+    - SUPER_ADMIN: exactly one in the deployment (enforced by a partial unique
       index in the database, not just application logic); manages admins and
-      customers; the broker-level owner/manager.
-    - ADMIN: multiple per Broker; manages customers; cannot manage admins or
-      broker-level settings.
-    - CUSTOMER: cannot manage users; uses the normal financial/AI features.
+      customers; the deployment's owner/manager.
+    - ADMIN: several; manages customers; cannot manage admins or deployment
+      settings.
+    - CUSTOMER: cannot manage users; uses the normal financial/AI features on
+      its own MT5 account, and can never reach another customer's.
     """
 
     SUPER_ADMIN = "super_admin"
@@ -40,23 +41,26 @@ class UserRole(StrEnum):
 
 class User(Base):
     __tablename__ = "users"
-    # Composite unique constraints ensure tenant-scoped uniqueness;
-    # login/email/phone may repeat across different brokers.
+    # This deployment serves ONE broker, so the broker's user namespace is the
+    # whole namespace: login/email/phone are unique outright rather than unique
+    # per broker. That makes a login a single global identity, which is what the
+    # login endpoint (no customer selector) and the MT5 account binding both
+    # assume. broker_id remains the foreign key to the one broker row.
     __table_args__ = (
-        UniqueConstraint("broker_id", "login", name="uq_users_broker_login"),
-        UniqueConstraint("broker_id", "email", name="uq_users_broker_email"),
-        UniqueConstraint("broker_id", "phone", name="uq_users_broker_phone"),
+        UniqueConstraint("login", name="uq_users_login"),
+        UniqueConstraint("email", name="uq_users_email"),
+        UniqueConstraint("phone", name="uq_users_phone"),
         # Non-native enum: a plain VARCHAR plus a CHECK constraint keeps the
         # schema portable (same shape on PostgreSQL and SQLite) and evolvable
         # without native enum-type alterations when roles change.
         CheckConstraint("role IN ('super_admin', 'admin', 'customer')", name="ck_users_role"),
-        # Exactly one super_admin per Broker, enforced at the database layer:
-        # a partial unique index admits at most one row per broker_id among
-        # super_admin rows. SQLite supports partial unique indexes, so the
-        # application tests exercise the real constraint, not a re-implementation.
+        # Exactly ONE super_admin in the deployment, enforced at the database
+        # layer: a partial unique index admits at most one super_admin row, full
+        # stop. SQLite supports partial unique indexes, so the application tests
+        # exercise the real constraint, not a re-implementation.
         Index(
-            "uq_users_broker_super_admin",
-            "broker_id",
+            "uq_users_single_super_admin",
+            "role",
             unique=True,
             sqlite_where=text("role = 'super_admin'"),
             postgresql_where=text("role = 'super_admin'"),
@@ -64,6 +68,10 @@ class User(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # The one broker this deployment serves (the single brokers row). A user row
+    # pointing anywhere else can never authenticate (get_current_user binds the
+    # caller to that broker), so this is an integrity reference, not a customer
+    # selector.
     broker_id: Mapped[int] = mapped_column(Integer, ForeignKey("brokers.id"), nullable=False, index=True)
     # THE single user identity, and the only one the system has: it is both the
     # application login and the MT5 account/login number. Kept as a string so a
@@ -75,13 +83,12 @@ class User(Base):
     phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     # Stored as a hash; must never be recoverable in plaintext.
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    # The user's MT5 server, stored per user rather than derived from
-    # Broker.mt5_server, so one broker can host customers on different MT5
-    # servers and an administrator can provision it explicitly. Stays NULL on
-    # rows provisioned the older way: credential resolution then falls back to
-    # Broker.mt5_server, so existing behaviour is unchanged. The MT5 account
-    # number is `login` — there is deliberately no second account column.
-    mt5_server: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # There is deliberately NO per-user MT5 server column. The deployment has
+    # one broker and therefore one MT5 server (Broker.mt5_server), so a
+    # customer's identity is (the broker's server, this row's `login`): nothing
+    # on this row can redirect a read to another server, and no request can set
+    # one. The MT5 account number is `login` — there is no second account column
+    # either.
     # Fernet ciphertext of the user's MT5 INVESTOR (read-only) password. The
     # trading/master password is never requested, stored or used: only a
     # read-only credential can be provisioned, and no API ever returns it.

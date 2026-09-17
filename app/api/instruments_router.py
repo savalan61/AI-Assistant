@@ -2,8 +2,8 @@
 
 Two thin routes over one service: a single-symbol resolution (the common case —
 "does this broker offer what I asked for?") and a bounded catalog listing
-("what can I ask about?"). Both answer only from the authenticated tenant's own
-MT5 terminal, so no caller can discover another tenant's broker catalog.
+("what can I ask about?"). Both answer only from the authenticated customer's own
+MT5 terminal, so no caller can discover another customer's broker catalog.
 """
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict

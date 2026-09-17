@@ -18,7 +18,7 @@ from app.providers.position import Position, PositionType
 
 # The only MT5 functions a read-only positions provider may ever touch (the
 # session boundary authenticates; the provider itself only reads).
-ALLOWED_MT5_FUNCTIONS = {"initialize", "login", "last_error", "positions_get"}
+ALLOWED_MT5_FUNCTIONS = {"initialize", "login", "last_error", "positions_get", "account_info"}
 TRADING_FUNCTIONS = {"order_send", "order_check", "positions_modify", "orders_modify"}
 
 SERVER = "BrokerA-Live"
@@ -64,6 +64,19 @@ class FakeMT5:
     def last_error(self) -> tuple[int, str]:
         self._record("last_error")
         return (-1, "simulated MT5 failure")
+
+    def account_info(self) -> object:
+        """The terminal reports the account it is authenticated as.
+
+        The session boundary verifies this against the requesting tenant before
+        every read, so the fake reports whatever account it last authenticated
+        (see ``authenticate_calls``) — exactly as a real terminal would.
+        """
+        self._record("account_info")
+        last_auth = self.authenticate_calls[-1] if self.authenticate_calls else None
+        if last_auth is None:  # pragma: no cover - every read authenticates first
+            return None
+        return SimpleNamespace(login=last_auth["login"], server=last_auth["server"])
 
     def positions_get(self) -> object:
         self._record("positions_get")

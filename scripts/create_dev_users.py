@@ -15,9 +15,10 @@ APP_ENV=development. Never reuse any of these outside a local database.
     admin        dev-admin         DevAdmin-Local-Only-1
     customer     dev-customer      DevCustomer-Local-Only-1
 
-It reuses the EXISTING tenant (the development Broker created by
-scripts/create_dev_user.py) and the existing role architecture; it creates no
-broker and changes neither the User model, the migrations, nor authentication.
+It reuses the EXISTING broker — the ONE brokers row this deployment serves,
+created by scripts/create_dev_user.py — and the existing role architecture; it
+creates no broker and changes neither the User model, the migrations, nor
+authentication.
 
 Safety properties:
 - refuses to run unless APP_ENV=development
@@ -46,8 +47,9 @@ from app.core.security import hash_password, verify_password
 from app.db.database import async_session
 from app.db.models import Broker, User, UserRole
 
-# The existing development tenant. This script never creates a broker: the
-# role accounts belong to the broker the dev seed already established.
+# The one broker this deployment serves (the single brokers row the application
+# resolves). This script never creates a broker — the role accounts belong to the
+# row the dev seed already established.
 DEV_BROKER_CODE = "DEV-LOCAL"
 
 # role, login, development-only password — see the module docstring.
@@ -69,8 +71,15 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _resolve_dev_broker(session: AsyncSession) -> Broker | None:
-    """Return the existing development Broker, or None if it must be seeded first."""
-    return (await session.execute(select(Broker).where(Broker.code == DEV_BROKER_CODE))).scalar_one_or_none()
+    """The deployment's ONE broker, or None when it must be seeded first.
+
+    A database with several brokers rows is not a one-broker deployment: this
+    script refuses it (returns None) rather than picking a tenant to seed.
+    """
+    brokers = (await session.execute(select(Broker).order_by(Broker.id.asc()))).scalars().all()
+    if len(brokers) != 1:
+        return None
+    return brokers[0]
 
 
 async def _clear_users(session: AsyncSession) -> int:
@@ -112,8 +121,9 @@ async def _authenticate(session: AsyncSession, login: str, password: str) -> tup
     """Authenticate exactly the way the login endpoint does.
 
     Same primitives in the same order: unique login match, bcrypt
-    verification, active user, then an existing active broker. The JWT is not
-    needed to prove the credential path works.
+    verification, active user, then the deployment's active broker. The JWT is
+    not needed to prove the credential path works. The login is unique on its
+    own now (one broker), exactly as the login endpoint assumes.
     """
     users = (await session.execute(select(User).where(User.login == login))).scalars().all()
     if len(users) != 1:
@@ -134,8 +144,8 @@ async def _run(clear: bool) -> int:
         broker = await _resolve_dev_broker(session)
         if broker is None:
             print(
-                f"refusing to run: development broker {DEV_BROKER_CODE!r} does not exist "
-                "(run scripts/create_dev_user.py first)",
+                "refusing to run: this deployment must have exactly ONE brokers row "
+                "(run scripts/create_dev_user.py first, and remove any extra rows)",
                 file=sys.stderr,
             )
             return 3

@@ -191,19 +191,19 @@ def fundamental_env(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="FI-A")
-            broker_b = Broker(name="Broker B", code="FI-B")
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="The Broker", code="FI-ONE", mt5_server="TheBroker-Live")
+            session.add(broker)
             await session.commit()
+            # Two CUSTOMERS of the one broker, each with its own MT5 account.
             customer_a = User(
-                broker_id=broker_a.id,
+                broker_id=broker.id,
                 login="10001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             customer_b = User(
-                broker_id=broker_b.id,
+                broker_id=broker.id,
                 login="10002",
                 password_hash="x" * 60,
                 is_active=True,
@@ -212,8 +212,7 @@ def fundamental_env(tmp_path):
             session.add_all([customer_a, customer_b])
             await session.commit()
             return {
-                "broker_a_id": broker_a.id,
-                "broker_b_id": broker_b.id,
+                "broker_id": broker.id,
                 "customer_a_id": customer_a.id,
                 "customer_b_id": customer_b.id,
             }
@@ -365,7 +364,7 @@ def test_news_relevance_matches_the_instruments_in_play(fundamental_env, patched
         assert set(entry["matched_instruments"]) <= set(body["instruments"])
 
 
-# --- tenant scope ---------------------------------------------------------------------
+# --- identity / customer scope -------------------------------------------------------
 
 
 def test_customer_receives_only_their_own_position_context(fundamental_env, patched_positions) -> None:
@@ -377,18 +376,21 @@ def test_customer_receives_only_their_own_position_context(fundamental_env, patc
     assert len(call_threads) == 1
 
 
-def test_each_user_gets_their_own_tenant_identity(fundamental_env, patched_positions) -> None:
+def test_each_customer_gets_the_deployments_broker_and_its_own_account(
+    fundamental_env, patched_positions
+) -> None:
     patched_positions((XAUUSD,))
 
     _, body_a = get_fundamental(fundamental_env, fundamental_env["customer_a_id"])
     _, body_b = get_fundamental(fundamental_env, fundamental_env["customer_b_id"])
 
-    assert body_a["broker_id"] == fundamental_env["broker_a_id"]
-    assert body_b["broker_id"] == fundamental_env["broker_b_id"]
-    assert body_a["broker_id"] != body_b["broker_id"]
+    # Both answers name the same (only) broker — the identity that separates them
+    # is the account behind each request, established at authentication.
+    assert body_a["broker_id"] == fundamental_env["broker_id"]
+    assert body_b["broker_id"] == fundamental_env["broker_id"]
 
 
-def test_tenant_parameters_cannot_change_scope(fundamental_env, patched_positions) -> None:
+def test_identity_parameters_cannot_change_scope(fundamental_env, patched_positions) -> None:
     patched_positions((EURUSD,))
     user_id = fundamental_env["customer_a_id"]
 
@@ -400,7 +402,7 @@ def test_tenant_parameters_cannot_change_scope(fundamental_env, patched_position
 
     # No such parameters exist: scope stays with the authenticated user.
     assert without_as_of(with_params) == without_as_of(plain)
-    assert with_params["broker_id"] == fundamental_env["broker_a_id"]
+    assert with_params["broker_id"] == fundamental_env["broker_id"]
     assert [exposure["symbol"] for exposure in with_params["positions"]] == ["EURUSD"]
 
 

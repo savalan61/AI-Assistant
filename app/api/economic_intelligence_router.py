@@ -57,7 +57,7 @@ class EventIntelligenceResponse(BaseModel):
 
 
 class EconomicIntelligenceResponse(BaseModel):
-    # broker_id is the authenticated user's own tenant identity, echoed for the
+    # broker_id is the authenticated user's own broker (this deployment's single broker), echoed for the
     # client; it is never accepted as request input.
     broker_id: int
     as_of: datetime

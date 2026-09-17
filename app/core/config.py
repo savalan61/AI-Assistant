@@ -80,6 +80,24 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
+    # --- MT5 terminal session ---------------------------------------------------
+    # The MetaTrader5 package authenticates ONE account per process on one live
+    # terminal connection, so the session boundary (app/core/mt5_session.py)
+    # serializes every MT5 read process-wide: one process owns one terminal. The
+    # two settings below are the explicit call shape that boundary uses.
+    #
+    # Which terminal executable to drive. Empty means "let the package find it"
+    # (the development behaviour). Pinning it makes the choice deterministic on a
+    # machine with more than one terminal installed, and it is what a future
+    # worker-per-account topology needs.
+    MT5_TERMINAL_PATH: str = ""
+    # How long ONE initialize()/login() may block, in seconds. An authentication
+    # that hangs holds the process-wide session lock, so every customer waits
+    # behind it; this bounds that wait (MT5's own default is 60 s). Converted to
+    # MT5's milliseconds at the composition root; 0 or less leaves the package
+    # default.
+    MT5_TIMEOUT_SECONDS: float = 10.0
+
     # LLM settings for the OpenAI-compatible chat/completions adapter. The
     # adapter is vendor-agnostic: point base_url at any server exposing the
     # /chat/completions shape (hosted API or self-hosted runtime). No default
@@ -195,7 +213,7 @@ class Settings(BaseSettings):
     LLM_SEND_POSITION_PRICING: bool = True
 
     # Login brute-force protection (in-process, per client IP and per submitted
-    # (broker code, login) pair, so tenants do not share a counter). After
+    # (broker code, login) pair, so customers do not share a counter). After
     # LOGIN_MAX_FAILURES failures inside
     # LOGIN_FAILURE_WINDOW_SECONDS the login endpoint answers a generic 429.
     # Counters reset on a successful login and on process restart.

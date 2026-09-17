@@ -4,7 +4,7 @@ create customers under the evolved three-role model).
 Require none of: real PostgreSQL, real MT5, network, or real credentials.
 The get_db dependency is overridden with a per-test file-based async SQLite
 database containing the real User/Broker models; the REAL authentication and
-broker-admin authorization dependencies run (real JWT decode + database role
+manager authorization dependencies run (real JWT decode + database role
 check). JWT config uses test-only values. No pytest asyncio plugin: async
 setup is driven with asyncio.run.
 """
@@ -35,42 +35,37 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture()
-def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int]":
-    """Seed two brokers (each with an admin) plus a customer in broker A.
+def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int]":
+    """Seed the deployment's ONE broker: its super_admin and one customer.
 
-    Yields (session factory, admin_a_id, customer_id, admin_b_id). Two tenants
-    are needed to prove cross-tenant isolation, not just absence of broker_id.
+    Yields (session factory, super_admin_id, customer_id). There is exactly one
+    broker and exactly one super_admin in this deployment, so creating a user
+    "in another tenant" is not a thing this product can express — the tests
+    below prove the created row lands in the deployment's single broker and that
+    no request field can divert it.
     """
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/users_test.db")
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async def seed() -> "tuple[int, int, int]":
+    async def seed() -> "tuple[int, int]":
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="TB-A")
-            broker_b = Broker(name="Broker B", code="TB-B")
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="The Broker", code="TB-ONE", mt5_server="TheBroker-Live")
+            session.add(broker)
             await session.flush()
-            admin_a = User(
-                broker_id=broker_a.id,
+            super_admin = User(
+                broker_id=broker.id,
                 login="admin-a",
                 # Real bcrypt hash via the app's own primitive.
                 password_hash=hash_for_test(ADMIN_PASSWORD),
                 is_active=True,
-                # The seeded operator account is the broker's single
+                # The seeded operator account is the deployment's single
                 # super_admin (the evolved role model).
                 role=UserRole.SUPER_ADMIN,
             )
-            admin_b = User(
-                broker_id=broker_b.id,
-                login="admin-b",
-                password_hash=hash_for_test(ADMIN_PASSWORD),
-                is_active=True,
-                role=UserRole.SUPER_ADMIN,
-            )
             customer = User(
-                broker_id=broker_a.id,
+                broker_id=broker.id,
                 # Digit login: the API enforces MT5-login format on created
                 # users, so the seeded row used by duplicate tests matches it.
                 login="10002",
@@ -78,12 +73,12 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
-            session.add_all([admin_a, admin_b, customer])
+            session.add_all([super_admin, customer])
             await session.commit()
-            return admin_a.id, customer.id, admin_b.id
+            return super_admin.id, customer.id
 
-    admin_a_id, customer_id, admin_b_id = asyncio.run(seed())
-    yield factory, admin_a_id, customer_id, admin_b_id
+    admin_a_id, customer_id = asyncio.run(seed())
+    yield factory, admin_a_id, customer_id
     asyncio.run(engine.dispose())
 
 
@@ -123,7 +118,7 @@ def create_payload(login: str = "20002", password: str = "customer password", **
 
 
 def test_unauthenticated_request_returns_401(users_db) -> None:
-    factory, _, _, _ = users_db
+    factory, *_ = users_db
 
     with make_client(factory) as client:
         response = client.post("/users", json=create_payload())
@@ -133,7 +128,7 @@ def test_unauthenticated_request_returns_401(users_db) -> None:
 
 
 def test_customer_cannot_create_users_returns_403(users_db) -> None:
-    factory, _, customer_id, _ = users_db
+    factory, _, customer_id = users_db
 
     with make_client(factory) as client:
         response = client.post("/users", json=create_payload(), headers=auth_header(admin_token(customer_id)))
@@ -176,7 +171,7 @@ def test_admin_can_create_customer_returns_201(users_db) -> None:
 
 
 def test_super_admin_creates_customer_returns_201(users_db) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -200,7 +195,7 @@ def test_super_admin_creates_customer_returns_201(users_db) -> None:
 
 
 def test_created_user_persisted_with_derived_role_and_tenant(users_db) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         created_id = client.post(
@@ -218,23 +213,39 @@ def test_created_user_persisted_with_derived_role_and_tenant(users_db) -> None:
     assert user.broker_id == 1
 
 
-def test_second_broker_super_admin_creates_user_in_own_tenant(users_db) -> None:
-    factory, _, _, admin_b_id = users_db
+def test_creating_a_customer_leaves_every_other_customer_untouched(users_db) -> None:
+    """Customers are isolated from each other, and creation only ever adds a row."""
+    factory, admin_a_id, customer_id = users_db
+
+    async def snapshot() -> tuple[object, ...]:
+        async with factory() as session:
+            existing = await session.get(User, customer_id)
+            assert existing is not None
+            return (existing.login, existing.role, existing.password_hash, existing.is_active)
+
+    before = asyncio.run(snapshot())
 
     with make_client(factory) as client:
-        body = client.post(
-            "/users", json=create_payload(login="30001"), headers=auth_header(admin_token(admin_b_id))
-        ).json()
+        created = client.post(
+            "/users", json=create_payload(login="20003"), headers=auth_header(admin_token(admin_a_id))
+        )
+        second = client.post(
+            "/users", json=create_payload(login="20004"), headers=auth_header(admin_token(admin_a_id))
+        )
 
-    # Broker B's super_admin gets a user in broker B, never in another tenant.
-    assert body["broker_id"] == 2
+    assert (created.status_code, second.status_code) == (201, 201)
+    # Two distinct accounts, and the pre-existing customer is unchanged: creating
+    # another customer cannot reach, reuse or overwrite an existing one.
+    assert created.json()["id"] != second.json()["id"]
+    assert {created.json()["login"], second.json()["login"]} == {"20003", "20004"}
+    assert asyncio.run(snapshot()) == before
 
 
 # --- password handling ------------------------------------------------------------
 
 
 def test_plaintext_password_not_stored_and_hash_verifies(users_db) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
     plaintext = "customer password"
 
     with make_client(factory) as client:
@@ -258,7 +269,7 @@ def test_plaintext_password_not_stored_and_hash_verifies(users_db) -> None:
 
 
 def test_response_exposes_no_sensitive_fields(users_db) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -276,7 +287,7 @@ def test_response_exposes_no_sensitive_fields(users_db) -> None:
 
 
 def test_broker_id_cannot_be_supplied(users_db) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -299,7 +310,7 @@ def test_role_cannot_be_supplied(users_db, escalation_role: str) -> None:
     the legacy value are refused outright by the request model (422) for every
     caller — no second super_admin can ever be created through the API.
     """
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -321,13 +332,13 @@ def test_role_cannot_be_supplied(users_db, escalation_role: str) -> None:
 # broker plus a customer, so it cannot exercise that branch).
 
 
-def test_duplicate_login_in_same_broker_returns_409(users_db) -> None:
-    factory, admin_a_id, _, _ = users_db
+def test_duplicate_login_returns_409(users_db) -> None:
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
             "/users",
-            # "10002" already exists in broker A.
+            # "10002" already exists in the deployment.
             json=create_payload(login="10002"),
             headers=auth_header(admin_token(admin_a_id)),
         )
@@ -335,19 +346,32 @@ def test_duplicate_login_in_same_broker_returns_409(users_db) -> None:
     assert response.status_code == 409
 
 
-def test_same_login_in_different_broker_is_allowed(users_db) -> None:
-    factory, _, _, admin_b_id = users_db
+def test_login_uniqueness_is_deployment_wide(users_db) -> None:
+    """One broker means the login namespace IS the whole namespace.
+
+    A login is the MT5 account number and the application identity at the same
+    time, so a second user claiming it must be refused — duplicating it "in
+    another tenant" is not possible, because there is no other tenant.
+    """
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
-        response = client.post(
-            "/users",
-            # Uniqueness is tenant-scoped: broker B may reuse broker A's name.
-            json=create_payload(login="10002"),
-            headers=auth_header(admin_token(admin_b_id)),
+        first = client.post(
+            "/users", json=create_payload(login="10003"), headers=auth_header(admin_token(admin_a_id))
+        )
+        duplicate = client.post(
+            "/users", json=create_payload(login="10003"), headers=auth_header(admin_token(admin_a_id))
+        )
+        seeded_duplicate = client.post(
+            "/users", json=create_payload(login="10002"), headers=auth_header(admin_token(admin_a_id))
         )
 
-    assert response.status_code == 201
-    assert response.json()["broker_id"] == 2
+    assert first.status_code == 201
+    # The same generic 409 for a just-created login and for the seeded one: the
+    # caller can never tell which existing user holds it.
+    assert duplicate.status_code == 409
+    assert seeded_duplicate.status_code == 409
+    assert duplicate.json() == seeded_duplicate.json()
 
 
 # --- request validation (422 at the schema boundary) --------------------------------
@@ -355,7 +379,7 @@ def test_same_login_in_different_broker_is_allowed(users_db) -> None:
 
 @pytest.mark.parametrize("bad_login", ["new-customer", "123", "1234567890123", "", "12a4", "１２３４"])
 def test_invalid_login_rejected_with_422(users_db, bad_login: str) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -371,7 +395,7 @@ def test_invalid_login_rejected_with_422(users_db, bad_login: str) -> None:
 
 @pytest.mark.parametrize("valid_login", ["1000", "123456789012"])
 def test_login_length_boundaries_accepted(users_db, valid_login: str) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -386,7 +410,7 @@ def test_login_length_boundaries_accepted(users_db, valid_login: str) -> None:
 
 
 def test_short_password_rejected_with_422(users_db) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -399,7 +423,7 @@ def test_short_password_rejected_with_422(users_db) -> None:
 
 
 def test_oversized_password_rejected_with_422(users_db) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -415,7 +439,7 @@ def test_oversized_password_rejected_with_422(users_db) -> None:
 
 @pytest.mark.parametrize("bad_email", ["not-an-email", "a@b", "a@b.", "@example.com", "a b@example.com", "a@@example.com"])
 def test_malformed_email_rejected_with_422(users_db, bad_email: str) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -429,7 +453,7 @@ def test_malformed_email_rejected_with_422(users_db, bad_email: str) -> None:
 
 @pytest.mark.parametrize("bad_phone", ["call-me", "123-456-7890", "+123", "1234567890123456", "phone 123"])
 def test_arbitrary_phone_text_rejected_with_422(users_db, bad_phone: str) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(
@@ -443,7 +467,7 @@ def test_arbitrary_phone_text_rejected_with_422(users_db, bad_phone: str) -> Non
 
 @pytest.mark.parametrize("valid_phone", ["1234567890", "+123456789012345"])
 def test_valid_international_phone_accepted(users_db, valid_phone: str) -> None:
-    factory, admin_a_id, _, _ = users_db
+    factory, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post(

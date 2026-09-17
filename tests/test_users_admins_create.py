@@ -36,23 +36,22 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture()
-def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int, int]":
-    """Seed two brokers: broker A (super_admin + admin + customer), broker B (super_admin).
+def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int]":
+    """Seed the deployment's ONE broker: super_admin, admin and a customer.
 
-    Yields (session factory, super_a_id, admin_a_id, customer_id, super_b_id).
-    Two tenants are needed to prove cross-tenant isolation and tenant-scoped
-    duplicate behavior; the in-tenant admin/customer prove the 403 matrix.
+    Yields (session factory, super_a_id, admin_a_id, customer_id). The
+    super_admin/admin/customer trio is what the /users/admins authorization
+    matrix needs; the customer doubles as the duplicate-login target.
     """
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/users_admins_test.db")
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async def seed() -> "tuple[int, int, int, int]":
+    async def seed() -> "tuple[int, int, int]":
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="TA-A")
-            broker_b = Broker(name="Broker B", code="TA-B")
-            session.add_all([broker_a, broker_b])
+            broker_a = Broker(name="The Broker", code="TA-ONE", mt5_server="TheBroker-Live")
+            session.add(broker_a)
             await session.flush()
             super_a = User(
                 broker_id=broker_a.id,
@@ -78,16 +77,9 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
-            super_b = User(
-                broker_id=broker_b.id,
-                login="super-b",
-                password_hash=hash_for_test(SUPER_PASSWORD),
-                is_active=True,
-                role=UserRole.SUPER_ADMIN,
-            )
-            session.add_all([super_a, admin_a, customer, super_b])
+            session.add_all([super_a, admin_a, customer])
             await session.commit()
-            return super_a.id, admin_a.id, customer.id, super_b.id
+            return super_a.id, admin_a.id, customer.id
 
     ids = asyncio.run(seed())
     yield (factory, *ids)
@@ -140,7 +132,7 @@ def test_unauthenticated_admin_creation_returns_401(users_db) -> None:
 
 
 def test_customer_cannot_create_admin_returns_403(users_db) -> None:
-    factory, _, _, customer_id, _ = users_db
+    factory, _, _, customer_id = users_db
 
     with make_client(factory) as client:
         response = client.post("/users/admins", json=admin_payload(), headers=auth_header(admin_token(customer_id)))
@@ -149,7 +141,7 @@ def test_customer_cannot_create_admin_returns_403(users_db) -> None:
 
 
 def test_admin_cannot_create_admin_returns_403(users_db) -> None:
-    factory, _, admin_a_id, _, _ = users_db
+    factory, _, admin_a_id, _ = users_db
 
     with make_client(factory) as client:
         response = client.post("/users/admins", json=admin_payload(), headers=auth_header(admin_token(admin_a_id)))
@@ -263,13 +255,13 @@ def test_caller_cannot_escalate_role(users_db, escalation_role: str) -> None:
 # --- duplicate / uniqueness handling (existing conventions) -------------------------
 
 
-def test_duplicate_login_in_same_broker_returns_409(users_db) -> None:
+def test_duplicate_login_returns_409(users_db) -> None:
     factory, super_a_id, *_ = users_db
 
     with make_client(factory) as client:
         response = client.post(
             "/users/admins",
-            # "10002" already exists in broker A (the seeded customer).
+            # "10002" already exists in the deployment (the seeded customer).
             json=admin_payload(login="10002"),
             headers=auth_header(admin_token(super_a_id)),
         )
@@ -277,19 +269,29 @@ def test_duplicate_login_in_same_broker_returns_409(users_db) -> None:
     assert response.status_code == 409
 
 
-def test_same_login_in_different_broker_is_allowed(users_db) -> None:
-    factory, *_, super_b_id = users_db
+def test_login_uniqueness_is_deployment_wide(users_db) -> None:
+    """One broker means one login namespace, for every role alike.
+
+    The login IS the MT5 account number, so a new admin cannot claim a login
+    that any existing user already holds — and a fresh one is accepted.
+    """
+    factory, super_a_id, *_ = users_db
 
     with make_client(factory) as client:
-        response = client.post(
+        taken = client.post(
             "/users/admins",
-            # Uniqueness is tenant-scoped: broker B may reuse broker A's name.
-            json=admin_payload(login="10002"),
-            headers=auth_header(admin_token(super_b_id)),
+            json=admin_payload(login="10002"),  # the seeded customer's login
+            headers=auth_header(admin_token(super_a_id)),
+        )
+        fresh = client.post(
+            "/users/admins",
+            json=admin_payload(login="10003"),
+            headers=auth_header(admin_token(super_a_id)),
         )
 
-    assert response.status_code == 201
-    assert response.json()["broker_id"] == 2
+    assert taken.status_code == 409
+    assert fresh.status_code == 201
+    assert fresh.json()["broker_id"] == 1
 
 
 def test_duplicate_email_in_same_broker_returns_409(users_db) -> None:

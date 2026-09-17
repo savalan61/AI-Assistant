@@ -1,4 +1,4 @@
-"""Deterministic financial-research context (READ-ONLY, no LLM, no tenant data).
+"""Deterministic financial-research context (READ-ONLY, no LLM, no customer data).
 
 A reusable slice of the fundamental-intelligence layer: graded published-source
 news for an EXPLICIT window and EXPLICIT focus instruments, without any account
@@ -21,7 +21,7 @@ Deliberate properties:
 * **Focus instruments are explicit parameters, resolved against the broker.**
   The caller names the instruments (for example ``XAUUSD``); when an
   ``InstrumentService`` is wired (Step 51), every name is resolved through the
-  tenant's own MT5 catalog first and grading uses the broker's canonical
+  customer's own MT5 catalog first and grading uses the broker's canonical
   spelling — a requested spelling the broker does not offer is reported as
   unresolved and never used as if it were a real instrument. This service holds
   no MT5 provider, no credentials, no positions and no broker/user identity: it
@@ -141,16 +141,17 @@ class FinancialResearchService:
 
     ``instrument_service`` is the optional broker-catalog boundary (Step 51).
     When it is wired, caller-supplied instrument names are resolved through the
-    authenticated tenant's own MT5 catalog before they are graded, and the
+    authenticated customer's own MT5 catalog before they are graded, and the
     broker's canonical spelling is what travels into the context. When it is
     not wired, names are used as given — a deployment with no broker catalog
     cannot verify them — which is exactly the Step 49 behaviour.
 
     The service still holds no MT5 provider, no credentials, no positions and
-    no tenant identity: it depends on the instrument *service*, which owns the
-    tenant-scoped session, the provider and the deterministic presentation
+    no customer identity: it depends on the instrument *service*, which owns the
+    customer-scoped session, the provider and the deterministic presentation
     rules. Resolution is reached only through that boundary, so no catalog or
-    provider logic is duplicated here.
+    provider logic is duplicated here, and resolving a whole focus set reads the
+    broker's catalog once (``resolve_many``) rather than once per name.
     """
 
     def __init__(
@@ -182,6 +183,14 @@ class FinancialResearchService:
         An MT5/catalog availability failure is NOT an unresolved instrument: it
         propagates as ``RuntimeError``, which every caller already maps to the
         established generic 503.
+
+        The whole requested set is resolved against ONE catalog snapshot
+        (``InstrumentService.resolve_many``): the broker's catalog is read once
+        for the operation instead of once per name, which matters because the
+        MT5 API serializes every read on the single process-wide session. The
+        rules and the per-name outcomes are the same ones a single
+        ``resolve()`` applies, so nothing about resolution changes except the
+        number of catalog reads.
         """
         requested = _normalize_focus_symbols(focus_symbols)
         if self._instruments is None:
@@ -190,18 +199,15 @@ class FinancialResearchService:
             # and "known to be absent" are different statements).
             return FocusResolution(requested=requested, resolved=requested, unresolved=())
 
-        resolved: set[str] = set()
-        unresolved: list[str] = []
-        for symbol in requested:
-            try:
-                instrument = self._instruments.resolve(symbol)
-            except ValueError:
-                # resolve() raises ValueError exactly when the broker's catalog
-                # cannot identify one instrument for this name; the requested
-                # names are already normalized above, so nothing else lands here.
-                unresolved.append(symbol)
-                continue
-            resolved.add(instrument.symbol)
+        outcomes = self._instruments.resolve_many(requested)
+        resolved = {
+            outcome.instrument.symbol for outcome in outcomes if outcome.instrument is not None
+        }
+        # resolve_many() reports an unresolvable name exactly when the broker's
+        # catalog cannot identify one instrument for it (unknown or ambiguous);
+        # the requested names are already normalized above, so a malformed name
+        # cannot reach it and its ValueError never lands here.
+        unresolved = [outcome.requested for outcome in outcomes if outcome.instrument is None]
         return FocusResolution(
             requested=requested,
             resolved=tuple(sorted(resolved)),
@@ -213,6 +219,7 @@ class FinancialResearchService:
         from_time: datetime,
         to_time: datetime,
         focus_symbols: tuple[str, ...] | list[str] = (),
+        resolution: FocusResolution | None = None,
     ) -> FinancialResearchContext:
         """Graded news inside the half-open UTC window [from_time, to_time).
 
@@ -229,6 +236,18 @@ class FinancialResearchService:
         when one is wired (Step 51), and only the resolved canonical spellings
         are graded; the rest are reported in ``unresolved_symbols``.
 
+        ``resolution`` is the outcome of that same resolution when the caller
+        has ALREADY performed it for this request (the research API resolves
+        first so an unknown instrument fails closed before any news is fetched;
+        the agent resolves so an unconfirmed label is never researched). Passing
+        it reuses that read instead of resolving the same catalog again within
+        one request — the duplicate MT5 read this step removes. Using it keeps
+        the grading rule intact: a ``FocusResolution`` can only come from
+        ``resolve_focus_symbols``, so only broker-confirmed spellings are ever
+        graded, whether the caller supplies the resolution or lets this method
+        resolve. ``None`` (the default) resolves now, exactly as before; a
+        supplied resolution replaces ``focus_symbols`` entirely.
+
         ``as_of`` echoes the caller's (already validated) window start so the
         context is reproducible; no clock is read here.
         """
@@ -237,7 +256,8 @@ class FinancialResearchService:
         if window_from >= window_to:
             raise ValueError("from_time must be earlier than to_time")
 
-        resolution = self.resolve_focus_symbols(focus_symbols)
+        if resolution is None:
+            resolution = self.resolve_focus_symbols(focus_symbols)
         focus = resolution.resolved
         instruments = focus
 

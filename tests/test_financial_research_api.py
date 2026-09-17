@@ -141,19 +141,19 @@ def research_env(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="FI-A")
-            broker_b = Broker(name="Broker B", code="FI-B")
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="The Broker", code="FI-ONE", mt5_server="TheBroker-Live")
+            session.add(broker)
             await session.commit()
+            # Two CUSTOMERS of the one broker, each with its own MT5 account.
             customer_a = User(
-                broker_id=broker_a.id,
+                broker_id=broker.id,
                 login="20001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             customer_b = User(
-                broker_id=broker_b.id,
+                broker_id=broker.id,
                 login="20002",
                 password_hash="x" * 60,
                 is_active=True,
@@ -162,8 +162,7 @@ def research_env(tmp_path):
             session.add_all([customer_a, customer_b])
             await session.commit()
             return {
-                "broker_a_id": broker_a.id,
-                "broker_b_id": broker_b.id,
+                "broker_id": broker.id,
                 "customer_a_id": customer_a.id,
                 "customer_b_id": customer_b.id,
             }
@@ -608,7 +607,7 @@ def test_a_catalog_failure_is_the_generic_503(research_env, monkeypatch) -> None
     assert body == {"detail": "Financial research service temporarily unavailable"}
 
 
-def test_a_tenant_without_a_usable_mt5_session_gets_the_generic_503(research_env, monkeypatch) -> None:
+def test_a_customer_without_a_usable_mt5_session_gets_the_generic_503(research_env, monkeypatch) -> None:
     """The real provider runs here: no credentials means the session refuses.
 
     Resolution is broker infrastructure, so an unavailable MT5 catalog is a
@@ -627,7 +626,7 @@ def test_a_tenant_without_a_usable_mt5_session_gets_the_generic_503(research_env
     assert body == {"detail": "Financial research service temporarily unavailable"}
 
 
-def test_each_request_resolves_against_the_authenticated_tenants_own_catalog(
+def test_each_request_resolves_against_the_authenticated_customers_own_catalog(
     research_env, patched_trade_catalog
 ) -> None:
     get_research(
@@ -642,17 +641,17 @@ def test_each_request_resolves_against_the_authenticated_tenants_own_catalog(
     )
 
     # Each request composed its own provider from the authenticated user's own
-    # MT5 identity: a caller cannot choose whose broker catalog is read.
+    # MT5 identity: a caller cannot choose whose account catalog is read.
     assert [getattr(credentials, "login", None) for credentials in patched_trade_catalog] == [
         20001,
         20002,
     ]
 
 
-# --- tenant isolation / secret safety -------------------------------------------------------
+# --- customer isolation / secret safety -----------------------------------------------------
 
 
-def test_the_only_tenant_fact_in_a_response_is_the_callers_own_broker_id(
+def test_the_only_broker_fact_in_a_response_is_the_deployments_broker(
     research_env,
 ) -> None:
     status_a, body_a = get_research(
@@ -667,9 +666,10 @@ def test_the_only_tenant_fact_in_a_response_is_the_callers_own_broker_id(
     )
 
     assert status_a == status_b == 200
-    assert body_a["broker_id"] == research_env["broker_a_id"]
-    assert body_b["broker_id"] == research_env["broker_b_id"]
-    # The graded items are public market data: identical for both tenants.
+    # Both customers of the one broker report that broker.
+    assert body_a["broker_id"] == research_env["broker_id"]
+    assert body_b["broker_id"] == research_env["broker_id"]
+    # The graded items are public market data: identical for both customers.
     assert body_a["news"]["items"] == body_b["news"]["items"]
 
 

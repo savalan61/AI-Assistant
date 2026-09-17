@@ -122,14 +122,13 @@ def instruments_env(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="TA-1")
-            broker_b = Broker(name="Broker B", code="TB-1")
-            session.add_all([broker_a, broker_b])
+            broker_a = Broker(name="The Broker", code="TA-1", mt5_server="TheBroker-Live")
+            session.add(broker_a)
             await session.commit()
-            # Two tenants in two different brokers: cross-tenant access is what
-            # the isolation tests below pin.
+            # Two CUSTOMERS of the one broker, each with its own MT5 account
+            # number: customer-to-customer isolation is what the tests below pin.
             user_a = User(broker_id=broker_a.id, login="10001", password_hash="x" * 60, is_active=True)
-            user_b = User(broker_id=broker_b.id, login="20002", password_hash="x" * 60, is_active=True)
+            user_b = User(broker_id=broker_a.id, login="20002", password_hash="x" * 60, is_active=True)
             session.add_all([user_a, user_b])
             await session.commit()
             return {"user_a": user_a.id, "user_b": user_b.id}
@@ -495,13 +494,13 @@ def test_no_secret_material_appears_in_any_response(instruments_env, patched_ins
     for body in bodies:
         assert TEST_SECRET not in body
         assert "password" not in body
-        assert "TA-1" not in body  # broker code is not part of the instrument contract
+        assert "TA-1" not in body  # the broker code is not part of the instrument contract
 
 
-# --- tenant isolation -------------------------------------------------------------------
+# --- customer isolation -----------------------------------------------------------------
 
 
-def test_each_request_composes_a_provider_for_the_authenticated_tenant(
+def test_each_request_composes_a_provider_for_the_authenticated_customer(
     instruments_env, patched_instrument_provider
 ):
     record = patched_instrument_provider()
@@ -513,14 +512,14 @@ def test_each_request_composes_a_provider_for_the_authenticated_tenant(
         c.get("/instruments", headers=headers)
 
     # Providers are cheap per-request objects (the process-wide state is the MT5
-    # session), so nothing about one request's tenant is reused by the next.
+    # session), so nothing about one request's customer is reused by the next.
     assert len(record["instances"]) == 2
     for credentials in record["credentials"]:
         assert isinstance(credentials, MT5AccountCredentials)
         assert credentials.login == 10001  # the authenticated user's own MT5 identity
 
 
-def test_two_tenants_compose_their_own_mt5_identity(instruments_env, patched_instrument_provider):
+def test_two_customers_compose_their_own_mt5_identity(instruments_env, patched_instrument_provider):
     record = patched_instrument_provider()
     client = instruments_env["make_app"]()
 
@@ -528,11 +527,14 @@ def test_two_tenants_compose_their_own_mt5_identity(instruments_env, patched_ins
         c.get("/instruments/XAUUSD", headers=auth_header(token_for(instruments_env, "user_a")))
         c.get("/instruments/XAUUSD", headers=auth_header(token_for(instruments_env, "user_b")))
 
-    logins = [getattr(credentials, "login", None) for credentials in record["credentials"]]
-    assert logins == [10001, 20002]
+    # Same broker, same MT5 server, two different accounts: every read carries
+    # the calling customer's own login and nothing of the other's.
+    credentials_seen = record["credentials"]
+    assert [getattr(credentials, "login", None) for credentials in credentials_seen] == [10001, 20002]
+    assert {getattr(credentials, "server", None) for credentials in credentials_seen} == {"TheBroker-Live"}
 
 
-def test_client_cannot_select_another_tenants_broker_or_account(
+def test_client_cannot_select_another_customers_account(
     instruments_env, patched_instrument_provider
 ):
     record = patched_instrument_provider()
@@ -541,8 +543,8 @@ def test_client_cannot_select_another_tenants_broker_or_account(
     with client as c:
         response = c.get(
             "/instruments/XAUUSD",
-            # Attempted account/broker selection is ignored: the tenant comes from
-            # the authenticated database user, never from the request.
+            # Attempted account/broker selection is ignored: the identity comes
+            # from the authenticated database user, never from the request.
             params={"login": 20002, "broker_id": 2, "account_id": 42},
             headers=auth_header(token_for(instruments_env, "user_a")),
         )

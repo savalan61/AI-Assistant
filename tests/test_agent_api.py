@@ -251,6 +251,17 @@ def patched_providers(monkeypatch):
         llm_error: Exception | None = None,
     ) -> dict[str, object]:
         account_cls, account_threads = make_fake_account_provider_class(ACCOUNT, account_error)
+        # Every account read is composed with the authenticated customer's
+        # credentials; recorded here so a test can prove whose identity it was.
+        credentials_seen: list[object] = []
+        _account_cls = account_cls
+
+        class RecordingAccountProvider(_account_cls):  # type: ignore[misc,valid-type]
+            def __init__(self, session_manager: object = None, credentials: object = None) -> None:
+                credentials_seen.append(credentials)
+                super().__init__(session_manager=session_manager, credentials=credentials)
+
+        account_cls = RecordingAccountProvider
         position_cls, position_threads = make_fake_position_provider_class((XAUUSD_BUY,), position_error)
         trade_cls, trade_threads, trade_windows = make_fake_trade_provider_class((TRADE,), trade_error)
         instrument_cls, instrument_threads = make_fake_instrument_provider_class()
@@ -274,11 +285,11 @@ def patched_providers(monkeypatch):
         monkeypatch.setattr(deps, "MT5InstrumentProvider", instrument_cls)
         llm: FakeLLMProvider = FakeLLMProvider() if llm_error is None else FailingLLMProvider(llm_error)
 
-        # The production seam is the broker-aware router (async, per-broker).
-        # Tests replace the whole seam with the deterministic offline fake so
-        # these endpoint tests involve no network, no stored configuration and
-        # no broker-provider policy.
-        async def fake_llm_provider(broker_id: int, session: object) -> FakeLLMProvider:
+        # The production seam resolves the deployment's ONE stored LLM
+        # configuration (async). Tests replace the whole seam with the
+        # deterministic offline fake, so these endpoint tests involve no network,
+        # no stored configuration and no provider policy.
+        async def fake_llm_provider(session: object) -> FakeLLMProvider:
             return llm
 
         monkeypatch.setattr(deps, "get_llm_provider", fake_llm_provider)
@@ -288,6 +299,7 @@ def patched_providers(monkeypatch):
             "trade_threads": trade_threads,
             "trade_windows": trade_windows,
             "instrument_threads": instrument_threads,
+            "credentials": credentials_seen,
             "llm": llm,
         }
 
@@ -304,19 +316,21 @@ def agent_env(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="AG-A")
-            broker_b = Broker(name="Broker B", code="AG-B")
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="The Broker", code="AG-ONE", mt5_server="TheBroker-Live")
+            session.add(broker)
             await session.commit()
+            # Two CUSTOMERS of the one broker, each with its own MT5 account:
+            # the agent composes its context from the authenticated customer's
+            # own account and never from the other's.
             customer_a = User(
-                broker_id=broker_a.id,
+                broker_id=broker.id,
                 login="10001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             customer_b = User(
-                broker_id=broker_b.id,
+                broker_id=broker.id,
                 login="10002",
                 password_hash="x" * 60,
                 is_active=True,
@@ -325,8 +339,7 @@ def agent_env(tmp_path):
             session.add_all([customer_a, customer_b])
             await session.commit()
             return {
-                "broker_a_id": broker_a.id,
-                "broker_b_id": broker_b.id,
+                "broker_id": broker.id,
                 "customer_a_id": customer_a.id,
                 "customer_b_id": customer_b.id,
             }
@@ -542,27 +555,30 @@ def test_custom_window_is_applied(agent_env, patched_providers) -> None:
     assert window_to == as_of
 
 
-# --- tenant scope ------------------------------------------------------------------------
+# --- identity / customer scope --------------------------------------------------------------
 
 
-def test_broker_id_comes_from_the_authenticated_user(agent_env, patched_providers) -> None:
+def test_broker_id_is_the_deployments_only_broker(agent_env, patched_providers) -> None:
     patched_providers()
 
     _, body = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
 
-    assert body["broker_id"] == agent_env["broker_a_id"]
+    assert body["broker_id"] == agent_env["broker_id"]
     assert body["context"]["portfolio_intelligence"]["open_positions"] == 1
 
 
-def test_each_user_gets_their_own_tenant_identity(agent_env, patched_providers) -> None:
-    patched_providers()
+def test_each_customer_context_comes_from_its_own_mt5_identity(agent_env, patched_providers) -> None:
+    records = patched_providers()
 
     _, body_a = post_agent(agent_env, agent_env["customer_a_id"], {"message": "hi"})
     _, body_b = post_agent(agent_env, agent_env["customer_b_id"], {"message": "hi"})
 
-    assert body_a["broker_id"] == agent_env["broker_a_id"]
-    assert body_b["broker_id"] == agent_env["broker_b_id"]
-    assert body_a["broker_id"] != body_b["broker_id"]
+    # One broker, two accounts: the answers share the broker and are composed,
+    # each time, from the calling customer's own credentials — never the other's.
+    assert body_a["broker_id"] == agent_env["broker_id"]
+    assert body_b["broker_id"] == agent_env["broker_id"]
+    logins = [getattr(credentials, "login", None) for credentials in records["credentials"]]
+    assert logins == [10001, 10002]
 
 
 # --- failure handling ---------------------------------------------------------------------
@@ -756,7 +772,7 @@ def test_quota_cannot_be_bypassed_via_the_request_body(agent_env, patched_provid
         status, _ = post_agent(
             agent_env,
             agent_env["customer_a_id"],
-            {"message": "my balance?", "user_id": 999999, "broker_id": agent_env["broker_b_id"]},
+            {"message": "my balance?", "user_id": 999999, "broker_id": agent_env["broker_id"]},
         )
     finally:
         config_module.settings.AGENT_DAILY_REQUEST_LIMIT = 50
@@ -1069,7 +1085,7 @@ def test_news_source_failure_maps_to_the_existing_503(
     assert records["llm"].call_count == 0
 
 
-def test_the_named_instrument_is_resolved_through_the_tenants_own_catalog(
+def test_the_named_instrument_is_resolved_through_the_customers_own_catalog(
     agent_env, patched_providers
 ) -> None:
     records = patched_providers()

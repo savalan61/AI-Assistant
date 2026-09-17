@@ -18,21 +18,21 @@ from app.providers.llm import LLMProviderKind
 
 
 class BrokerLLMConfig(Base):
-    """Broker-scoped LLM configuration for the assistant.
+    """The deployment broker's LLM configuration for the assistant.
 
     Holds only non-secret metadata in the clear (which provider, which model,
     which endpoint, whether it is enabled). The API key is persisted as
     authenticated ciphertext in ``api_key_encrypted`` (see app.core.encryption)
     and is never returned by any endpoint.
 
-    Exactly one configuration per broker is enforced at the database layer by a
-    unique constraint on ``broker_id`` — not merely by application logic — so a
+    Exactly one configuration is enforced at the database layer by a unique
+    constraint on ``broker_id`` — not merely by application logic — so a
     concurrent create cannot silently produce a second active configuration.
     """
 
     __tablename__ = "broker_llm_configs"
     __table_args__ = (
-        # One configuration per broker (the tenant boundary).
+        # One configuration for the deployment's single broker.
         UniqueConstraint("broker_id", name="uq_broker_llm_configs_broker"),
         # Non-native enum: plain VARCHAR plus a CHECK keeps the schema portable
         # (same shape on PostgreSQL and SQLite) and evolvable without native

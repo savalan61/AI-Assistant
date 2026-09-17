@@ -1,4 +1,4 @@
-"""Tests for the tenant-scoped /auth/login endpoint.
+"""Tests for the /auth/login endpoint in the ONE-BROKER deployment.
 
 Require none of: real PostgreSQL, real MT5, network access, or real
 credentials. The get_db dependency is overridden with a per-test file-based
@@ -6,9 +6,11 @@ async SQLite database containing the real User/Broker models; JWT config uses
 test-only values. No pytest asyncio plugin: async setup is driven with
 asyncio.run.
 
-Two brokers deliberately share one MT5 login number (80009), because that is
-what the endpoint must handle safely: the broker code selects the tenant, and a
-failure at one broker must never authenticate, block, or throttle the other.
+The endpoint has NO tenant selector: this deployment serves one broker, which
+the server resolves from its own configuration, so the client sends only its
+own credentials. Two CUSTOMERS of that one broker (two different MT5 accounts,
+each with its own application password) are what the tests below separate:
+authenticating one must never authenticate, block or throttle the other.
 """
 import asyncio
 from typing import AsyncIterator, Iterator, NamedTuple
@@ -31,12 +33,12 @@ TEST_SECRET = "unit-test-secret-not-a-real-credential"
 TEST_ALGORITHM = "HS256"
 TEST_PASSWORD = "correct horse battery staple"
 
-# Two tenants, one shared login number. Broker B's user has a different
-# application password so a test can prove which broker authenticated.
-BROKER_A_CODE = "TB-1"
-BROKER_B_CODE = "TB-2"
-SHARED_LOGIN = "80009"
-OTHER_PASSWORD = "second broker application password"
+# The deployment's one broker, and two of its customers: same broker, same MT5
+# server, two different MT5 accounts and two different application passwords.
+BROKER_CODE = "TB-1"
+CUSTOMER_ONE_LOGIN = "80009"
+CUSTOMER_TWO_LOGIN = "80010"
+OTHER_PASSWORD = "second customer application password"
 
 IP_ONE = ("1.1.1.1", 50000)
 IP_TWO = ("2.2.2.2", 50000)
@@ -68,15 +70,14 @@ def small_login_limit(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
 
 class SeededAuthDb(NamedTuple):
     factory: async_sessionmaker[AsyncSession]
-    broker_a_id: int
-    broker_b_id: int
-    user_a_id: int
-    user_b_id: int
+    broker_id: int
+    user_one_id: int
+    user_two_id: int
 
 
 @pytest.fixture()
 def auth_db(tmp_path) -> Iterator[SeededAuthDb]:
-    """Seed a per-test SQLite file DB with two brokers sharing one login."""
+    """Seed the deployment's ONE broker with two customers."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/login_test.db")
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -84,26 +85,25 @@ def auth_db(tmp_path) -> Iterator[SeededAuthDb]:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Test Broker A", code=BROKER_A_CODE)
-            broker_b = Broker(name="Test Broker B", code=BROKER_B_CODE)
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="Test Broker", code=BROKER_CODE, mt5_server="TestBroker-Live")
+            session.add(broker)
             await session.commit()
-            user_a = User(
-                broker_id=broker_a.id,
-                login=SHARED_LOGIN,
+            user_one = User(
+                broker_id=broker.id,
+                login=CUSTOMER_ONE_LOGIN,
                 # Real bcrypt hashes created via the app's own primitive.
                 password_hash=hash_for_test(TEST_PASSWORD),
                 is_active=True,
             )
-            user_b = User(
-                broker_id=broker_b.id,
-                login=SHARED_LOGIN,
+            user_two = User(
+                broker_id=broker.id,
+                login=CUSTOMER_TWO_LOGIN,
                 password_hash=hash_for_test(OTHER_PASSWORD),
                 is_active=True,
             )
-            session.add_all([user_a, user_b])
+            session.add_all([user_one, user_two])
             await session.commit()
-            return SeededAuthDb(factory, broker_a.id, broker_b.id, user_a.id, user_b.id)
+            return SeededAuthDb(factory, broker.id, user_one.id, user_two.id)
 
     seeded = asyncio.run(seed())
     yield seeded
@@ -129,16 +129,18 @@ def make_client(
     app.include_router(router)
     app.dependency_overrides[get_db] = override_get_db
     # client_address is the source address the throttle counts: distinct
-    # addresses keep the per-IP bucket out of the tenant-isolation assertions.
+    # addresses keep the per-IP bucket out of the customer-isolation assertions.
     return TestClient(app, client=client_address)
 
 
 def login_payload(
-    broker: str = BROKER_A_CODE,
-    login: str = SHARED_LOGIN,
+    login: str = CUSTOMER_ONE_LOGIN,
     password: str = TEST_PASSWORD,
+    **extra: str,
 ) -> dict[str, str]:
-    return {"broker": broker, "login": login, "password": password}
+    payload = {"login": login, "password": password}
+    payload.update(extra)
+    return payload
 
 
 def set_active(factory: async_sessionmaker[AsyncSession], model: type, row_id: int, active: bool) -> None:
@@ -177,42 +179,62 @@ def test_token_subject_equals_user_id(auth_db: SeededAuthDb):
     with make_client(auth_db.factory) as client:
         token = client.post("/auth/login", json=login_payload()).json()["access_token"]
 
-    assert decode_token(token)["sub"] == str(auth_db.user_a_id)
+    assert decode_token(token)["sub"] == str(auth_db.user_one_id)
 
 
-def test_broker_code_is_resolved_case_insensitively(auth_db: SeededAuthDb):
+def test_each_customer_authenticates_as_itself(auth_db: SeededAuthDb):
     with make_client(auth_db.factory) as client:
-        lowercase = client.post("/auth/login", json=login_payload(broker="tb-1"))
-        padded = client.post("/auth/login", json=login_payload(broker="  TB-1  "))
-        wrong_case = client.post("/auth/login", json=login_payload(broker="tB-1"))
-
-    assert lowercase.status_code == padded.status_code == wrong_case.status_code == 200
-
-
-def test_same_login_at_two_brokers_authenticates_the_named_broker(auth_db: SeededAuthDb):
-    with make_client(auth_db.factory) as client:
-        token_a = client.post("/auth/login", json=login_payload()).json()["access_token"]
-        token_b = (
-            client.post("/auth/login", json=login_payload(broker=BROKER_B_CODE, password=OTHER_PASSWORD))
+        token_one = client.post("/auth/login", json=login_payload()).json()["access_token"]
+        token_two = (
+            client.post("/auth/login", json=login_payload(login=CUSTOMER_TWO_LOGIN, password=OTHER_PASSWORD))
             .json()["access_token"]
         )
 
-    # The same login number resolves to a different account per broker, and each
-    # token names its own user: the lookup was scoped, not ambiguous.
-    assert decode_token(token_a)["sub"] == str(auth_db.user_a_id)
-    assert decode_token(token_b)["sub"] == str(auth_db.user_b_id)
-    assert auth_db.user_a_id != auth_db.user_b_id
+    # Two accounts of one broker, and each token names only its own user.
+    assert decode_token(token_one)["sub"] == str(auth_db.user_one_id)
+    assert decode_token(token_two)["sub"] == str(auth_db.user_two_id)
+    assert auth_db.user_one_id != auth_db.user_two_id
 
 
-def test_each_broker_accepts_only_its_own_password(auth_db: SeededAuthDb):
+def test_each_customer_accepts_only_its_own_password(auth_db: SeededAuthDb):
     with make_client(auth_db.factory) as client:
-        # Broker B's password must not open Broker A's account, nor the reverse.
-        a_with_b_password = client.post("/auth/login", json=login_payload(password=OTHER_PASSWORD))
-        b_with_a_password = client.post(
-            "/auth/login", json=login_payload(broker=BROKER_B_CODE, password=TEST_PASSWORD)
+        # Customer two's password must not open customer one's account, nor the
+        # reverse: the credential is bound to the account it was stored for.
+        one_with_two_password = client.post("/auth/login", json=login_payload(password=OTHER_PASSWORD))
+        two_with_one_password = client.post(
+            "/auth/login", json=login_payload(login=CUSTOMER_TWO_LOGIN, password=TEST_PASSWORD)
         )
 
-    assert a_with_b_password.status_code == b_with_a_password.status_code == 401
+    assert one_with_two_password.status_code == two_with_one_password.status_code == 401
+
+
+def test_a_submitted_broker_value_is_ignored_not_honoured(auth_db: SeededAuthDb):
+    """The tenant selector is gone: a stale field can neither help nor block.
+
+    The deployment's broker is resolved server-side, so an unknown, blank or
+    mismatched ``broker`` value cannot authenticate anything on its own — and
+    cannot stop a legitimate customer either. Nothing the client sends selects
+    a customer, so the field is simply not part of the contract.
+    """
+    with make_client(auth_db.factory) as client:
+        unknown = client.post("/auth/login", json=login_payload(broker="NO-SUCH-BROKER"))
+        blank = client.post("/auth/login", json=login_payload(broker="   "))
+        matching = client.post("/auth/login", json=login_payload(broker=BROKER_CODE))
+
+    # All three are the deployment's own credentials, so all three authenticate
+    # the SAME user: the field carries no authority in either direction.
+    assert (unknown.status_code, blank.status_code, matching.status_code) == (200, 200, 200)
+    subjects = {decode_token(response.json()["access_token"])["sub"] for response in (unknown, blank, matching)}
+    assert subjects == {str(auth_db.user_one_id)}
+
+    # And it cannot smuggle a different customer in, even with a correct password.
+    with make_client(auth_db.factory) as client:
+        wrong_login = client.post(
+            "/auth/login", json=login_payload(login=CUSTOMER_ONE_LOGIN, broker=BROKER_CODE)
+        )
+
+    assert wrong_login.status_code == 200
+    assert decode_token(wrong_login.json()["access_token"])["sub"] == str(auth_db.user_one_id)
 
 
 # --- generic failure paths (all indistinguishable 401s) ------------------------
@@ -227,38 +249,13 @@ def test_wrong_password_returns_401(auth_db: SeededAuthDb):
 
 def test_nonexistent_login_returns_401(auth_db: SeededAuthDb):
     with make_client(auth_db.factory) as client:
-        response = client.post("/auth/login", json=login_payload(login="no-such-user"))
-
-    assert response.status_code == 401
-
-
-def test_unknown_broker_returns_401(auth_db: SeededAuthDb):
-    with make_client(auth_db.factory) as client:
-        response = client.post("/auth/login", json=login_payload(broker="NO-SUCH-BROKER"))
-
-    assert response.status_code == 401
-
-
-def test_blank_broker_returns_401_not_an_internal_error(auth_db: SeededAuthDb):
-    # A blank code is a submitted value like any other: it resolves to no
-    # broker and must fail the same generic way.
-    with make_client(auth_db.factory) as client:
-        response = client.post("/auth/login", json=login_payload(broker="   "))
-
-    assert response.status_code == 401
-
-
-def test_wrong_broker_cannot_authenticate_the_login(auth_db: SeededAuthDb):
-    # A's credentials against B's tenant: the right login exists there, but the
-    # lookup must not reach A's row and B's stored hash must reject the password.
-    with make_client(auth_db.factory) as client:
-        response = client.post("/auth/login", json=login_payload(broker=BROKER_B_CODE))
+        response = client.post("/auth/login", json=login_payload(login="99999999"))
 
     assert response.status_code == 401
 
 
 def test_inactive_user_returns_401(auth_db: SeededAuthDb):
-    set_active(auth_db.factory, User, auth_db.user_a_id, active=False)
+    set_active(auth_db.factory, User, auth_db.user_one_id, active=False)
 
     with make_client(auth_db.factory) as client:
         response = client.post("/auth/login", json=login_payload())
@@ -266,39 +263,44 @@ def test_inactive_user_returns_401(auth_db: SeededAuthDb):
     assert response.status_code == 401
 
 
-def test_inactive_user_at_one_broker_does_not_block_the_other(auth_db: SeededAuthDb):
-    set_active(auth_db.factory, User, auth_db.user_a_id, active=False)
+def test_inactive_customer_does_not_block_another_customer(auth_db: SeededAuthDb):
+    """One suspended account must never take the whole broker's login down."""
+    set_active(auth_db.factory, User, auth_db.user_one_id, active=False)
 
     with make_client(auth_db.factory) as client:
         blocked = client.post("/auth/login", json=login_payload())
-        other_tenant = client.post(
-            "/auth/login", json=login_payload(broker=BROKER_B_CODE, password=OTHER_PASSWORD)
+        other_customer = client.post(
+            "/auth/login", json=login_payload(login=CUSTOMER_TWO_LOGIN, password=OTHER_PASSWORD)
         )
 
     assert blocked.status_code == 401
-    assert other_tenant.status_code == 200
+    assert other_customer.status_code == 200
 
 
 def test_inactive_broker_returns_401(auth_db: SeededAuthDb):
-    set_active(auth_db.factory, Broker, auth_db.broker_a_id, active=False)
+    """A suspended broker fails closed for every customer — there is no other."""
+    set_active(auth_db.factory, Broker, auth_db.broker_id, active=False)
+
+    with make_client(auth_db.factory) as client:
+        first = client.post("/auth/login", json=login_payload())
+        second = client.post("/auth/login", json=login_payload(login=CUSTOMER_TWO_LOGIN, password=OTHER_PASSWORD))
+
+    assert (first.status_code, second.status_code) == (401, 401)
+
+
+def test_a_leftover_second_broker_row_fails_closed(auth_db: SeededAuthDb):
+    """One broker means exactly one: an ambiguous database authenticates nobody."""
+    async def add_stray_broker() -> None:
+        async with auth_db.factory() as session:
+            session.add(Broker(name="Stray Broker", code="TB-STRAY", mt5_server="Stray-Live"))
+            await session.commit()
+
+    asyncio.run(add_stray_broker())
 
     with make_client(auth_db.factory) as client:
         response = client.post("/auth/login", json=login_payload())
 
     assert response.status_code == 401
-
-
-def test_inactive_broker_does_not_block_another_broker(auth_db: SeededAuthDb):
-    set_active(auth_db.factory, Broker, auth_db.broker_a_id, active=False)
-
-    with make_client(auth_db.factory) as client:
-        suspended = client.post("/auth/login", json=login_payload())
-        active_tenant = client.post(
-            "/auth/login", json=login_payload(broker=BROKER_B_CODE, password=OTHER_PASSWORD)
-        )
-
-    assert suspended.status_code == 401
-    assert active_tenant.status_code == 200
 
 
 # --- failure-response hygiene ---------------------------------------------------
@@ -306,9 +308,7 @@ def test_inactive_broker_does_not_block_another_broker(auth_db: SeededAuthDb):
 
 FAILURE_CASES = {
     "wrong password": {"password": "wrong password"},
-    "unknown login": {"login": "no-such-user"},
-    "unknown broker": {"broker": "NO-SUCH-BROKER"},
-    "wrong broker": {"broker": BROKER_B_CODE},
+    "unknown login": {"login": "99999999"},
 }
 
 
@@ -322,18 +322,18 @@ def test_all_failure_paths_are_indistinguishable(auth_db: SeededAuthDb, reason: 
 
     assert failure.status_code == baseline.status_code == 401
     # Identical body and challenge for every rejection path, so the response
-    # cannot be used to tell brokers, logins or account states apart.
+    # cannot be used to tell logins, accounts or states apart.
     assert failure.json() == baseline.json()
     assert failure.headers["www-authenticate"] == "Bearer"
 
 
 def test_error_response_echoes_no_submitted_identity(auth_db: SeededAuthDb):
     with make_client(auth_db.factory) as client:
-        response = client.post("/auth/login", json=login_payload(broker="NO-SUCH-BROKER", login="99999"))
+        response = client.post("/auth/login", json=login_payload(login="99999999"))
 
     body = str(response.json())
-    assert "NO-SUCH-BROKER" not in body
-    assert "99999" not in body
+    assert "99999999" not in body
+    assert CUSTOMER_ONE_LOGIN not in body
 
 
 def test_error_response_exposes_no_credentials_or_token(auth_db: SeededAuthDb):
@@ -357,16 +357,6 @@ def test_success_response_exposes_only_token_fields(auth_db: SeededAuthDb):
 # --- request validation ---------------------------------------------------------
 
 
-def test_login_only_request_is_rejected_by_validation(auth_db: SeededAuthDb):
-    # The pre-Step-43 body has no broker: the tenant selector is mandatory, so
-    # the request is refused outright rather than resolved ambiguously.
-    with make_client(auth_db.factory) as client:
-        response = client.post("/auth/login", json={"login": SHARED_LOGIN, "password": TEST_PASSWORD})
-
-    assert response.status_code == 422
-    assert "broker" in response.text
-
-
 @pytest.mark.parametrize("missing", ["login", "password"])
 def test_each_credential_field_is_required(auth_db: SeededAuthDb, missing: str):
     payload = login_payload()
@@ -382,10 +372,10 @@ def test_each_credential_field_is_required(auth_db: SeededAuthDb, missing: str):
 # --- timing hardening -----------------------------------------------------------
 
 
-def test_unknown_broker_still_performs_password_verification(auth_db: SeededAuthDb, monkeypatch):
-    # No stored hash exists for an unknown broker, so the endpoint must spend a
+def test_unknown_login_still_performs_password_verification(auth_db: SeededAuthDb, monkeypatch):
+    # No stored hash exists for an unknown login, so the endpoint must spend a
     # dummy verification instead of returning early: an early return is
-    # measurably faster and would reveal which broker codes exist.
+    # measurably faster and would reveal which logins exist.
     calls: list[str] = []
     real_dummy = auth_router.dummy_password_verification
 
@@ -396,13 +386,16 @@ def test_unknown_broker_still_performs_password_verification(auth_db: SeededAuth
     monkeypatch.setattr(auth_router, "dummy_password_verification", spy)
 
     with make_client(auth_db.factory) as client:
-        response = client.post("/auth/login", json=login_payload(broker="NO-SUCH-BROKER"))
+        response = client.post("/auth/login", json=login_payload(login="99999999"))
 
     assert response.status_code == 401
     assert calls == [TEST_PASSWORD]
 
 
-def test_unknown_login_still_performs_password_verification(auth_db: SeededAuthDb, monkeypatch):
+def test_an_unusable_deployment_broker_still_performs_password_verification(auth_db: SeededAuthDb, monkeypatch):
+    """A missing/suspended broker must not be distinguishable by timing either."""
+    set_active(auth_db.factory, Broker, auth_db.broker_id, active=False)
+
     calls: list[str] = []
     real_dummy = auth_router.dummy_password_verification
 
@@ -413,7 +406,7 @@ def test_unknown_login_still_performs_password_verification(auth_db: SeededAuthD
     monkeypatch.setattr(auth_router, "dummy_password_verification", spy)
 
     with make_client(auth_db.factory) as client:
-        response = client.post("/auth/login", json=login_payload(login="no-such-user"))
+        response = client.post("/auth/login", json=login_payload())
 
     assert response.status_code == 401
     assert calls == [TEST_PASSWORD]
@@ -465,7 +458,7 @@ def test_throttle_is_identical_for_existing_and_unknown_logins(auth_db: SeededAu
     # so the lockout cannot be used to probe which accounts exist.
     deps.reset_login_throttle()
     with make_client(auth_db.factory) as client:
-        unknown = statuses_for(client, small_login_limit + 1, login="no-such-user", password="wrong password")
+        unknown = statuses_for(client, small_login_limit + 1, login="99999999", password="wrong password")
 
     assert existing == unknown
 
@@ -499,47 +492,45 @@ def test_throttled_response_is_generic_and_secret_free(auth_db: SeededAuthDb, sm
     # The body is exactly the fixed generic message: it names neither the
     # submitted login (asserted below) nor any internal detail.
     assert body == str({"detail": "Too many failed login attempts; try again later"})
-    assert SHARED_LOGIN not in body
+    assert CUSTOMER_ONE_LOGIN not in body
     assert TEST_PASSWORD not in body
-    assert "no-such-user" not in body
+    assert "99999999" not in body
     assert "password_hash" not in body
     assert "$2b$" not in body
 
 
-def test_throttle_state_for_the_same_login_is_isolated_between_brokers(
-    auth_db: SeededAuthDb, small_login_limit
-):
-    # Exhaust Broker A's login bucket from one address...
+def test_throttle_of_one_customer_does_not_block_another_customer(auth_db: SeededAuthDb, small_login_limit):
+    # Exhaust customer one's login bucket from one address...
     with make_client(auth_db.factory, client_address=IP_ONE) as exhausting_client:
         statuses = statuses_for(exhausting_client, small_login_limit, password="wrong password")
         assert statuses == [401] * small_login_limit
 
-    # ...then observe the same login number from a clean address. Broker A is
+    # ...then observe the other customer from a clean address. Customer one is
     # blocked by its own login bucket (the address itself has no failures),
-    # while Broker B's identical 80009 is untouched.
+    # while the other account of the same broker is untouched.
     with make_client(auth_db.factory, client_address=IP_TWO) as fresh_client:
-        broker_a = fresh_client.post("/auth/login", json=login_payload())
-        broker_b = fresh_client.post(
-            "/auth/login", json=login_payload(broker=BROKER_B_CODE, password=OTHER_PASSWORD)
+        same_customer = fresh_client.post("/auth/login", json=login_payload())
+        other_customer = fresh_client.post(
+            "/auth/login", json=login_payload(login=CUSTOMER_TWO_LOGIN, password=OTHER_PASSWORD)
         )
 
-    assert broker_a.status_code == 429
-    assert broker_b.status_code == 200
+    assert same_customer.status_code == 429
+    assert other_customer.status_code == 200
 
 
-def test_throttle_of_one_broker_does_not_leak_across_addresses(auth_db: SeededAuthDb, small_login_limit):
-    # Same tenant, different addresses: the login key is deliberately shared
-    # across addresses, so a distributed spray on one tenant is still caught —
-    # and it stays confined to that tenant.
+def test_throttle_of_one_customer_does_not_leak_across_addresses(auth_db: SeededAuthDb, small_login_limit):
+    # Same account, different addresses: the login key is deliberately shared
+    # across addresses, so a distributed spray on one account is still caught —
+    # and it stays confined to that account.
     with make_client(auth_db.factory, client_address=IP_ONE) as first_client:
         statuses = statuses_for(first_client, small_login_limit, password="wrong password")
         assert statuses == [401] * small_login_limit
 
     with make_client(auth_db.factory, client_address=IP_TWO) as second_client:
-        same_tenant = second_client.post("/auth/login", json=login_payload())
-        other_tenant = second_client.post(
-            "/auth/login", json=login_payload(broker=BROKER_B_CODE, password=OTHER_PASSWORD)
+        same_customer = second_client.post("/auth/login", json=login_payload())
+        other_customer = second_client.post(
+            "/auth/login", json=login_payload(login=CUSTOMER_TWO_LOGIN, password=OTHER_PASSWORD)
         )
 
-    assert same_tenant.status_code == 429
-    assert other_tenant.status_code == 200
+    assert same_customer.status_code == 429
+    assert other_customer.status_code == 200

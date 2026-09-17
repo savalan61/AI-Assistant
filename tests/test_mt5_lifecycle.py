@@ -8,6 +8,7 @@ them require MT5, PostgreSQL, network, credentials, or .env.
 import asyncio
 import threading
 from datetime import datetime
+from types import SimpleNamespace
 from typing import AsyncIterator
 
 import pytest
@@ -64,6 +65,17 @@ class FakeMT5:
     def last_error(self) -> tuple[int, str]:
         return (-6, "simulated authorization failure")
 
+    def account_info(self) -> object:
+        """The terminal reports the account it is authenticated as.
+
+        The session boundary verifies this against the requesting tenant before
+        serving a read, so the fake reports the account it last authenticated.
+        """
+        last_auth = self.authenticate_calls[-1] if self.authenticate_calls else None
+        if last_auth is None:  # pragma: no cover - every read authenticates first
+            return None
+        return SimpleNamespace(login=last_auth["login"], server=last_auth["server"])
+
     def shutdown(self) -> None:
         self.shutdown_calls += 1
 
@@ -110,8 +122,20 @@ def recording_session(monkeypatch):
     fake_mt5 = FakeMT5()
 
     class RecordingSessionManager(MT5SessionManager):
-        def __init__(self, mt5_api: object = None) -> None:
-            super().__init__(mt5_api=fake_mt5 if mt5_api is None else mt5_api)
+        # The composition root passes the deployment's terminal path and IPC
+        # timeout, so the wrapper forwards whatever it is given.
+        def __init__(
+            self,
+            mt5_api: object = None,
+            *,
+            terminal_path: str | None = None,
+            timeout_ms: int | None = None,
+        ) -> None:
+            super().__init__(
+                mt5_api=fake_mt5 if mt5_api is None else mt5_api,
+                terminal_path=terminal_path,
+                timeout_ms=timeout_ms,
+            )
             record.session_managers.append(self)
 
         def shutdown(self) -> None:

@@ -1,8 +1,9 @@
 """Broker LLM configuration API (super_admin only).
 
-Each broker manages its own LLM credentials. The tenant is always the
-authenticated super_admin's broker: there is no broker_id path segment, query
-parameter or body field, so a client can never select another tenant.
+This deployment serves ONE broker, whose own LLM credentials are managed
+here. The configuration always belongs to that single brokers row: there is no
+broker_id path segment, query parameter or body field, so a client can never
+select a different one — and never reach another broker's credential.
 
 The API key is write-only. It may be sent in a PUT body, is stored as
 authenticated ciphertext, and is structurally absent from every response
@@ -18,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.blocking import run_mt5_call
+from app.core.blocking import run_llm_call
 from app.core.dependencies import get_current_super_admin, get_llm_connection_tester
 from app.core.encryption import EncryptionError, decrypt_secret, encrypt_secret
 from app.core.url_security import UrlSecurityError, validate_llm_base_url
@@ -37,7 +38,7 @@ _BASE_URL_PATTERN = re.compile(r"^https?://\S+$")
 # Only the fields a broker may set. Deliberately excluded: id, broker_id,
 # timestamps, and anything derived. extra="forbid" turns a supplied broker_id
 # (or any unknown field) into a 422 rather than silently ignoring it, so a
-# tenant-forging attempt fails loudly.
+# broker-forging attempt fails loudly.
 class BrokerLLMConfigRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -106,7 +107,7 @@ async def _load_config(session: AsyncSession, broker_id: int) -> BrokerLLMConfig
 
 
 def _not_configured() -> HTTPException:
-    # Generic: says nothing about other tenants or internal state.
+    # Generic: says nothing about internal state.
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="LLM configuration is not set for this broker")
 
 
@@ -136,8 +137,8 @@ async def get_llm_config(
     """Return the authenticated broker's LLM configuration metadata.
 
     super_admin-only (get_current_super_admin); admins and customers are
-    rejected with 403. The tenant is the authenticated user's broker — no
-    request input selects it.
+    rejected with 403. The configuration is this deployment's own (the caller's
+    own broker row), so no request input selects it.
     """
     config = await _load_config(session, current_super_admin.broker_id)
     if config is None:
@@ -155,8 +156,8 @@ async def upsert_llm_config(
 
     The API key is encrypted before it reaches the database; on any encryption
     failure the request fails closed (503) and nothing is written. broker_id is
-    always the authenticated super_admin's broker, never request input, so a
-    caller cannot configure another tenant.
+    always this deployment's broker, never request input, so a caller cannot
+    configure a different broker.
     """
     # Security policy first: the broker chooses this endpoint and the server
     # will POST to it with the broker's key, so it is validated (scheme, host,
@@ -215,8 +216,10 @@ async def test_llm_connection(
 ) -> LLMConnectionTestResponse:
     """Exercise the stored credentials through the provider boundary.
 
-    The blocking provider call is offloaded through the consolidated blocking
-    boundary, so the event loop is never blocked. A provider failure is reported
+    The blocking provider call is offloaded through the outbound-LLM boundary
+    (run_llm_call, the same boundary /agent uses), so the event loop is never
+    blocked and no MT5 worker thread is held for the model round trip. A
+    provider failure is reported
     as a safe FAILED result (200) that carries no key, no endpoint detail and no
     provider message; configuration problems (missing or disabled config,
     undecryptable credentials) are explicit errors.
@@ -241,7 +244,7 @@ async def test_llm_connection(
         raise _credentials_unavailable()
 
     try:
-        await run_mt5_call(tester.check, api_key, config.base_url, config.model)
+        await run_llm_call(tester.check, api_key, config.base_url, config.model)
     except RuntimeError:
         # Deliberately fixed text: the provider's own message, the URL, the
         # request payload and the key never reach the client.

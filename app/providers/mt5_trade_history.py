@@ -41,12 +41,12 @@ def _map_close_reason(raw_reason: object) -> TradeCloseReason:
 
 
 class MT5TradeHistoryProvider(TradeHistoryProvider):
-    """Read-only MT5 executed-trade-history provider, scoped to one tenant.
+    """Read-only MT5 executed-trade-history provider, scoped to one customer.
 
     Tenant scope: the provider is a cheap per-request object carrying the
-    authenticated tenant's credentials; every raw MT5 call (the deals read and
+    authenticated customer's credentials; every raw MT5 call (the deals read and
     the related-order lookup) is made inside ``MT5SessionManager.acquire`` so the
-    terminal is authenticated as *that* tenant, under the process-wide session
+    terminal is authenticated as *that* customer, under the process-wide session
     lock, for the whole read. Read-only by design: history is only queried, never
     modified, and no trading operation exists here.
     """
@@ -56,7 +56,7 @@ class MT5TradeHistoryProvider(TradeHistoryProvider):
         self._credentials = credentials
 
     def get_trade_history(self, from_time: datetime, to_time: datetime) -> tuple[TradeHistoryEntry, ...]:
-        # Authenticate (or reuse) the requesting tenant's session and read inside
+        # Authenticate (or reuse) the requesting customer's session and read inside
         # that authenticated span. MT5's own history is account-scoped, so this
         # is exactly the boundary that must not fall back to a global session.
         with self._session.acquire(self._credentials) as mt5_api:

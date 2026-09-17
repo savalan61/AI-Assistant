@@ -1,4 +1,4 @@
-"""Broker LLM configuration: connection testing through the provider boundary.
+"""The deployment broker's LLM configuration: connection testing.
 
 A broker's stored credentials are exercised with one tiny probe prompt so the
 super_admin can confirm the configuration works before the assistant relies on
@@ -7,7 +7,7 @@ its only capability is asking a configured LLM provider for one short reply.
 
 It also does no persistence and no decryption itself — the API layer passes the
 already-decrypted credentials in memory, so this boundary never sees the
-database, the tenant, or the ciphertext.
+database, the broker, or the ciphertext.
 """
 from enum import StrEnum
 

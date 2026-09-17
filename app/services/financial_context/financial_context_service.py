@@ -17,7 +17,7 @@ Design notes:
   analysis plus the two reads; composing the analysis directly is the same
   computation without re-reading the terminal.
 * ``broker_id`` is supplied by the caller from the authenticated database user;
-  nothing here derives tenant identity from a request.
+  nothing here derives customer identity from a request.
 * Strictly read-only: no order, position or account mutation exists on any of
   the services used, and no trading action is produced.
 """
@@ -80,7 +80,7 @@ class FinancialContextService:
         trade_history_days: int = DEFAULT_TRADE_HISTORY_DAYS,
         now: datetime | None = None,
     ) -> FinancialContext:
-        """Build the financial context for one tenant.
+        """Build the financial context for one customer.
 
         ``broker_id`` must come from the authenticated database user, never from
         request input. ``trade_history_days`` is the trade-history look-back in

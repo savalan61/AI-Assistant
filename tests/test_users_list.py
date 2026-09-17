@@ -1,5 +1,6 @@
 """Tests for the user-listing endpoint GET /users (Step 21, evolved to the
-three-role super_admin/admin/customer model).
+three-role super_admin/admin/customer model and then to the ONE-BROKER
+architecture).
 
 Require none of: real PostgreSQL, real MT5, network, or real credentials.
 The get_db dependency is overridden with a per-test file-based async SQLite
@@ -7,6 +8,16 @@ database containing the real User/Broker models; the REAL authentication and
 manager-authorization dependencies run (real JWT decode + database role
 check). JWT config uses test-only values. No pytest asyncio plugin: async
 setup is driven with asyncio.run.
+
+This deployment serves ONE broker, so there is no second tenant to compare
+against. What replaces the old cross-broker tests is the equivalent boundary
+that still exists:
+
+  * a customer is never listed to anybody, and cannot list at all;
+  * an admin sees only customers, never another admin and never the
+    deployment's super_admin;
+  * a database that is not a one-broker database fails closed instead of
+    silently serving the wrong broker's users.
 """
 import asyncio
 from typing import AsyncIterator
@@ -37,31 +48,28 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture()
-def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int, int, int, int, int, int]":
-    """Seed three tenants covering the whole role matrix.
+def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int, int, int, int]":
+    """Seed the deployment's ONE broker covering the whole role matrix.
 
-    Broker A: super_a + admins admin_a1/admin_a2 + customers 10002/10003.
-    Broker B: super_b + admin_b + customer 10004 (cross-tenant rows that must
-    never be returned to broker A). Broker C: super_c alone (the empty-listing
-    case, since a manager can never list itself).
+    super + admin_a1 + admin_a2 (both manage every customer of the deployment)
+    + customers 10002/10003. The requesting super_admin is never part of its own
+    listing, and an admin's complete view is its customers only.
 
-    Yields (session factory, super_a_id, admin_a1_id, admin_a2_id, cust_a1_id,
-    cust_a2_id, super_b_id, admin_b_id, cust_b_id, super_c_id) — 10 items.
+    Yields (session factory, super_id, admin_a1_id, admin_a2_id, cust_a1_id,
+    cust_a2_id) — 6 items.
     """
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/users_list_test.db")
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async def seed() -> "tuple[int, int, int, int, int, int, int, int, int]":
+    async def seed() -> "tuple[int, int, int, int, int]":
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="TL-A")
-            broker_b = Broker(name="Broker B", code="TL-B")
-            broker_c = Broker(name="Broker C", code="TL-C")
-            session.add_all([broker_a, broker_b, broker_c])
+            broker = Broker(name="The Broker", code="TL-ONE", mt5_server="TheBroker-Live")
+            session.add(broker)
             await session.flush()
 
-            def make(broker: Broker, login: str, role: UserRole) -> User:
+            def make(login: str, role: UserRole) -> User:
                 return User(
                     broker_id=broker.id,
                     login=login,
@@ -70,28 +78,14 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], int, int, int
                     role=role,
                 )
 
-            super_a = make(broker_a, "super-a", UserRole.SUPER_ADMIN)
-            admin_a1 = make(broker_a, "admin-a1", UserRole.ADMIN)
-            admin_a2 = make(broker_a, "admin-a2", UserRole.ADMIN)
-            cust_a1 = make(broker_a, "10002", UserRole.CUSTOMER)
-            cust_a2 = make(broker_a, "10003", UserRole.CUSTOMER)
-            super_b = make(broker_b, "super-b", UserRole.SUPER_ADMIN)
-            admin_b = make(broker_b, "admin-b", UserRole.ADMIN)
-            cust_b = make(broker_b, "10004", UserRole.CUSTOMER)
-            super_c = make(broker_c, "super-c", UserRole.SUPER_ADMIN)
-            session.add_all([super_a, admin_a1, admin_a2, cust_a1, cust_a2, super_b, admin_b, cust_b, super_c])
+            super_admin = make("90001", UserRole.SUPER_ADMIN)
+            admin_a1 = make("admin-1", UserRole.ADMIN)
+            admin_a2 = make("admin-2", UserRole.ADMIN)
+            cust_a1 = make("10002", UserRole.CUSTOMER)
+            cust_a2 = make("10003", UserRole.CUSTOMER)
+            session.add_all([super_admin, admin_a1, admin_a2, cust_a1, cust_a2])
             await session.commit()
-            return (
-                super_a.id,
-                admin_a1.id,
-                admin_a2.id,
-                cust_a1.id,
-                cust_a2.id,
-                super_b.id,
-                admin_b.id,
-                cust_b.id,
-                super_c.id,
-            )
+            return (super_admin.id, admin_a1.id, admin_a2.id, cust_a1.id, cust_a2.id)
 
     ids = asyncio.run(seed())
     yield (factory, *ids)
@@ -176,16 +170,16 @@ def test_admin_list_returns_200(users_db) -> None:
 
 
 def test_super_admin_sees_admins_and_customers(users_db) -> None:
-    factory, super_a_id, admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id, *_ = users_db
+    factory, super_a_id, admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id = users_db
 
     body = list_as(factory, super_a_id)
 
-    # Every managed user of broker A in stable id order — and never the
+    # Every managed user of the deployment in stable id order — and never the
     # requesting super_admin itself.
     assert ids_of(body) == sorted([admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id])
     roles = {entry["role"] for entry in body}
     assert roles == {"admin", "customer"}
-    assert all(entry["broker_id"] == 1 for entry in body)
+    assert {entry["broker_id"] for entry in body} == {1}
 
 
 def test_super_admin_does_not_see_itself(users_db) -> None:
@@ -194,21 +188,21 @@ def test_super_admin_does_not_see_itself(users_db) -> None:
     body = list_as(factory, super_a_id)
 
     assert super_a_id not in ids_of(body)
-    assert "super-a" not in [entry["login"] for entry in body]
+    assert "90001" not in [entry["login"] for entry in body]
 
 
 # --- admin visibility: customers only ---------------------------------------------
 
 
 def test_admin_sees_customers(users_db) -> None:
-    factory, _, admin_a1_id, _, cust_a1_id, cust_a2_id, *_ = users_db
+    factory, _, admin_a1_id, _, cust_a1_id, cust_a2_id = users_db
 
     body = list_as(factory, admin_a1_id)
 
-    # The admin's manageable users: exactly the customers of broker A.
+    # The admin's manageable users: exactly the customers of the deployment.
     assert ids_of(body) == sorted([cust_a1_id, cust_a2_id])
     assert {entry["role"] for entry in body} == {"customer"}
-    assert all(entry["broker_id"] == 1 for entry in body)
+    assert {entry["broker_id"] for entry in body} == {1}
 
 
 def test_admin_cannot_list_admins_or_super_admins(users_db) -> None:
@@ -216,37 +210,53 @@ def test_admin_cannot_list_admins_or_super_admins(users_db) -> None:
 
     body = list_as(factory, admin_a1_id)
 
-    # Neither the other admin nor the broker's super_admin is ever returned.
+    # Neither the other admin nor the deployment's super_admin is ever returned.
     assert admin_a2_id not in ids_of(body)
     assert super_a_id not in ids_of(body)
-    assert "admin-a2" not in [entry["login"] for entry in body]
-    assert "super-a" not in [entry["login"] for entry in body]
+    assert "admin-2" not in [entry["login"] for entry in body]
+    assert "90001" not in [entry["login"] for entry in body]
 
 
-# --- cross-tenant isolation --------------------------------------------------------
+def test_every_admin_of_the_deployment_sees_the_same_customers(users_db) -> None:
+    """In a one-broker deployment the customer set IS the broker's customer set.
+
+    There is no per-admin partition: both admins manage every customer of the
+    broker, and neither of them is ever part of that set.
+    """
+    factory, super_a_id, admin_a1_id, admin_a2_id, *_ = users_db
+
+    first = list_as(factory, admin_a1_id)
+    second = list_as(factory, admin_a2_id)
+    from_super = list_as(factory, super_a_id)
+
+    assert first == second
+    assert [entry for entry in from_super if entry["role"] == "customer"] == first
+    assert admin_a1_id not in ids_of(first) and admin_a2_id not in ids_of(first)
 
 
-def test_cross_broker_users_are_never_returned(users_db) -> None:
-    factory, super_a_id, admin_a1_id, _, _, cust_a1_id, _, _, cust_b_id, _ = users_db
-
-    for manager_id in (super_a_id, admin_a1_id):
-        body = list_as(factory, manager_id)
-        # Broker B's rows (including its customer 10004) must never appear.
-        assert cust_b_id not in ids_of(body)
-        assert "10004" not in [entry["login"] for entry in body]
+# --- a leftover second broker row is not a second tenant ---------------------------
 
 
-def test_other_broker_super_admin_sees_only_their_own_tenant(users_db) -> None:
-    factory, super_a_id, admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id, super_b_id, *_ = users_db
+def test_a_leftover_second_broker_row_fails_closed(users_db) -> None:
+    """One broker means exactly one: an ambiguous database refuses to serve.
 
-    body = list_as(factory, super_b_id)
+    A stray brokers row (from the multi-broker era, or a bad migration) would
+    make "which broker is this deployment?" unanswerable, so the request is
+    refused rather than served against an arbitrary pick.
+    """
+    factory, super_a_id, admin_a1_id, cust_a1_id, *_ = users_db
 
-    # Broker B's super_admin sees only broker B's managed users (its admin and
-    # its customer), never any broker A row.
-    assert all(entry["broker_id"] == 2 for entry in body)
-    assert super_a_id not in ids_of(body)
-    for broker_a_user in (admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id):
-        assert broker_a_user not in ids_of(body)
+    async def add_stray_broker() -> None:
+        async with factory() as session:
+            session.add(Broker(name="Stray Broker", code="TL-STRAY", mt5_server="Stray-Live"))
+            await session.commit()
+
+    asyncio.run(add_stray_broker())
+
+    with make_client(factory) as client:
+        for user_id in (super_a_id, admin_a1_id, cust_a1_id):
+            response = client.get("/users", headers=auth_header(token_for(user_id)))
+            assert response.status_code == 401
 
 
 # --- response contract --------------------------------------------------------------
@@ -256,7 +266,7 @@ def test_response_contains_exactly_allowed_fields(users_db) -> None:
     factory, super_a_id, *_ = users_db
 
     body = list_as(factory, super_a_id)
-    assert body, "seeded tenant must contain users"
+    assert body, "seeded deployment must contain users"
 
     for entry in body:
         assert set(entry.keys()) == ALLOWED_FIELDS
@@ -285,36 +295,22 @@ def test_mt5_password_encrypted_not_exposed(users_db) -> None:
 # --- no client-selectable tenant -----------------------------------------------------
 
 
-def test_broker_id_query_cannot_select_another_tenant(users_db) -> None:
-    factory, super_a_id, admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id, *_ = users_db
+def test_broker_id_query_cannot_change_the_scope(users_db) -> None:
+    factory, super_a_id, admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id = users_db
 
     # There is no broker_id parameter; supplying one must be ignored, so the
-    # listing stays scoped to the authenticated manager's own broker.
+    # listing stays exactly what the authenticated manager may see.
     body = list_as(factory, super_a_id, query="?broker_id=2")
 
     assert ids_of(body) == sorted([admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id])
-    assert all(entry["broker_id"] == 1 for entry in body)
-
-
-# --- empty listing --------------------------------------------------------------------
-
-
-def test_empty_tenant_returns_200_with_empty_list(users_db) -> None:
-    factory, *_, super_c_id = users_db
-
-    # Broker C contains only its super_admin, and a manager is excluded from
-    # the listing: an empty result is a normal 200 with [], never a 404/403.
-    # Supplying broker_id=1 (another tenant) must not change that.
-    body = list_as(factory, super_c_id, query="?broker_id=1")
-
-    assert body == []
+    assert {entry["broker_id"] for entry in body} == {1}
 
 
 # --- ordering ---------------------------------------------------------------------------
 
 
 def test_deterministic_ordering_by_id_ascending(users_db) -> None:
-    factory, super_a_id, admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id, *_ = users_db
+    factory, super_a_id, admin_a1_id, admin_a2_id, cust_a1_id, cust_a2_id = users_db
 
     body = list_as(factory, super_a_id)
     ids = ids_of(body)

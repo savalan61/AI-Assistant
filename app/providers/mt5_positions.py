@@ -5,12 +5,12 @@ from app.providers.position import Position, PositionProvider, PositionType
 
 
 class MT5PositionProvider(PositionProvider):
-    """Read-only MT5 open-positions provider, scoped to one tenant's session.
+    """Read-only MT5 open-positions provider, scoped to one customer's session.
 
     Tenant scope: the provider is a cheap per-request object carrying the
-    authenticated tenant's credentials; the raw MT5 call is made inside
+    authenticated customer's credentials; the raw MT5 call is made inside
     ``MT5SessionManager.acquire`` so the terminal is authenticated as *that*
-    tenant, under the process-wide session lock, for the whole read. Expected
+    customer, under the process-wide session lock, for the whole read. Expected
     third-party failures are translated into RuntimeError. Read-only by design:
     no trading operation exists here.
     """
@@ -20,9 +20,9 @@ class MT5PositionProvider(PositionProvider):
         self._credentials = credentials
 
     def get_positions(self) -> tuple[Position, ...]:
-        # Authenticate (or reuse) the requesting tenant's session and read inside
+        # Authenticate (or reuse) the requesting customer's session and read inside
         # that authenticated span: the lock is held until the read completes, so
-        # another tenant can never re-authenticate the terminal mid-read.
+        # another customer can never re-authenticate the terminal mid-read.
         with self._session.acquire(self._credentials) as mt5_api:
             # Boundary rule: the C extension raises plain built-in Exception for
             # terminal/IPC failures instead of returning False. This try block

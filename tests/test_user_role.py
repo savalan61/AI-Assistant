@@ -204,11 +204,31 @@ def test_admins_and_customers_do_not_consume_the_super_admin_slot(role_db) -> No
     assert admin_id > 0 and admin2_id > 0 and customer_id > 0
 
 
-def test_separate_brokers_each_have_one_super_admin(role_db) -> None:
+def test_the_single_super_admin_slot_is_deployment_wide(role_db) -> None:
     factory = role_db
-    broker_a_id, super_a = asyncio.run(_create_broker_with_user(factory, "TB-SUP-1", "super-1", UserRole.SUPER_ADMIN))
-    broker_b_id, super_b = asyncio.run(_create_broker_with_user(factory, "TB-SUP-2", "super-2", UserRole.SUPER_ADMIN))
+    broker_id, super_a = asyncio.run(_create_broker_with_user(factory, "TB-SUP-1", "super-1", UserRole.SUPER_ADMIN))
 
-    # One super_admin per broker is allowed; the two brokers are distinct
-    # tenants and never interfere with each other's constraint slot.
-    assert super_a > 0 and super_b > 0 and broker_a_id != broker_b_id
+    # This deployment serves ONE broker, so "one super_admin" is a property of
+    # the whole deployment, not of a tenant: a row hung off any other broker id
+    # cannot smuggle in a second super_admin. (A leftover brokers row from the
+    # multi-broker era is therefore inert, never a second control plane.)
+    async def raw_second_super_admin_row() -> int:
+        async with factory() as session:
+            other = Broker(name="Broker B", code="TB-SUP-2")
+            session.add(other)
+            await session.flush()
+            result = await session.execute(
+                text(
+                    "INSERT INTO users (broker_id, login, password_hash, is_active, role) "
+                    "VALUES (:b, :u, :p, 1, 'super_admin')"
+                ),
+                {"b": other.id, "u": "super-2", "p": "x"},
+            )
+            await session.commit()
+            return int(result.lastrowid or 0)
+
+    with pytest.raises(IntegrityError):
+        asyncio.run(raw_second_super_admin_row())
+
+    # The first super_admin is untouched and still the deployment's only one.
+    assert super_a > 0 and broker_id > 0

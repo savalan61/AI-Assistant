@@ -2,7 +2,69 @@
 
 ## Current Status
 
+**DEVELOPMENT PAUSED (2026-09-17).** The project is parked at the state this
+document records. Nothing below is mid-flight: the full suite is green and
+every change described here is committed. Resume from the
+"Product decision — ONE BROKER ONLY" section and the Next Step section.
+
+### Product decision — ONE BROKER ONLY (the latest major decision)
+
+The Agent is for **ONE BROKER ONLY**. Multi-broker support is no longer a
+product requirement: this deployment serves exactly one broker, and the
+"multi-tenant SaaS with many brokers" framing is retired. The architecture was
+made internally consistent with that decision in this checkpoint's refactor
+(the one-broker architecture step, below):
+
+- the broker is the single `brokers` row; `load_deployment_broker`
+  (app/core/dependencies.py) resolves exactly that row and refuses to serve a
+  database with none or several;
+- there is no tenant selector anywhere: login takes only `login` + `password`,
+  no endpoint accepts a broker_id/code/server, and `users.login` is unique
+  deployment-wide (it IS the MT5 account number);
+- customer-to-customer isolation replaced cross-broker isolation as the
+  boundary that must hold; it is pinned by tests/test_customer_mt5_isolation.py
+  against the real session manager and a recording terminal;
+- the per-user `mt5_server` column is gone — the MT5 server is the broker's own
+  configuration, so no request or row can point a customer's reads at another
+  server.
+
+The current MT5-based integration remains the current implementation and is not
+touched by this decision.
+
+**Future architectural possibility (NOT an implementation task):** a future
+architecture may replace MT5 with official Broker APIs, if the broker provides
+(a) an Account/Customer data API and (b) a Market Data/Price API. The existing
+provider contracts (AccountInfo/Position/TradeHistoryEntry/Candle/Instrument)
+are the seam such a replacement would plug into. This is recorded as a
+possibility only — nothing may be started without an explicit instruction.
+
+### Work completed in this checkpoint's final stretch (all VERIFIED, committed)
+
+- One-broker architecture refactor: deployment-wide uniqueness, one
+  super_admin, no per-user MT5 server, no tenant selector at login, broker LLM
+  configuration resolved from the single row (migration
+  d8e14b7a9c30_one_broker_architecture), suites re-pointed at the
+  customer-to-customer boundary, and the new focused isolation suite.
+- Phase 2 tenant-isolation investigation (external adversarial harness, outside
+  the repo): 181 checks across 6 tenants, 0 runtime crossings — every read
+  attributable to the caller's own (server, login); the one finding (the tenant
+  boundary was not the data boundary — a broker admin could re-point a
+  customer's `login`) is structurally resolved by this refactor: `login` is now
+  deployment-wide and provisioning cannot aim a credential at any account other
+  than the target's own login.
+- MT5 hardening (earlier in this checkpoint, unchanged): enforced single-process
+  terminal ownership, session identity verification before every read, explicit
+  IPC timeout, LLM round trips moved off the MT5 worker (run_llm_call),
+  same-request duplicate reads removed, one catalog discovery per
+  multi-instrument resolution, and client-level misses no longer invalidate the
+  verified session (known issues 32 and 33, live-terminal verified).
+
+Full suite at pause: **1788 passed** (2 pre-existing third-party deprecation
+warnings). Static checks clean (compileall, Pyright on app/),
+`git diff --check` clean, trading-safety scan clean, secret scan clean.
+
 + Step 56 evaluation fixes — relevance boundary + OpenRouter HTTP-200 envelopes (this checkpoint)
++ One-broker architecture refactor (this checkpoint)
 + Step 56 — Real LLM Fundamental Chat (OpenRouter, development-only)
 Fix — Instrument Profile Alias Coverage Audit (this checkpoint)
 + Fix — Economic Calendar Position Relevance via Instrument Profiles
@@ -32,8 +94,9 @@ Fix — Instrument Profile Alias Coverage Audit (this checkpoint)
 
 Status:
 
-Step 56 evaluation fixes: VERIFIED + COMMITTED — two focused commits, local,
-not pushed:
+Step 56 evaluation fixes: VERIFIED + COMMITTED (superseded in status terms by
+the PAUSED header above — everything since, including the one-broker refactor,
+was verified and then committed together at pause):
 - Relevance boundary: 320317465bae1d7c32806669c5b2613bf771592b
   ("fix(agent): enforce deterministic relevance boundary") — the LLM-facing
   calendar/fundamental/research prompt blocks now withhold items the
@@ -1548,6 +1611,654 @@ Status: VERIFIED + COMMITTED
   reading the process environment; the keyword form is absent from source).
 
 
+### Fix — MT5 Session Identity Verification + Explicit Terminal/Timeout
+
+Status: VERIFIED, UNCOMMITTED (working tree), not pushed
+
+The MT5 architecture investigation (recorded in this checkpoint's Known Issues)
+found that the tenant-isolation boundary trusted its own cached identity. This
+fix hardens it.
+
+What changed:
+
+- `app/core/mt5_session.py`: the authenticated identity is now VERIFIED against
+  the terminal before a read is served. `account_info()` is the terminal's own
+  answer about the account it is on, and it is the only way to see a session that
+  changed outside this process (a broker-side re-login, a manual login at the
+  terminal, another OS process sharing the terminal). A mismatch re-authenticates
+  under the process-wide lock; a session that still cannot be confirmed fails
+  closed with a generic `MT5SessionError` (→ the existing 503) and is forgotten,
+  so the next request authenticates from a clean `initialize()`. Unreadable,
+  absent or malformed account data counts as "not confirmed", never as a match.
+  The login number must match exactly; the server is compared
+  case-insensitively, and a terminal that reports no server name falls back to
+  the login match.
+- `app/core/mt5_session.py`: `initialize()`/`login()` carry an explicit terminal
+  executable and IPC timeout when configured. `path` pins WHICH terminal is
+  driven; `timeout` (MT5's own milliseconds) bounds how long ONE authentication
+  may hold the process lock, so a hanging login can no longer stall every tenant
+  for MT5's 60 s default. Both are omitted when unconfigured, so the package's
+  defaults remain the development behaviour.
+  Keyword support was verified against the PINNED build (5.0.6180, whose
+  abbreviated `__doc__` omits them): the extension's own argument-parser strings
+  list path/login/password/server/timeout/portable with `Invalid "X" argument`
+  messages, and a probe with a deliberately nonexistent path returned
+  `-10003 IPC initialize failed, Process create failed '<path>'` — the explicit
+  path was honored, with no registry fallback.
+- `app/core/config.py` + `.env.example`: `MT5_TERMINAL_PATH` (blank = package
+  default) and `MT5_TIMEOUT_SECONDS` (default 10 s; 0 = package default).
+- `app/core/dependencies.py`: the composition root converts seconds to
+  milliseconds once and passes both settings in, so the boundary reads no
+  configuration itself.
+- Tests: 20 new offline tests (identity verification, drift detection and
+  recovery, fail-closed cases, malformed/unreadable account data, credential-free
+  error messages, the explicit path/timeout call shapes, and the composition-root
+  wiring). The session fake models the terminal's account (it reports what it
+  last authenticated) and can simulate drift; the four provider/API fakes do the
+  same, so those suites keep proving per-tenant reads.
+
+Behaviour change worth knowing: a tenant whose stored server string does not
+match the server the terminal reports now fails closed (503) instead of being
+served. That is the point of the fix, but it is the one assumption not verified
+against a real terminal in this step (no live MT5 request was made).
+
+Verification:
+
+- focused session/provider/API suites: 169 passed; adjacent API/agent/market/
+  config/benchmark suites: 238 passed — all offline, no MT5 terminal, no network
+- full suite with outbound networking hard-disabled: 1690 passed, 2 pre-existing
+  third-party deprecation warnings (was 1670; +20 new)
+- `compileall` clean; Pyright on every changed source and test file: 0 errors,
+  except one PRE-EXISTING diagnostic in tests/test_mt5_trade_history.py (verified
+  identical against HEAD, so no new diagnostic was introduced)
+- `git diff --check` clean; trading-safety scan clean (the boundary touches only
+  initialize/login/last_error/shutdown/account_info, and app/ still contains no
+  order or position mutation); secret scan clean (no secret-named setting's value
+  appears in any tracked file; .env remains untracked)
+
+### Fix — Enforced Single-Process MT5 Ownership
+
+Status: VERIFIED, UNCOMMITTED (working tree), not pushed
+
+Known issue 4 is now closed by the application rather than by deployment guidance
+("run one worker" was never a guarantee), and it builds on the session identity
+and timeout fix recorded above.
+
+What changed:
+
+- `app/core/mt5_ownership.py` (new): an exclusive OS-level lock on a lock file,
+  held for the process lifetime. The kernel decides ownership, so there is no
+  check-then-act window for two processes to race through; the OS releases the
+  lock when the process exits, including on a crash, so there is never a stale
+  lock to clear by hand; and it needs no port, daemon, network, distributed lock
+  manager or configuration, which is why it fits a modular monolith. One lock per
+  TERMINAL: the lock name derives from `MT5_TERMINAL_PATH`, so two deployments
+  that pin DIFFERENT terminals do not block each other, while two processes that
+  would drive the SAME terminal — including both leaving the path unset, i.e. both
+  letting the package find "the" terminal — cannot both start. The lock lives in
+  the OS temporary directory, which is per user, matching a terminal's own scope.
+  `acquire()` is refcounted, so nested or repeated lifespans in one process
+  neither deadlock nor release early.
+- `app/main.py`: the lifespan acquires ownership FIRST, before anything can serve
+  MT5 data, and releases it LAST, after `shutdown_mt5_session()` — so no other
+  process can start driving the terminal while this one still holds a connection
+  to it. There is still no startup warm-up (no tenant exists at boot).
+- `app/core/dependencies.py`: `get_mt5_ownership_guard()` is a third lock-guarded
+  process-local singleton (beside the session manager), built with
+  `ownership_lock_path(settings.MT5_TERMINAL_PATH)`; `reset_mt5_ownership_guard()`
+  is the test/development seam.
+- `conftest.py` (new session-scoped autouse fixture): the suite boots the real
+  application in a TestClient across 18 test files, so with the default lock
+  location it would present itself as a second owner of the developer's terminal
+  whenever a development server is running — a correct, healthy workstation would
+  then fail the whole suite with MT5OwnershipError. The fixture points
+  `DEFAULT_LOCK_DIRECTORY` at a private temporary directory, so the guard, the
+  refusal and the startup enforcement are still exercised, on a lock no other
+  process shares. Tests never drive a real terminal (MT5 is mocked at the
+  composition-root seams).
+- Tests: `tests/test_mt5_ownership.py` (new, 16 tests): per-terminal lock naming
+  (stable, case-insensitive, distinct per terminal, every unpinned form sharing
+  one lock), the normal single-process case, refcounted acquire/release (including
+  double release), the operator record, refusal of a second owner (message carries
+  the deployment fix and the lock path, and no credential or MT5 detail), owners of
+  different terminals not blocking each other, an unusable lock location failing
+  closed, a structural test that the guard never imports or calls MT5, a REAL child
+  OS process holding the lock while this process is refused and the lock being gone
+  once that child is killed, and the application boundary (the lifespan takes and
+  gives up ownership; the app refuses to start, fail closed, with the MT5 session
+  manager never constructed, when another owner holds the terminal).
+
+Failure behaviour: `MT5OwnershipError` (a RuntimeError) propagates out of the
+lifespan, so the process does not start at all. The message names the lock file
+and the setting to change ("run a single worker ... stop any other running
+instance of this application, or give this deployment its own terminal with
+MT5_TERMINAL_PATH") and contains no credential.
+
+Verification:
+
+- ownership + MT5 session/provider/lifecycle suites: 25 passed (ownership +
+  lifecycle), the wider MT5 set green — all offline, no terminal, no network
+- full suite with outbound networking hard-disabled: 1706 passed, 2 pre-existing
+  third-party deprecation warnings (was 1690; +16 new). That run happened WHILE a
+  real `uvicorn app.main:app --reload` development server held the terminal's
+  ownership lock: the guard's refusal was observed live in the suite before the
+  isolation fixture was added, and the fixture then made the suite independent of
+  host state.
+- multi-worker refusal verified LIVE (not assumed): `uvicorn app.main:app
+  --workers 2` on a pinned, distinct terminal path — one worker acquired the
+  lock, the other raised at startup, and uvicorn stopped the parent process as
+  well, leaving no server and no stray processes behind
+- `compileall` clean; Pyright on every changed source and test file: 0 errors, 0
+  warnings
+- `git diff --check` clean; trading-safety scan clean (app/ still contains no
+  order or position mutation, and the new module touches no MT5 API at all);
+  secret scan clean (no secret-named setting's value in any tracked file; .env
+  remains untracked)
+
+Limits that remain, deliberately NOT part of this step:
+
+- the lock is scoped to one OS user session, so it cannot stop two Windows users
+  on one host from each owning "their" terminal (that is the terminal's own scope,
+  not a defect)
+- it cannot detect a process that bypasses the application entirely (a manual
+  login at the terminal)
+- a multi-worker launch is refused, and this was verified LIVE rather than
+  assumed: `uvicorn app.main:app --workers 2` (with a pinned path, so the
+  developer's running server was untouched) had one worker take the lock and the
+  other fail its lifespan; uvicorn then treated the failed child as fatal —
+  "Application startup failed. Exiting." / "Child process failed to start,
+  stopping the parent process" — and the WHOLE deployment stopped, leaving no
+  server running. The safety property (`exactly one process owns the terminal`)
+  is guaranteed by the lock itself regardless of the runner; the
+  whole-deployment abort additionally depends on the supervisor stopping when a
+  child fails to start, which is uvicorn's documented behavior and was observed
+  here. Either way nothing serves MT5 without ownership.
+- deliberately running SEVERAL processes against SEVERAL terminals likewise needs
+  the roadmap worker architecture; the per-terminal lock name is shaped to allow
+  it without implementing any of it
+
+### Fix — The LLM Round Trip No Longer Occupies an MT5 Worker
+
+Status: VERIFIED, UNCOMMITTED (working tree), not pushed
+
+Known issue 28 is now closed by splitting the agent into two phases on two
+boundaries, rather than by tuning the shared threadpool.
+
+What changed:
+
+- `app/services/agent/agent_service.py`: the boundary is two phases.
+  `prepare()` performs every blocking read (the MT5 financial context, the
+  calendar and the research window) and returns a `PreparedAgentRequest` — a value
+  object holding the resolved contexts plus the echoes the response envelope needs,
+  with no session, credential or thread affinity. `respond()` renders the prompt
+  from those contexts (pure CPU, so the deterministic size rules still run BEFORE
+  the provider is asked) and makes the single outbound model call, touching no
+  MT5. `handle()` is retained as exactly `respond(prepare(...))`, so every
+  existing caller — internal callers, the agent tests and the offline quality
+  benchmark — keeps its contract unchanged.
+- `app/core/blocking.py`: a second, explicitly separate boundary, `run_llm_call`.
+  It runs the blocking model call on the event loop's own default executor, which
+  asyncio bounds to min(32, cpu + 4) threads, and which is a DIFFERENT pool from
+  the worker threadpool `run_mt5_call` borrows from (starlette's
+  `run_in_threadpool` goes through anyio's worker threads and its per-loop
+  capacity limiter). No provider change: providers stay synchronous, and the
+  provider abstraction, the pool/router and the fake providers are untouched.
+- `app/api/agent_router.py`: the endpoint calls the two phases on their own
+  boundaries inside ONE try block, so the existing error mapping is unchanged
+  (PromptTooLargeError → 422, RuntimeError → 503).
+- Tests: `tests/test_agent_blocking_boundary.py` (new, 10 tests) drives the REAL
+  router coroutine — the function FastAPI calls — with the real boundaries and a
+  real AgentService over a gated fake provider, and measures anyio's per-loop
+  worker-thread limiter, which is exactly what `run_mt5_call` borrows from. It
+  shows the MT5 phase genuinely borrows a worker (1) while the model round trip
+  borrows none (0); with the pool squeezed to a SINGLE token an MT5 read still
+  completes while the model call is held open; and the matched control — the
+  pre-change call, the whole flow inside `run_mt5_call` — blocks that same read,
+  proving the probe discriminates instead of passing vacuously. Also pinned: the
+  router returns exactly what the one-phase call returns (same answer, same
+  resolved context values, one model call per request); an MT5 failure and a model
+  failure still map to 503 with the same generic detail, and a failed read still
+  never reaches the provider; an unbounded prompt still maps to 422 without a
+  provider call; the scope and quota guards still run before any read or model
+  call; the two boundary functions use two different pools; and the router imports
+  no second boundary, no bare executor and no order/mutation surface.
+- `tests/test_agent_service.py`: the capability-containment test keeps its EXACT
+  allowlist (`{handle, prepare, respond}`) — the public surface grew by the two
+  read-only phases, and the test still fails on any unreviewed new name.
+
+Verification:
+
+- new boundary suite: 10 passed; focused agent + MT5 suites: 301 passed
+- full suite with outbound networking hard-disabled: 1716 passed, 2 pre-existing
+  third-party deprecation warnings (was 1706; +10 new)
+- `compileall` clean; Pyright on every changed source and test file: 0 errors, 0
+  warnings
+- `git diff --check` clean; trading-safety scan clean (no order or position
+  mutation exists in app/, and the changed files expose no MT5 or order surface);
+  secret scan clean
+
+Not changed, deliberately: the duplicate position read per agent request
+(item 14) and the extra symbol-resolution read (item 24) — collapsing repeated
+MT5 reads is separate work — and the Broker LLM configuration connection
+tester, recorded as item 30, which the follow-up fix below resolves.
+
+### Fix — The Connection Tester's Model Probe No Longer Occupies an MT5 Worker
+
+Status: VERIFIED, UNCOMMITTED (working tree), not pushed
+
+Known issue 30 — the same class of defect item 28 described — is closed by
+routing the Broker LLM configuration connection test's provider probe through
+the EXISTING run_llm_call boundary. The /agent boundary split left this one
+administrative endpoint still crossing the MT5 blocking boundary with the model
+round trip inside it, so a super_admin clicking "test this configuration" held
+a worker thread for the provider's latency.
+
+What changed (one boundary swap; nothing else):
+
+- `app/api/broker_llm_config_router.py`: `test_llm_connection` now calls
+  `await run_llm_call(tester.check, ...)` instead of
+  `await run_mt5_call(tester.check, ...)`. The tester, the provider seam, the
+  guard order (404 unset → 409 disabled → SSRF re-validation → 503
+  undecryptable credential → probe) and every error mapping are untouched, and
+  the endpoint remains strictly read-only with no trading surface.
+
+Regression coverage (`tests/test_broker_llm_config_api.py`, same offline
+doubles, no network, no MT5):
+
+- `test_connection_test_holds_no_mt5_worker_while_the_model_is_thinking`: the
+  real router coroutine runs with the probe's provider answer held open, and
+  anyio's worker limiter (exactly what run_mt5_call borrows) shows zero borrowed
+  tokens while the model round trip is in flight.
+- `test_an_mt5_read_can_complete_while_a_connection_test_is_in_flight`: with the
+  pool squeezed to ONE worker, a run_mt5_call call completes while the probe
+  waits on the model — the operational consequence.
+- `test_the_old_mt5_boundary_call_would_have_held_the_worker`: the control — the
+  pre-change run_mt5_call shape, on the same held provider, parks the single
+  worker (a probe through it cannot complete), proving the measurement
+  discriminates the two shapes.
+- `test_the_connection_tester_crosses_only_the_llm_boundary`: the blocking probe
+  runs off the event loop, the router imports only run_llm_call (no second
+  boundary, no bare executor) and exposes no order/mutation surface.
+
+Verification:
+
+- focused suite: 50 passed (46 existing broker-LLM-config tests + 4 new)
+- full suite: 1706 passed, 2 pre-existing third-party deprecation warnings;
+  re-run with outbound networking hard-disabled (a pytest plugin rejecting any
+  non-loopback socket connect): 1706 passed, same 2 warnings
+- `compileall` clean; Pyright on both changed files: 0 NEW diagnostics (the 2
+  reported are the pre-existing fixture generator annotations, verified
+  identical on HEAD)
+- `git diff --check` clean; trading-safety scan clean (no order or position
+  mutation in app/); secret-log scan clean on the changed app files
+
+### Fix — One Request, One Read (same-request MT5 read reuse)
+
+Status: VERIFIED, UNCOMMITTED (working tree), not pushed
+
+The MT5 Python API serializes every read on the single process-wide session, and
+the session boundary verifies the identity on every acquire, so a redundant read
+costs TWO MT5 calls (its own read plus its identity verification) and queues
+behind every other tenant's work. This step audits every read an HTTP request
+performs and removes the same-request duplicates that were safe to remove.
+
+Audit (every endpoint's reads, counted at the terminal):
+
+- account-info / positions / trade-history / portfolio-intelligence /
+  instruments / economic-intelligence / fundamental-intelligence: one acquire
+  per distinct read, no duplicates.
+- POST /agent: FOUR service reads before this step — account, positions,
+  trade-history, and ONE MORE positions read by the economic layer for
+  per-position calendar relevance (known issue 14) — plus, when the request
+  names a focus instrument, TWO focus-symbol resolutions (the agent resolved,
+  then build_research resolved the same catalog again).
+- GET /financial-research/today: the same double resolution (the router
+  resolved so an unknown symbol fails closed before any news is fetched, then
+  build_research resolved again to re-verify).
+- GET /market-data/{symbol}: the resolution read before the candle read — a
+  DIFFERENT read, not a duplicate (see below).
+- The session's per-acquire `account_info()` identity verification (known issue
+  29) is a freshness/safety check, not a duplicate read, and is untouched.
+
+What changed (no provider abstraction, no caching subsystem):
+
+- `app/services/economic_intelligence/economic_intelligence_service.py`:
+  `build_today_context(..., positions=None)` accepts an already-collected
+  snapshot for THIS request; `None` (every standalone caller, e.g.
+  GET /economic-intelligence/today) reads now, exactly as before. The snapshot
+  is ordered and classified identically, so the context is unchanged.
+- `app/services/agent/agent_service.py`: `prepare()` passes the financial
+  context's own snapshot (`positions=context.positions`) to the economic layer,
+  so calendar relevance is scored against the same positions the response
+  reports, and the request performs ONE positions read.
+- `app/services/fundamental_intelligence/research.py`: `build_research(...,
+  resolution=None)` accepts the FocusResolution its caller already computed;
+  `None` still resolves internally, so the service's guarantee (only
+  broker-confirmed spellings are ever graded — a FocusResolution can only come
+  from `resolve_focus_symbols`) is unchanged for every caller.
+- `app/api/fundamental_intelligence_router.py` and `AgentService.prepare()`
+  pass their own resolution instead of re-resolving the catalog.
+- The market-data symbol-resolution read is DELIBERATELY RETAINED (known issue
+  24): it answers a different question from the candle read and is what makes a
+  suffixed broker catalog usable, so removing it would break correctness. It is
+  now pinned at exactly one read per request.
+
+Reuse rule: strictly request-local. The snapshot/resolution travel as arguments
+for one request; nothing is cached, nothing is shared between requests or
+tenants, and a standalone caller still reads for itself (a test performs two
+consecutive economic-context builds and observes two reads).
+
+Measured effect (real providers over a recording fake terminal, counted at the
+session seam):
+
+- POST /agent naming a focus instrument: 13 MT5 calls -> 9 (positions read
+  once, resolution once; 31% fewer, and one fewer serialized service read plus
+  its identity verification).
+- POST /agent with no focus instrument: 9 -> 7 MT5 calls (the positions
+  duplicate, which is present on every agent request, is gone either way).
+- GET /financial-research/today, two exact symbols: 9 -> 5 MT5 calls.
+- GET /financial-research/today, two symbols on a broker-suffixed catalog:
+  21 -> 11 MT5 calls.
+- GET /market-data/{symbol}: unchanged (5), by design.
+
+Tests: `tests/test_single_request_read_reuse.py` (new, 12 tests) injects a
+recording fake MT5 into the REAL session manager and composes the REAL
+providers/services/dependencies, then drives the REAL router coroutines, so it
+counts the MT5 calls a request actually made — not a service result a double
+returned. It pins: one positions read per agent request (9 calls total, was 13);
+one resolution per requested instrument (and one catalog scan when the spelling
+is not exact); an unknown symbol still failing closed (404) after ONE resolution;
+the market-data resolution read retained exactly once; no cross-request reuse
+(two requests, two reads) and no cross-tenant sharing (positions served per
+authenticated account); and a failing read still mapping to the existing 503 at
+the same boundary. Existing agent/research/market-data behavior suites are
+preserved (test doubles kept signature-compatible with the new optional
+arguments).
+
+Verification:
+
+- focused: 231 passed (reuse suite + agent economic/fundamental/research/service,
+  financial research, market-data service, economic intelligence)
+- full suite: 1718 passed, 2 pre-existing third-party deprecation warnings (was
+  1706; +12 new); re-run with outbound networking hard-disabled: 1718 passed
+- `compileall` clean; Pyright on every changed source and test file: 0 errors, 0
+  warnings
+- `git diff --check` clean; trading-safety scan clean (no order or position
+  mutation in app/); secret scan clean on the changed files
+
+### Fix — One Catalog Discovery per Resolution Operation
+
+Status: VERIFIED, UNCOMMITTED (working tree), not pushed
+
+Known issue 31 is closed. Resolving a broker-suffixed instrument needs the
+broker's catalog (the requested ``XAUUSD`` has to be matched to the broker's own
+``XAUUSD.r``), and the fallback read was performed once per requested name — so a
+request naming three decorated instruments read the SAME catalog snapshot three
+times, each read serialized on the one process-wide terminal session and each
+paying its own identity verification.
+
+Where the reuse belongs: `InstrumentService` already owned the single discovery
+primitive (``_catalog()``) and every resolution rule (Steps 52-54). The fix
+surfaces one explicit operation on that boundary rather than memoizing inside
+the resolver or letting an upper layer hold a provider.
+
+What changed (no provider abstraction, no cache, no session change):
+
+- `app/services/instruments/instrument_service.py`: new public
+  `resolve_many(symbols) -> tuple[InstrumentResolution, ...]`. The exact lookups
+  run first, one vendor call each as before; the FIRST name that needs the
+  fallback triggers the single catalog read that every remaining name reuses.
+  The snapshot is a local variable of that call — nothing is stored on the
+  service, so nothing is shared between calls, requests or tenants. The matching
+  rules moved into one module-level helper (`_match_from_catalog`) shared by both
+  entry points, and `resolve(symbol)` is now literally the one-name case of
+  `resolve_many`, so single- and multi-name resolution cannot drift apart.
+  ``InstrumentResolution`` (requested / instrument / reason) is exported from
+  the package; ``reason`` is the very message `resolve()` has always raised.
+- `app/services/fundamental_intelligence/research.py`: `resolve_focus_symbols`
+  calls `resolve_many` once for the whole focus set instead of resolving name by
+  name. `FocusResolution` (requested/resolved/unresolved), its ordering, the
+  fail-closed behavior and the RuntimeError propagation are unchanged.
+
+Audit before changing anything:
+
+- the exact-spelling step (one `symbol_info` per name) is NOT a duplicate and is
+  retained: only the terminal can say whether a given spelling exists.
+- a name needing no fallback still costs NO catalog read (the discovery stays
+  lazy), so exact-spelling requests are untouched.
+- ambiguity/unknown outcomes are still per name and still fail that name closed;
+  an MT5 availability failure still propagates as RuntimeError and is never
+  reported as "not offered".
+- the market-data single-symbol resolution and every other endpoint are
+  untouched (they resolve one name and gain nothing from a batch API).
+
+Measured (recording fake MT5 behind the real session, provider and service;
+counted at the terminal seam where the application actually reads):
+
+| resolution | catalog discoveries before | after |
+| --- | --- | --- |
+| 1 suffixed name | 1 | 1 |
+| 2 suffixed names | 2 | **1** |
+| 3 suffixed names | 3 | **1** |
+| 3 exact spellings | 0 | 0 |
+
+Total MT5 calls for the same operations: 1 name 6 -> 6 (unchanged), 2 names
+11 -> 8, 3 names 16 -> 11 (through the research router: 16 -> 11). The removed
+calls are the extra catalog discovery plus the identity verification and
+re-authentication that its acquire provoked; the per-name exact lookups remain,
+so what is left is the terminal lookups the operation genuinely needs.
+
+Tests: `tests/test_instrument_catalog_reuse.py` (new, 19 tests) — a recording
+fake provider pins one catalog scan for 2/3/many suffixed names, none for exact
+spellings, one for mixed resolved/unresolved sets, per-name ambiguity, input
+order and broker spelling, malformed input rejected before any read, RuntimeError
+propagating, no reuse between calls (two calls, two scans), and `resolve`
+agreeing with `resolve_many`. Behind the REAL session manager, provider, service
+and research service it pins one `symbols_get` per multi-symbol operation and per
+research request, the 404 path costing one discovery, separate requests each
+discovering their own catalog, and two tenants resolving against their OWN
+catalogs (the fake serves symbols per authenticated account).
+
+Verification:
+
+- focused: 240 passed — catalog reuse 19, instrument service 63, instruments
+  API 31, financial research 39, agent research context 33, market data service
+  15, previous read-reuse suite 12, MT5 instruments 28
+- full suite: 1737 passed, 2 pre-existing third-party deprecation warnings (was
+  1718; +19 new)
+- `compileall` clean; Pyright on every changed file: 0 errors, 0 warnings
+- `git diff --check` clean; trading-safety scan clean (no order or position
+  mutation in app/); secret scan clean
+
+### Fix — A Missing Instrument No Longer Invalidates the MT5 Session
+
+Status: VERIFIED, UNCOMMITTED (working tree), not pushed
+
+Known issue 32 is closed. The session boundary cleared its verified identity for
+ANY exception escaping a read span, and a client-level "this terminal does not
+offer that symbol" is an exception — a ValueError on its way to the existing
+404 — so a request that merely asked about an unknown symbol threw away a
+healthy session and made the next request pay initialize()/login() again.
+
+What the vendor actually does (probed against the installed package,
+MetaTrader5 5.0.6180, rather than inferred from exception names): a symbol read
+that cannot reach the terminal does NOT raise — it returns None and reports its
+own transport failure through last_error(), e.g. (-10004, 'No IPC connection') —
+while the terminal's answer ABOUT the symbol is -1 (the spelling the market-data
+provider already treats as "not recognized") or a non-negative code such as 4301
+(ERR_MARKET_UNKNOWN_SYMBOL). The package exports no ERR_* names to match on, only
+numeric codes. So "None means unknown symbol" was an assumption, and the
+provider now reads last_error() to tell the two answers apart.
+
+What changed (no cache, no new boundary, no session redesign):
+
+- `app/core/mt5_session.py`: new `MT5ClientError(ValueError)` — "the terminal
+  answered normally and the answer is a client-level result". `acquire` exempts
+  exactly that type from dropping the cached identity and re-raises it; every
+  other exception keeps its previous meaning and still clears the identity.
+  Because the type is a ValueError, no caller, message or HTTP status changes.
+- `app/providers/mt5_instruments.py`: `get_instrument` no longer assumes what
+  None means. None plus a client-level last_error() (code >= -1) is an
+  `MT5ClientError` (404, session kept); None plus anything else — the wrapper's
+  IPC range, an unreadable or absent error, a raising read — is a `RuntimeError`
+  (503, session invalidated). The message for a missing symbol is byte-for-byte
+  the one it always was.
+- `app/providers/instrument.py`: the `get_instrument` docstring names the
+  subclass, so the client/availability contract stays stated at the boundary.
+
+Why keeping the identity is safe: it was never trusted. `acquire` confirms it
+against the terminal (`account_info()`) before every read, so a session that
+moved, or a terminal that cannot answer, is still detected and re-authenticated —
+or refused (fail closed) — exactly as before. Dropping the cache was never the
+isolation control; it was redundant with the verification, and it made a
+client-level answer look like a session failure. The exemption is narrow on
+purpose: a plain ValueError raised inside a span by anything else still clears
+the identity.
+
+Measured (real route coroutine, real session manager, real provider, recording
+terminal; authenticating calls counted):
+
+| missing-symbol 404 requests, then one success | initialize() before | after |
+| --- | --- | --- |
+| 0 (one successful resolution) | 2 | 1 |
+| 1 | 3 | 1 |
+| 2 | 4 | 1 |
+| 3 | 5 | 1 |
+| 5 | 7 | 1 |
+
+`login()` was 0 in both states (with no cached identity the boundary initializes
+rather than switching accounts). The cost therefore drops from one unnecessary
+initialize() per missing-symbol request — plus one inside a perfectly successful
+resolution, whose exact-spelling miss falls through to the catalog scan — to a
+single authentication for the whole sequence.
+
+Tests: `tests/test_mt5_unknown_symbol_session.py` (new, 23 tests). At the
+provider: the client miss is still a ValueError with the same message; both
+terminal spellings (-1 and 4301) are client misses; the vendor's None-plus-no-IPC
+answer is an outage, not a 404; an unreadable last_error fails closed; the
+listing path is unchanged. At the boundary: a miss leaves
+`authenticated_account` intact and the next request performs no
+initialize()/login(); repeated misses never re-authenticate; identity
+verification still runs on every read; a session that moved away is still
+detected; an unconfirmable terminal is still refused and forgotten; a raising
+transport failure and the no-IPC answer both still invalidate the session and
+re-authenticate; an unrelated ValueError inside a span still invalidates it (the
+exemption is narrow); two tenants still switch the terminal and read only their
+own catalogs; a fresh manager starts with no identity. Through the real route:
+404 with the same detail and the session kept, 503 with the session dropped, and
+two users each served their own broker's spelling.
+
+Verification:
+
+- focused: 240 passed (unknown-symbol session + MT5 session + MT5 instruments +
+  instruments API + instrument service + catalog reuse + MT5 lifecycle + market
+  data service)
+- full suite: 1760 passed, 2 pre-existing third-party deprecation warnings (was
+  1737; +23 new)
+- `compileall` clean; Pyright on every changed file: 0 errors, 0 warnings
+- `git diff --check` clean; trading-safety scan clean (no order or position
+  mutation in app/); secret scan clean
+
+### Fix — A Normal Market-Data Miss No Longer Invalidates the MT5 Session
+
+Status: VERIFIED, UNCOMMITTED (working tree), not pushed
+
+Known issue 33 is closed — the same defect class as item 32, one provider over.
+`MT5MarketDataProvider` raised a PLAIN ValueError for two perfectly normal
+answers — the vendor's ``-1`` "symbol not recognized" code and an empty rates
+tuple ("there are no bars for this symbol/window") — inside the ``acquire`` span,
+so the session boundary classified them as unknown failures, dropped the verified
+identity, and made the next request re-authenticate a terminal that had just
+answered.
+
+What changed (one provider file; no cache, no boundary change, no new mechanism):
+
+- `app/providers/mt5_market_data.py`: the two client-level answers now raise the
+  `MT5ClientError` introduced for item 32 — still a ValueError, so the existing
+  404 and its detail string are byte-for-byte unchanged — and the message for a
+  missing candle is the same one it always was. A new module-level
+  `_is_unrecognised_symbol(error)` holds this provider's rule WITH ITS ORIGINAL
+  MEANING: only ``-1`` is client-level, exactly as its comment always said.
+- the ``rates is None`` branch now reads ``last_error()`` defensively: an error
+  that cannot be read at all (missing, malformed, or raising) is treated as an
+  infrastructure failure instead of leaking a TypeError out of the boundary, so
+  an unclassifiable state fails closed as the existing 503.
+- the empty-rates branch is classified the same way (it was already the same
+  ValueError, so only its type family changed).
+
+Why the distinction is safe: the exemption is still exactly one type. Every
+other outcome — a raising candle read (``RuntimeError``), any other error code
+including the wrapper's ``-10004`` "No IPC connection", an unreadable
+``last_error()``, and a plain ValueError raised inside a span by anything else —
+keeps the old behaviour and still invalidates the session. Identity verification
+is unchanged: every acquire still confirms the cached identity with the terminal
+before a read is served, and an identity that cannot be confirmed is still
+refused and forgotten.
+
+Deliberately NOT unified: the instrument provider treats the live-verified
+``-4`` "Terminal: Not found" (and non-negative codes such as 4301) as a client
+miss; this provider keeps its narrower ``-1`` rule, which the live probe matched
+exactly for an unrecognized-symbol candle read. Widening market data would turn
+codes it currently reports as 503 into "no data"; that difference is stated at
+both call sites.
+
+Live-terminal evidence (read-only probe against the running terminal, MetaTrader5
+5.0.6180, no credentials and no login — the terminal's own logged-in state was
+used; nothing was mutated): an unattached read answers None plus
+(-10004, 'No IPC connection'); attaching succeeds and the catalog and candle
+reads return normally; ``copy_rates_from_pos`` for a symbol the catalog does not
+have answers None plus (-1, 'Terminal: Call failed'); ``symbol_info`` for such a
+symbol answers None plus (-4, 'Terminal: Not found'); and the connection stayed
+usable immediately after the miss, the next real-symbol read returning
+(1, 'Success') and one candle. The last point is the classification in vivo: a
+miss is the terminal's answer about the request, not damage to the session.
+What could NOT be reproduced live: the session boundary's re-authentication
+behaviour (no tenant credentials exist in this environment and the application
+database was deliberately not touched), and an "empty rates tuple" answer (the
+attached terminal's listed symbols all had bars); both are pinned by the
+deterministic provider/session tests.
+
+Measured (real route coroutine, real session manager, real provider, recording
+terminal; authenticating calls counted):
+
+| no-data 404 requests, then one success | initialize() before | after |
+| --- | --- | --- |
+| 0 (one successful read) | 1 | 1 |
+| 1 | 2 | 1 |
+| 2 | 3 | 1 |
+| 3 | 4 | 1 |
+| 5 | 6 | 1 |
+
+``login()`` was 0 in both states. So each no-data request cost one unnecessary
+initialize() before, and the whole sequence now authenticates exactly once.
+
+Tests: `tests/test_mt5_market_data_session.py` (new, 24 tests). At the provider:
+the no-data answer is still a ValueError with the same message; an empty rates
+answer is the same client-level result; the vendor's no-IPC code is an outage,
+not a missing candle; an unreadable/absent/malformed `last_error()` fails
+closed; a raising candle read stays an outage; the served candle is mapped
+exactly as before (Decimal prices, float tick volume). At the boundary: either
+client-level answer leaves `authenticated_account` intact and the next request
+performs no initialize()/login(); repeated no-data answers never re-authenticate;
+verification still runs on every read; a session that moved away is still
+detected; an unconfirmable terminal is still refused; a raising read and the
+no-IPC answer both still invalidate the session and re-authenticate; an unrelated
+ValueError still invalidates; two tenants never receive each other's candle and
+the terminal is switched per tenant. Through the real route: 404 with the same
+detail and the session kept, 503 with it dropped.
+
+Verification:
+
+- focused: 179 passed (market-data session + unknown-symbol session + market-data
+  service/auth + MT5 session + MT5 instruments + read-reuse + MT5 lifecycle)
+- full suite: 1784 passed, 2 pre-existing third-party deprecation warnings (was
+  1760; +24 new)
+- full suite again with all non-loopback outbound connects hard-blocked: 1784
+  passed
+- `compileall` clean; Pyright on both changed files: 0 errors, 0 warnings
+- `git diff --check` clean; trading-safety scan clean (no order or position
+  mutation in app/); secret scan clean
+
 ### Step 56 Evaluation Fixes — Relevance Boundary + OpenRouter HTTP-200 Envelopes
 
 Status: VERIFIED + COMMITTED (two focused commits, following the established
@@ -1606,6 +2317,61 @@ envelopes; with a single-provider pool these surface as the pool's safe
 terminal 503. A second pooled provider (a future configuration decision, not a
 code change) would absorb them.
 
+
+### Step — One-Broker Architecture Refactor (product decision, 2026-09-17)
+
+**Product decision:** the Agent is for ONE BROKER ONLY; multi-broker support is
+no longer a product requirement. The repository was made internally consistent
+with that decision while preserving every hardening property (identity
+verification, fail-closed behavior, read-only safety, terminal ownership, the
+blocking boundaries) and every customer-to-customer isolation guarantee.
+
+What changed, in order of trust impact:
+
+- The broker is the single `brokers` row. `load_deployment_broker`
+  (app/core/dependencies.py) requires exactly one row and refuses to serve a
+  database with none or several (fail closed) — a leftover second row from the
+  multi-broker era is inert, never a second control plane. `User.broker_id` and
+  the LLM configuration's `broker_id` remain as integrity references to that
+  row.
+- The tenant selector is gone. POST /auth/login takes only `login` +
+  `password`; `users.login` is unique deployment-wide (it IS the MT5 account
+  number); no endpoint accepts a broker_id/code/server from a client. The
+  Step 43 broker-code lookup, its client migration note, and the
+  (broker, login) throttle keying were simplified accordingly — one broker, so
+  the submitted login alone is the customer key.
+- The per-user `mt5_server` column is DROPPED (migration
+  d8e14b7a9c30_one_broker_architecture, which also rotates the per-broker
+  unique constraints to deployment-wide ones and the per-broker single-super-
+  admin index to a deployment-wide one; it refuses to run against a database
+  that is not a coherent one-broker database). The MT5 server is the broker's
+  own configuration only: a customer's identity is (the broker's server, that
+  customer's login) and nothing on a row or in a request can redirect it.
+- Exactly ONE super_admin exists, enforced by a database partial unique index
+  over the role value itself.
+- Broker LLM configuration: `resolve_llm_provider` reads the deployment's one
+  stored configuration with `scalar_one_or_none` (a second active row is a loud
+  failure, matching the table's unique constraint); `LLMRouter` is unchanged in
+  behavior. API-key storage, egress policy and SSRF guards untouched.
+- RBAC simplified where broker-scoping was meaningless (an admin manages the
+  deployment's customers; the role boundaries, 403/404 conventions and the
+  super_admin-only LLM configuration endpoints are unchanged).
+
+Verification: focused suites for auth/login, users CRUD/create/admins/list,
+MT5 credentials, instruments, agent, economic/fundamental/research/portfolio
+APIs, LLM router and the LLM configuration API re-pointed at one-broker
+semantics (cross-broker tests replaced by customer-to-customer equivalents or
+"stray second broker row fails closed" tests); the new
+
+tests/test_customer_mt5_isolation.py drives the REAL routers, real JWT auth,
+real composition root, real session manager and real providers against a
+recording terminal that audits every authentication and read: two customers of
+the one broker each read only their own account, concurrently, with request
+supplied selectors (login/server/user_id/broker_id/context) proven unable to
+redirect, an out-of-band terminal switch detected, and a tampered ciphertext
+failing closed without touching the healthy customer. A sensitivity run (a
+plugin forcing every read onto one account) fails 7 of the 14 tests, so the
+suite genuinely measures the boundary. Full suite at pause: 1788 passed.
 
 ### Fix — Instrument Profile Alias Coverage Audit
 
@@ -2856,30 +3622,38 @@ Includes:
 
 ## Current Authentication Flow
 
-POST /auth/login  { "broker": <broker code>, "login": <account/login number>, "password": <app password> }
+ONE-BROKER deployment (this checkpoint's refactor): the client sends ONLY its
+own credentials — there is no `broker` field, path segment or query parameter,
+so nothing a request carries can select or influence a customer.
+
+POST /auth/login  { "login": <account/login number>, "password": <app password> }
     ↓
-broker code resolved case-insensitively to exactly one Broker row
-(unknown or ambiguous code → the same generic 401 as any other failure)
+the deployment's ONE broker resolved server-side
+(load_deployment_broker: exactly one brokers row required —
+none or several → the same generic 401 as any other failure)
     ↓
-credential lookup scoped to that broker_id  (User.broker_id + User.login)
+credential lookup scoped to that broker  (User.broker_id + User.login;
+login is unique deployment-wide, so at most one match)
     ↓
-JWT access token
+JWT access token (sub = str(User.id); no broker/tenant claim)
     ↓
 Authorization: Bearer <token>
     ↓
-get_current_user()
+get_current_user() → load_deployment_broker()
     ↓
-database-backed User
+database-backed User, bound to the deployment's one broker
+(a row of any other broker can never authenticate)
     ↓
 protected API
 
-Client migration note (breaking change, Step 43): `broker` is now mandatory on
-every login request and there is no optional or legacy form. A request without
-it is refused with 422, and the previous `{"login", "password"}` body no longer
-authenticates anything. Clients send the broker code they belong to
-(case-insensitive, surrounding whitespace tolerated). Failure behaviour is
-otherwise unchanged: the same generic 401 detail for every rejection, and 429
-when the throttle trips.
+Client migration note (breaking change, the one-broker refactor): `broker` is
+GONE from the login request. The historical Step 43 form
+`{"broker", "login", "password"}` is no longer the contract — extra fields are
+ignored, not honored, because the broker is resolved server-side. Clients send
+only `login` (the MT5 account/login number) and the application password.
+Failure behaviour is unchanged: the same generic 401 detail for every rejection,
+and 429 when the throttle trips (keyed per client IP and per submitted login —
+there is one broker, so the login alone is the customer key).
 
 ## Current MT5 Credential Provisioning Flow
 
@@ -2887,24 +3661,29 @@ Authenticated request (PUT /users/{user_id}/mt5-credentials)
     ↓
 get_current_user() → get_current_broker_manager()   (customer ⇒ 403)
     ↓
-target resolved inside the caller's OWN broker (otherwise 404; never written)
+target resolved inside the deployment's ONE broker (otherwise 404; never written)
     ↓
-role rule: admin → customers only; super_admin → any user in their broker
+role rule: admin → customers only; super_admin → any user
     ↓
 encrypt_secret(mt5_investor_password)   (failure ⇒ 503, nothing written)
     ↓
-users.mt5_server / users.mt5_password_encrypted (ciphertext)
+users.mt5_password_encrypted (ciphertext)
 The account number is NOT provisioned: it is the target user's own login.
+The MT5 server is NOT provisioned either: it is the broker's own configuration
+(the one server every customer's account lives on) — there is no per-user
+server column, and no request can supply one (one-broker refactor).
 
 Then, on every MT5-backed read:
 
 authenticated user
     ↓
-get_mt5_credentials → effective login/server: the user's login (numeric) and
-    ↓                 the user's mt5_server, else Broker.mt5_server
+get_mt5_credentials → identity: the user's own login (numeric) +
+    ↓                 the broker's mt5_server (the only server there is)
 MT5AccountCredentials (ciphertext only; masked in repr)
     ↓
 MT5SessionManager.acquire → decrypt (only here) → initialize / login
+    ↓
+identity verified against the terminal itself (account_info) before the read
     ↓
 provider read (account info / positions / trade history / market data)
 
@@ -3741,10 +4520,43 @@ This limitation must be reported rather than hidden.
    switch can never land inside another tenant's read. Cross-tenant data
    leakage is impossible, but MT5 throughput is a process-wide bottleneck; the
    future production answer (one MT5 worker process per broker, or equivalent)
-   remains future work.
-2. MT5 IPC timeout is not implemented.
+   remains future work. The Python API exposes no connection/session handle on
+   any read function, so there are no independent per-account handles to
+   multiplex inside one process; and account count alone does not set the
+   scaling requirement — peak concurrent MT5 reads and read duration do. The
+   authenticated identity is now verified against the terminal before every read
+   (see item 29 for its cost), so a session that changed outside this process is
+   refused rather than served.
+2. MT5 IPC timeout is only partly implemented. Authentication is now bounded:
+   `MT5_TIMEOUT_SECONDS` (default 10 s) is passed to `initialize()`/`login()` as
+   MT5's milliseconds, so a hanging login can no longer hold the process-wide
+   lock for the package's 60 s default. The individual READ calls
+   (positions_get, history_deals_get, copy_rates_from_pos, symbol_info,
+   account_info) still have no timeout of their own, because the package exposes
+   none for them; a hung read therefore blocks the session exactly as before.
 3. /health does not currently represent MT5 readiness.
-4. Multi-worker deployment semantics need future documentation/design.
+4. The single-process MT5 assumption is UNENFORCED, and multi-worker deployment
+   would break tenant isolation rather than merely "need design". The session
+   lock is an in-process threading.RLock, so it is not shared across OS
+   processes: a second application process pointed at the same MT5 terminal
+   authenticates that terminal independently, and a terminal holds only one
+   current account — so process B's account switch can be the account process A
+   then reads. Nothing enforces the invariant today (no OS-level lock, no
+   worker-count check, no deployment configuration in the repository), so an
+   accidental `--workers N` or a second app host would silently reintroduce the
+   cross-tenant leak Step 36 removed. Enforce the invariant (or refuse
+   multi-worker deployment) before any production deployment. Scale-out stays
+   roadmap work — the P8 topology decision, then P12 (worker per broker) — and
+   must not be implemented speculatively. RESOLVED: the invariant is now
+   ENFORCED by the application itself — app/core/mt5_ownership.py takes an
+   exclusive OS-level lock per terminal (keyed on MT5_TERMINAL_PATH) from the
+   FastAPI lifespan and fails closed with MT5OwnershipError before any MT5 work,
+   so a second process or a multi-worker deployment refuses to start instead of
+   sharing a terminal. The session-identity verification added earlier remains
+   valuable for drift WITHIN one process; the cross-process gap this item
+   describes is closed by the ownership lock. Scale-out — several processes owning
+   several terminals deliberately — stays roadmap work (P8, then P12), and the
+   per-terminal lock name is shaped to allow it without implementing any of it.
 5. Candle timestamps need future UTC review.
 6. MT5 last_error handling has a minor robustness concern.
 7. MetaTrader5 is currently a Windows-specific dependency and needs future CI/Docker consideration.
@@ -3798,14 +4610,16 @@ This limitation must be reported rather than hidden.
     - The real Free LLM Pool and real economic-calendar source are still absent
       (items 9 and 11), so a non-development deployment refuses those
       capabilities (503) instead of degrading.
-14. Each agent request performs two position reads: FinancialContextService
-    reads positions for its own snapshot and the injected
-    EconomicIntelligenceService reads them again to score per-position
-    relevance. Both reads stay inside the existing run_mt5_call boundary and the
-    single tenant session, so tenant safety is unchanged, but a request costs
-    one extra serialized MT5 read. Reusing one snapshot would mean changing the
-    economic-intelligence service contract and was deliberately out of Step 45's
-    scope.
+14. Each agent request USED to perform two position reads: FinancialContextService
+    read positions for its own snapshot and the injected
+    EconomicIntelligenceService read them again to score per-position
+    relevance. RESOLVED (this step): the economic service accepts an optional
+    position snapshot and the agent passes the one its financial context just
+    read, so one request performs ONE positions read and the calendar relevance
+    is scored against the very snapshot the response reports (the standalone
+    GET /economic-intelligence/today path is unchanged: no snapshot supplied
+    means read now). Both reads stayed inside the same run_mt5_call boundary and
+    tenant session; only the redundant read was removed.
 15. There is no production news source. Fundamental intelligence is wired to
     development/test sources only: since Step 47A, the Alpha Vantage free tier
     when its key is configured in development, and otherwise the deterministic
@@ -3897,15 +4711,21 @@ This limitation must be reported rather than hidden.
     base (XAUUSD.r and XAUUSD.m) likewise stays ambiguous by design — the
     caller must name the spelling it wants, and GET /instruments lists the
     catalog to find it.
-24. Every market-data request now performs one extra MT5 read (the symbol
-    lookup that resolves it, plus at most one catalog scan when the spelling is
-    not an exact match) before the candle read itself. That is the cost of
-    resolving through the tenant's own catalog, and it matters operationally
-    because the MT5 Python API serializes every read on the one process-wide
-    terminal session: a deployment that needs cheaper per-candle reads would
-    want a later decision (a per-request resolution cache, or asking the caller
-    for broker spellings), which Step 53 deliberately does not introduce. No
-    cache, scheduler or second catalog read was added.
+24. Every market-data request performs one extra MT5 read (the symbol lookup
+    that resolves it, plus at most one catalog scan when the spelling is not an
+    exact match) before the candle read itself. That is the cost of resolving
+    through the tenant's own catalog, and it matters operationally because the
+    MT5 Python API serializes every read on the one process-wide terminal
+    session. RE-EXAMINED and INTENTIONALLY RETAINED (this step) — it is NOT a
+    duplicate of the candle read: it answers a different question (which
+    spelling the broker actually lists, so ``xauusd`` can become ``XAUUSD.r``),
+    and the candle read cannot be asked for a name the terminal does not have.
+    Removing it would break every suffixed catalog, so the read stays exactly
+    once per request and is now pinned at one by a regression test. A deployment
+    that wanted cheaper per-candle reads would still need a later decision (a
+    per-request resolution cache, or asking the caller for broker spellings),
+    which Step 53 deliberately does not introduce. No cache, scheduler or second
+    catalog read was added.
 23. A research request naming several instruments fails closed (404) when ANY
     of them is not offered by the tenant's broker: there is no partial research
     response, and the caller is expected to re-ask with the instrument the
@@ -3913,9 +4733,150 @@ This limitation must be reported rather than hidden.
     alternative — researching the confirmed subset and reporting the rest — was
     rejected deliberately so a response can never look complete while a named
     instrument was silently dropped.
+29. Every MT5 acquire now performs one extra `account_info()` read: the session
+    boundary verifies the authenticated identity against the terminal before
+    serving the read. It is a local IPC call inside a span the lock is already
+    holding, and it replaces the trust that made external drift invisible, so the
+    cost is deliberate — but a request's MT5 read count grows by one per acquire
+    (five to six acquires for /agent), which matters for the process-wide
+    serialization in item 1. The alternative (caching a verified flag for a few
+    seconds) would reintroduce exactly the window this fix closes, so it was not
+    taken.
+28. /agent USED to occupy a shared worker thread for the entire LLM round trip.
+    RESOLVED (this step). The risk as it stood: run_mt5_call
+    (app/core/blocking.py) offloaded the whole AgentService.handle call to
+    starlette's run_in_threadpool with the LLM request INSIDE it, so one agent
+    request held one of the pool's worker threads (anyio's default of 40, not
+    tuned here) for the full model latency. Because every MT5-backed endpoint
+    shares that pool, a burst of agent requests could starve short reads
+    (positions, account info, market data) while the MT5 session lock was idle.
+    The agent is now two phases on two boundaries: service.prepare() (every
+    blocking read: MT5, calendar, news windows) through run_mt5_call, and
+    service.respond() (prompt rendering plus the single model call, which touches
+    no MT5) through the new run_llm_call, which runs on the event loop's own
+    default executor — a pool separate from the worker threadpool run_mt5_call
+    borrows from. A request waiting on the model therefore holds no worker an MT5
+    read is waiting for (proved by tests/test_agent_blocking_boundary.py, which
+    measures the worker limiter itself).
+    Related and unchanged: the duplicate position read per agent request
+    (item 14) and the extra resolution read before a market-data read (item 24).
+30. The Broker LLM configuration connection tester USED to run its model call
+    through the MT5 blocking boundary (run_mt5_call in
+    app/api/broker_llm_config_router.py), so that one administrative endpoint
+    held a worker thread for the duration of a model round trip — the same class
+    of defect item 28 described. RESOLVED (this step): the endpoint now crosses
+    the existing run_llm_call boundary for the probe (the same boundary /agent
+    uses), changing only the boundary — every guard, error mapping and the
+    read-only, no-trading surface are untouched — and the fix is pinned by
+    focused tests in tests/test_broker_llm_config_api.py that measure the worker
+    limiter while the probe's model call is held open (including a control
+    proving the old shape did hold the worker).
+31. Resolving SEVERAL focus instruments that the broker spells with a suffix USED
+    to scan the catalog once per instrument: `InstrumentService.resolve` owned
+    the catalog fallback, and the research layer resolves symbol by symbol, so a
+    request naming three decorated instruments performed three full catalog
+    reads of one unchanged snapshot (each serialized on the single terminal
+    session). RESOLVED (this step): `InstrumentService.resolve_many` resolves a
+    whole set against ONE catalog discovery, and `resolve` is that same
+    operation for one name (one implementation of the Steps 52-54 rules, so the
+    two cannot drift). Measured on a decorated catalog: 3 catalog reads -> 1 for
+    three instruments, 2 -> 1 for two, and still 0 when every requested name is
+    spelled exactly as the broker spells it (the discovery stays lazy).
+    Remaining, deliberately: each requested name still needs its own exact
+    `symbol_info` lookup, because only the terminal can say whether that spelling
+    exists — and a client-level miss still costs the re-authentication recorded
+    as item 32.
+32. A client-level `get_instrument` miss USED to tear down the cached session
+    identity: the provider raised ValueError INSIDE the acquire span, and the
+    session boundary treated any exception escaping a read as an unknown
+    session, so it forgot the authenticated identity and the next acquire re-ran
+    initialize()/login(). Measured on the previous step's decorated-catalog path:
+    a resolution of three suffixed names cost 11 MT5 calls, of which the exact
+    lookups themselves were 3 — the rest was identity verification plus the
+    re-authentication each miss provoked. RESOLVED (this step): the provider now
+    READS the vendor's answer instead of assuming it (a symbol this terminal
+    does not offer is an `MT5ClientError` — still a ValueError, so the existing
+    404 is unchanged — while an IPC/transport failure stays a RuntimeError), and
+    the session boundary keeps the VERIFIED identity for exactly that type and
+    drops it for everything else. Measured through the real route coroutine: N
+    missing-symbol requests followed by one successful resolution cost N+2
+    initialize() calls before and 1 after, with login() at 0 in both states.
+    LIVE-TERMINAL VERIFICATION (read-only smoke probe against the running
+    terminal64.exe, no credentials, no login, no mutation): the probe CONFIRMED
+    the transport family — an unattached read answers None plus (-10004, 'No IPC
+    connection') — and the catalog itself stayed readable; it CORRECTED the
+    classification assumption, however: the live terminal answers a symbol_info()
+    miss with (-4, 'Terminal: Not found'), NOT a code >= -1, so the original rule
+    would have misclassified every real miss as a 503 outage that drops the
+    session — the very failure item 32 exists to prevent. The rule now also
+    accepts the live-verified -4 (and keeps -1 client-level for older terminals
+    that report misses that way); every other negative terminal-range code stays
+    an availability failure, pinned by test.
+33. `MT5MarketDataProvider` USED to raise a PLAIN ValueError for a normal "no
+    candle data" result — the vendor's -1 "symbol not recognized" answer, and an
+    empty rates tuple — from INSIDE the acquire span, so the session boundary
+    read a perfectly normal answer as an unknown failure: it discarded the
+    verified identity and the next request re-authenticated. Same defect class as
+    item 32, found while fixing it. RESOLVED (this step): both client-level
+    answers are raised as `MT5ClientError` (still a ValueError, so the existing
+    404 and its detail string are unchanged) and the session boundary keeps the
+    VERIFIED identity for exactly that type. This provider's own
+    client/availability split is deliberately preserved — only -1 is client-level;
+    every other code, a raising candle read and an unreadable last_error() stay an
+    availability failure (503) that still invalidates the session. Measured
+    through the real route coroutine: N no-data requests followed by one success
+    cost N+1 initialize() calls before and 1 after, with login() at 0 in both.
+    LIVE-TERMINAL VERIFICATION: the same read-only probe CONFIRMED this rule
+    exactly — an unattached read answers None plus (-10004, 'No IPC connection'),
+    a candle read for a symbol the catalog does not have answers None plus
+    (-1, 'Terminal: Call failed'), and the connection remained usable after the
+    miss with the next real-symbol read returning (1, 'Success') and one candle —
+    i.e. a miss is a normal answer about the request, not damage to the session.
 
 Resolved:
 
+- (Former item 14) Each agent request performed two position reads — RESOLVED by
+  reusing one snapshot: the economic layer scores calendar relevance against the
+  financial context's own position read (passed as an argument for that request
+  only), so one request performs one positions read. Proven by
+  tests/test_single_request_read_reuse.py, which counts MT5 calls at the
+  terminal.
+- (This step, additional finding) The focus-symbol resolution ran TWICE per
+  request (the research API and the agent each resolved, then build_research
+  resolved the same catalog again) — RESOLVED by passing the already-computed
+  FocusResolution into build_research; the broker-confirmed-spelling guarantee is
+  unchanged because a FocusResolution can only be produced by
+  resolve_focus_symbols.
+- (Former item 31) Resolving several suffixed instruments scanned the broker's
+  catalog once per instrument — RESOLVED by one explicit catalog discovery per
+  resolution operation (`InstrumentService.resolve_many`, with `resolve` as its
+  one-name case sharing the same rules). Measured: 3 catalog reads -> 1 for three
+  instruments, pinned by tests/test_instrument_catalog_reuse.py at both the
+  recording-provider and the terminal seam.
+- (Former item 32) A client-level `get_instrument` miss discarded the verified
+  MT5 session identity, so the next request re-ran initialize()/login() —
+  RESOLVED by classifying the vendor's two symbol-read outcomes (`MT5ClientError`
+  for a symbol the terminal says it does not offer, `RuntimeError` for a
+  transport/IPC failure) and exempting exactly that type in the session
+  boundary. Measured: 3 missing-symbol requests plus one successful resolution
+  went from 5 initialize() calls to 1, with the 404 and the 503 unchanged; pinned
+  by tests/test_mt5_unknown_symbol_session.py.
+- (Former item 33) A normal market-data "no data" answer discarded the verified
+  MT5 session — RESOLVED by raising the same `MT5ClientError` for the two
+  client-level answers (the vendor's -1 symbol-not-recognized code, and an empty
+  rates tuple) while every other code, a raising candle read and an unreadable
+  `last_error()` remain a `RuntimeError` that still invalidates the session. This
+  provider's narrower threshold is preserved rather than unified. Measured: 3
+  no-data requests plus one success went from 4 initialize() calls to 1; pinned by
+  tests/test_mt5_market_data_session.py.
+- (Former item 28) /agent held one of the shared worker threads for the whole LLM
+  round trip — RESOLVED by the two-phase agent boundary: run_mt5_call for the
+  blocking reads, and run_llm_call (the event loop's default executor, a
+  separate pool) for the model call.
+- (Former item 30) The Broker LLM configuration connection tester held one of
+  the shared worker threads for its model round trip — RESOLVED by routing the
+  probe through the same run_llm_call boundary; no new boundary, no provider
+  change, behavior otherwise identical.
 - (Former item 9) MT5 blocking-call technical debt — RESOLVED by Step 19.
   All MT5-backed endpoints (account-info, positions, market-data) now execute
   their synchronous service calls off the event loop through the consolidated
@@ -3953,6 +4914,15 @@ Resolved:
   number) — RESOLVED by Step 43: the request names its broker, the credential
   lookup is scoped to the resolved broker_id, and the throttle's login bucket is
   per (broker, login).
+- (Former item 27) The MT5 session's authenticated identity was cached
+  bookkeeping with no confirmation that the terminal was still on that account,
+  so external drift (a broker-side re-login, a manual login at the terminal,
+  another process sharing the terminal) could have been served from the wrong
+  account — RESOLVED by the session-identity fix: before every read the terminal
+  must report the requested (server, login); a mismatch re-authenticates under
+  the lock, and an identity that still cannot be confirmed fails closed (503) and
+  is forgotten. The comparison is exact on the login and case-insensitive on the
+  server, and a terminal that reports no server name falls back to the login.
 - (Former item 26) The clock-dependent economic-intelligence API test fixture —
   RESOLVED by commit 5d63f62372021d6f8bbb57f7954f81cd2d66993a: the offline
   QuantGist fixture in tests/test_economic_intelligence_api.py no longer
@@ -3975,39 +4945,38 @@ They should be addressed one controlled stage at a time.
 
 ## Next Step
 
+**DEVELOPMENT IS PAUSED.** Nothing is queued. When work resumes, the candidates
+below are the recorded options — each requires an explicit instruction first.
+
+The state at pause: the one-broker architecture refactor and every preceding
+step are committed and pushed; the full suite is green (1788 passed) and the
+working tree is clean.
+
+Candidate directions when work resumes:
+
+(a) decide the development feed's coverage policy — narrow the Alpha Vantage
+request by topic/ticker, or filter locally by relevance (known issue 16);
+(b) a real licensed production news vendor behind the existing NEWS_SOURCE
+production seam (known issue 15); (c) a real production economic-calendar vendor
+(known issue 9); (d) broadening the currency-scoped calendar escalation to
+profile factors (known issue 17); (e) the real free LLM providers; (f) the
+remaining P1 surface (a portfolio/report-level fundamental view and additional
+channel-facing surfaces).
+
+Recorded future architectural possibility (NOT a task): the one-broker decision
+opens the option of replacing the MT5 integration with official Broker APIs if
+the broker offers an account/customer data API and a market-data/price API —
+the provider contracts are the seam. Do not start this without an explicit
+instruction.
+
+Earlier status record (pre-pause), kept for the commit trail:
+
 Steps 12–44, the role-migration ordering fix, the development user seed and the
-trade-history field fix are complete, committed and pushed (origin/master is
-638f972, Step 44).
-
-Step 48 (instrument-aware fundamental relevance) is committed as one focused
-commit, which records the shared domain vocabulary, the three instrument
-profiles, the graded relevance in both intelligence layers, the no-currency-leg
-rule, the exposure factors, the prompt rendering, the new test modules and this
-documentation.
-Before it, Step 47A (the Alpha Vantage development news source) is committed by
-the Step 47A implementation commit plus its checkpoint-status commit, which
-record the provider, the explicit alphavantage NEWS_SOURCE value, the environment
-matrix, the key-redaction measure, the new tests, .env.example and the
-documentation. Before them, Step 47 (news and fundamental intelligence) is
-committed by its implementation commit (c44953d) and its checkpoint-status
-commit, the roadmap commits (94b1858 and c84d334), Step 46 (ebbb86b and c95ae6c)
-and Step 45 (b9785cb and 9ba0d95) are local: origin/master remains 638f972 until
-they are pushed, so the working tree is clean.
-
-The immediate next action is deliberately NOT fixed here. The current candidates
-are (a) deciding the development feed's coverage policy — narrow the Alpha
-Vantage request by topic/ticker, or filter locally by relevance, now that the
-profile layer can say which articles matter — which is what would make the
-fundamental block XAUUSD-focused (known issue 16); (b) the remaining P1 surface (a
-portfolio/report level fundamental view and any additional channel-facing
-surface, both of which the factor attribution now makes more useful); (c) a real
-licensed production news vendor behind the existing NEWS_SOURCE production seam
-(known issue 15); (d) a real production economic-calendar vendor (known issue 9);
-(e) broadening the currency-scoped calendar escalation to profile factors (known
-issue 17); and (f) the real free LLM providers. Per the roadmap, P2 (instrument
-catalog and multi-timeframe market data) comes after P1's fundamental capability
-is usable — note that the static profiles here are deliberately NOT that catalog:
-P2 adds the traded-instrument catalog, this step adds the relevance vocabulary.
+trade-history field fix were complete, committed and pushed (origin/master was
+638f972, Step 44). Step 48 (instrument-aware fundamental relevance) was
+committed as one focused commit. Steps 47A/47/46/45 and the roadmap commits
+followed; everything since was local until the pause commit, which pushed the
+whole branch.
 
 The following are DEFERRED FUTURE WORK only. None of them is implemented, and
 none may be started without an explicit instruction:
@@ -4064,9 +5033,11 @@ none may be started without an explicit instruction:
   (only login and the per-user agent quota are throttled today)
 - trade-history N+1 MT5 IPC calls: each closing deal triggers a separate
   history_orders_get round-trip
-- remaining known issues (IPC timeout, /health MT5 readiness, multi-worker
-  semantics, candle UTC review, last_error robustness, Windows dependency,
-  hygiene, and the residual Step 35 trade-offs in known issue 13)
+- remaining known issues (the partially-bounded MT5 IPC timeout, /health MT5
+  readiness, the extra
+  per-acquire verification read, candle UTC
+  review, last_error robustness, Windows dependency, hygiene, and the residual
+  Step 35 trade-offs in known issue 13)
 
 Do NOT implement any next step until explicitly instructed.
 

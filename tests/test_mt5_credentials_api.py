@@ -1,4 +1,5 @@
-"""Tests for PUT/GET /users/{user_id}/mt5-credentials (Step 38).
+"""Tests for PUT/GET /users/{user_id}/mt5-credentials (Step 38, evolved to the
+ONE-BROKER architecture).
 
 Require none of: real PostgreSQL, real MT5, network, or real credentials. The
 get_db dependency is overridden with a per-test file-based async SQLite database
@@ -8,6 +9,12 @@ dependencies run (real JWT decode + database role check). The encryption key is
 generated in-process, so the credential that exercises encryption is a test-only
 value and the real Fernet round-trip is what is verified. No pytest asyncio
 plugin: async setup is driven with asyncio.run.
+
+This deployment serves ONE broker, so there is no cross-broker boundary left to
+attack here. The boundary that must hold is the CUSTOMER-to-CUSTOMER one: two
+customers of the same broker have two different MT5 accounts, and neither the
+API nor a request may make one read the other's account. Every isolation test
+below asserts exactly that.
 """
 import asyncio
 from typing import AsyncIterator
@@ -33,11 +40,12 @@ TEST_ALGORITHM = "HS256"
 # anywhere in this module, and the value only has to prove the encryption path.
 INVESTOR_SECRET = "investor-read-only-credential-under-test"
 REPLACEMENT_SECRET = "replacement-read-only-credential-under-test"
-# An MT5 account number that must NEVER be acceptable as request input: since
-# Step 42 the account number is the user's own `login`, so a client cannot aim
-# a credential at a different account.
+# The deployment's ONE MT5 server, configured on the single broker row. It is
+# also an MT5 account number that must NEVER be acceptable as request input:
+# the account number is the user's own `login`, so a client cannot aim a
+# credential — or a read — at a different account or a different server.
+BROKER_SERVER = "BrokerTest-Live"
 MT5_LOGIN = "30001"
-MT5_SERVER = "BrokerTest-Live"
 RESPONSE_FIELDS = {"user_id", "login", "mt5_server", "mt5_configured"}
 
 
@@ -51,10 +59,11 @@ def test_only_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], dict[str, int]]":
-    """Seed two tenants: broker A (super_admin, admin, customer) and broker B.
+    """Seed the deployment's ONE broker with a super_admin, an admin and TWO customers.
 
-    Two tenants are required to prove cross-broker isolation rather than merely
-    the absence of a broker_id parameter.
+    Two customers are required to prove CUSTOMER-to-customer isolation: they are
+    the same broker's customers, on the same MT5 server, and only their own
+    ``login`` (the MT5 account number) tells their accounts apart.
     """
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/mt5_credentials_test.db")
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -63,29 +72,24 @@ def users_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], dict[str, int
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="TA-A")
-            broker_b = Broker(name="Broker B", code="TA-B")
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="The Broker", code="TA-ONE", mt5_server=BROKER_SERVER)
+            session.add(broker)
             await session.flush()
             rows = {
                 "super_a": User(
-                    broker_id=broker_a.id, login="90001", password_hash="x-not-a-real-hash",
+                    broker_id=broker.id, login="90001", password_hash="x-not-a-real-hash",
                     is_active=True, role=UserRole.SUPER_ADMIN,
                 ),
                 "admin_a": User(
-                    broker_id=broker_a.id, login="90002", password_hash="x-not-a-real-hash",
+                    broker_id=broker.id, login="90002", password_hash="x-not-a-real-hash",
                     is_active=True, role=UserRole.ADMIN,
                 ),
                 "customer_a": User(
-                    broker_id=broker_a.id, login="90003", password_hash="x-not-a-real-hash",
+                    broker_id=broker.id, login="90003", password_hash="x-not-a-real-hash",
                     is_active=True, role=UserRole.CUSTOMER,
                 ),
-                "super_b": User(
-                    broker_id=broker_b.id, login="90004", password_hash="x-not-a-real-hash",
-                    is_active=True, role=UserRole.SUPER_ADMIN,
-                ),
                 "customer_b": User(
-                    broker_id=broker_b.id, login="90005", password_hash="x-not-a-real-hash",
+                    broker_id=broker.id, login="90004", password_hash="x-not-a-real-hash",
                     is_active=True, role=UserRole.CUSTOMER,
                 ),
             }
@@ -116,14 +120,12 @@ def auth_header(user_id: int) -> dict[str, str]:
 def credentials_payload(**extra: object) -> dict[str, object]:
     """Write-only MT5 investor-credential payload for provisioning tests.
 
-    Deliberately carries NO account number: the MT5 account is the target
-    user's own ``login``, and an ``mt5_login`` key is now an unknown field that
-    the request model refuses with 422.
+    Deliberately carries NEITHER an account number NOR a server: the MT5 account
+    is the target user's own ``login`` and the server is the broker's own
+    configuration, so an ``mt5_login`` or ``mt5_server`` key is an unknown field
+    that the request model refuses with 422.
     """
-    payload: dict[str, object] = {
-        "mt5_server": MT5_SERVER,
-        "mt5_investor_password": INVESTOR_SECRET,
-    }
+    payload: dict[str, object] = {"mt5_investor_password": INVESTOR_SECRET}
     payload.update(extra)
     return payload
 
@@ -136,6 +138,18 @@ def load_user(factory: async_sessionmaker[AsyncSession], user_id: int) -> User:
             user = await session.get(User, user_id)
             assert user is not None
             return user
+
+    return asyncio.run(load())
+
+
+def load_broker(factory: async_sessionmaker[AsyncSession]) -> Broker:
+    """The deployment's one broker row, read back in a fresh session."""
+
+    async def load() -> Broker:
+        async with factory() as session:
+            broker = await deps.load_deployment_broker(session)
+            assert broker is not None
+            return broker
 
     return asyncio.run(load())
 
@@ -240,7 +254,7 @@ def test_super_admin_may_provision_an_admin_returns_200(users_db) -> None:
         )
 
     assert response.status_code == 200
-    assert load_user(factory, ids["admin_a"]).mt5_server == MT5_SERVER
+    assert load_user(factory, ids["admin_a"]).mt5_password_encrypted is not None
 
 
 # --- provisioning contract ----------------------------------------------------
@@ -262,7 +276,7 @@ def test_admin_provisions_a_customer_credential(users_db) -> None:
     assert body == {
         "user_id": ids["customer_a"],
         "login": "90003",
-        "mt5_server": MT5_SERVER,
+        "mt5_server": BROKER_SERVER,
         "mt5_configured": True,
     }
     # The response schema has no password field at all, so the submitted secret
@@ -307,6 +321,7 @@ def test_credential_is_encrypted_at_rest_and_round_trips(users_db) -> None:
 def test_provisioning_writes_only_the_credential_columns(users_db) -> None:
     factory, ids = users_db
     before = load_user(factory, ids["customer_a"])
+    broker_before = load_broker(factory)
 
     with make_client(factory) as client:
         client.put(
@@ -324,13 +339,13 @@ def test_provisioning_writes_only_the_credential_columns(users_db) -> None:
         before.phone,
     )
     # The account number is the user's own login and is NOT part of what
-    # provisioning writes: only the server and the encrypted secret are.
+    # provisioning writes: only the encrypted secret is. There is no server
+    # column on the row to write either.
     assert after.login == "90003"
-    assert (after.mt5_server, after.mt5_password_encrypted) == (
-        MT5_SERVER,
-        after.mt5_password_encrypted,
-    )
+    assert not hasattr(after, "mt5_server")
     assert after.mt5_password_encrypted is not None
+    # The broker's own server is untouched by provisioning.
+    assert load_broker(factory).mt5_server == broker_before.mt5_server
 
 
 def test_reprovisioning_replaces_the_previous_credential(users_db) -> None:
@@ -345,13 +360,13 @@ def test_reprovisioning_replaces_the_previous_credential(users_db) -> None:
         first_ciphertext = load_user(factory, ids["customer_a"]).mt5_password_encrypted
         second = client.put(
             credentials_url(ids["customer_a"]),
-            json=credentials_payload(mt5_server="BrokerTest-Demo", mt5_investor_password=REPLACEMENT_SECRET),
+            json=credentials_payload(mt5_investor_password=REPLACEMENT_SECRET),
             headers=auth_header(ids["admin_a"]),
         )
 
     assert (first.status_code, second.status_code) == (200, 200)
     row = load_user(factory, ids["customer_a"])
-    assert (row.login, row.mt5_server) == ("90003", "BrokerTest-Demo")
+    assert row.login == "90003"
     assert row.mt5_password_encrypted is not None
     # A fresh encryption of a different secret: the stored value changed and the
     # replacement — not the original — is what decrypts.
@@ -359,34 +374,76 @@ def test_reprovisioning_replaces_the_previous_credential(users_db) -> None:
     assert decrypt_secret(row.mt5_password_encrypted) == REPLACEMENT_SECRET
 
 
-# --- tenant isolation ---------------------------------------------------------
+# --- customer-to-customer isolation -------------------------------------------
 
 
-def test_cross_broker_target_is_not_found_and_is_not_modified(users_db) -> None:
+def test_provisioning_one_customer_never_touches_another(users_db) -> None:
     factory, ids = users_db
+    other_before = load_user(factory, ids["customer_b"])
 
     with make_client(factory) as client:
-        # Broker A's admin targeting broker B's customer.
-        response = client.put(
+        # The admin provisions BOTH customers in turn: each write must land on
+        # exactly one row — its own target.
+        first = client.put(
+            credentials_url(ids["customer_a"]),
+            json=credentials_payload(mt5_investor_password=INVESTOR_SECRET),
+            headers=auth_header(ids["admin_a"]),
+        )
+        second = client.put(
             credentials_url(ids["customer_b"]),
-            json=credentials_payload(),
+            json=credentials_payload(mt5_investor_password=REPLACEMENT_SECRET),
             headers=auth_header(ids["admin_a"]),
         )
 
-    # Indistinguishable from a non-existent user: existence in another tenant is
-    # never revealed.
-    assert response.status_code == 404
-    row = load_user(factory, ids["customer_b"])
-    assert (row.mt5_server, row.mt5_password_encrypted) == (None, None)
+    assert (first.status_code, second.status_code) == (200, 200)
+    target = load_user(factory, ids["customer_a"])
+    other_after = load_user(factory, ids["customer_b"])
+    assert decrypt_secret(target.mt5_password_encrypted or "") == INVESTOR_SECRET
+    assert decrypt_secret(other_after.mt5_password_encrypted or "") == REPLACEMENT_SECRET
+    # The other customer's row is otherwise byte-for-byte what it was.
+    assert (other_after.login, other_after.role, other_after.broker_id) == (
+        other_before.login,
+        other_before.role,
+        other_before.broker_id,
+    )
 
 
-def test_cross_broker_read_is_not_found(users_db) -> None:
+def test_customer_cannot_read_another_customers_credential_status(users_db) -> None:
     factory, ids = users_db
 
     with make_client(factory) as client:
-        response = client.get(credentials_url(ids["customer_b"]), headers=auth_header(ids["super_a"]))
+        client.put(
+            credentials_url(ids["customer_a"]),
+            json=credentials_payload(),
+            headers=auth_header(ids["admin_a"]),
+        )
+        # Customer B asking about customer A: refused by role, before the target
+        # is even resolved, so nothing about A's configuration is disclosed.
+        response = client.get(credentials_url(ids["customer_a"]), headers=auth_header(ids["customer_b"]))
 
-    assert response.status_code == 404
+    assert response.status_code == 403
+    assert INVESTOR_SECRET not in response.text
+    assert "90003" not in response.text
+
+
+def test_each_customer_resolves_to_its_own_mt5_account(users_db) -> None:
+    """The one identity that must never be shared between two customers."""
+    factory, ids = users_db
+
+    with make_client(factory) as client:
+        client.put(credentials_url(ids["customer_a"]), json=credentials_payload(), headers=auth_header(ids["admin_a"]))
+        client.put(credentials_url(ids["customer_b"]), json=credentials_payload(), headers=auth_header(ids["admin_a"]))
+
+    broker = load_broker(factory)
+    customer_a = deps.resolve_mt5_account_credentials(load_user(factory, ids["customer_a"]), broker)
+    customer_b = deps.resolve_mt5_account_credentials(load_user(factory, ids["customer_b"]), broker)
+
+    # Same broker, same server, two different accounts — each its own login.
+    assert (customer_a.login, customer_b.login) == (90003, 90004)
+    assert customer_a.login != customer_b.login
+    assert (customer_a.server, customer_b.server) == (BROKER_SERVER, BROKER_SERVER)
+    # And two independently encrypted secrets, neither usable as the other.
+    assert customer_a.password_encrypted != customer_b.password_encrypted
 
 
 def test_unknown_user_returns_404(users_db) -> None:
@@ -421,16 +478,17 @@ def test_invalid_input_returns_422_and_writes_nothing(users_db) -> None:
     factory, ids = users_db
 
     with make_client(factory) as client:
-        # The removed account-number field is refused outright — even with a
-        # well-formed value, so provisioning can never target another account.
+        # Every attempt to re-aim the credential is refused outright — even with
+        # well-formed values — so provisioning can never target another account
+        # or another server.
         account_override = client.put(
             credentials_url(ids["customer_a"]),
             json=credentials_payload(mt5_login=MT5_LOGIN),
             headers=auth_header(ids["admin_a"]),
         )
-        empty_server = client.put(
+        server_override = client.put(
             credentials_url(ids["customer_a"]),
-            json=credentials_payload(mt5_server="   "),
+            json=credentials_payload(mt5_server="AnotherBroker-Live"),
             headers=auth_header(ids["admin_a"]),
         )
         empty_password = client.put(
@@ -439,13 +497,13 @@ def test_invalid_input_returns_422_and_writes_nothing(users_db) -> None:
             headers=auth_header(ids["admin_a"]),
         )
 
-    assert (account_override.status_code, empty_server.status_code, empty_password.status_code) == (422, 422, 422)
+    assert (account_override.status_code, server_override.status_code, empty_password.status_code) == (422, 422, 422)
     # No accepted credential is echoed, and a rejected request stores nothing.
-    for response in (account_override, empty_server, empty_password):
+    for response in (account_override, server_override, empty_password):
         assert INVESTOR_SECRET not in response.text
         assert "password_hash" not in response.text
     row = load_user(factory, ids["customer_a"])
-    assert (row.mt5_server, row.mt5_password_encrypted) == (None, None)
+    assert (row.login, row.mt5_password_encrypted) == ("90003", None)
 
 
 def test_rejected_value_may_be_echoed_by_validation_but_is_never_stored(users_db) -> None:
@@ -493,7 +551,25 @@ def test_missing_encryption_key_fails_closed_and_writes_nothing(
     assert INVESTOR_SECRET not in response.text
     row = load_user(factory, ids["customer_a"])
     # Fail closed: no plaintext and no partial write.
-    assert (row.mt5_server, row.mt5_password_encrypted) == (None, None)
+    assert row.mt5_password_encrypted is None
+
+
+def test_provisioning_refuses_when_the_deployment_has_no_mt5_server(users_db) -> None:
+    """A one-broker deployment IS one MT5 server; without it nothing can work."""
+    factory, ids = users_db
+    update_broker(factory, load_user(factory, ids["customer_a"]).broker_id, mt5_server=None)
+
+    with make_client(factory) as client:
+        response = client.put(
+            credentials_url(ids["customer_a"]),
+            json=credentials_payload(),
+            headers=auth_header(ids["admin_a"]),
+        )
+
+    # The established generic 503: which setting is missing stays server-side.
+    assert response.status_code == 503
+    assert INVESTOR_SECRET not in response.text
+    assert load_user(factory, ids["customer_a"]).mt5_password_encrypted is None
 
 
 # --- status read --------------------------------------------------------------
@@ -512,11 +588,12 @@ def test_get_reports_status_without_the_password(users_db) -> None:
         after = client.get(credentials_url(ids["customer_a"]), headers=auth_header(ids["admin_a"]))
 
     assert before.status_code == 200
-    # Broker A has no mt5_server, so the legacy fallback yields no server yet.
+    # The server is the deployment's own, known before any credential exists;
+    # what the first call reports as not yet configured is the SECRET.
     assert before.json() == {
         "user_id": ids["customer_a"],
         "login": "90003",
-        "mt5_server": None,
+        "mt5_server": BROKER_SERVER,
         "mt5_configured": False,
     }
     assert set(after.json().keys()) == RESPONSE_FIELDS
@@ -524,11 +601,26 @@ def test_get_reports_status_without_the_password(users_db) -> None:
     assert "password" not in after.text
 
 
+def test_admin_sees_the_status_of_every_customer_it_manages(users_db) -> None:
+    factory, ids = users_db
+
+    with make_client(factory) as client:
+        client.put(credentials_url(ids["customer_a"]), json=credentials_payload(), headers=auth_header(ids["admin_a"]))
+        customer_a = client.get(credentials_url(ids["customer_a"]), headers=auth_header(ids["admin_a"]))
+        customer_b = client.get(credentials_url(ids["customer_b"]), headers=auth_header(ids["admin_a"]))
+
+    assert (customer_a.status_code, customer_b.status_code) == (200, 200)
+    # Each status answers for its own account, and only the provisioned one
+    # reports configured.
+    assert customer_a.json()["login"] == "90003" and customer_a.json()["mt5_configured"] is True
+    assert customer_b.json()["login"] == "90004" and customer_b.json()["mt5_configured"] is False
+
+
 def test_row_with_broker_level_server_and_password_is_reported_configured(users_db) -> None:
     factory, ids = users_db
-    # A tenant-level configuration (server and password on the row/broker, the
-    # account number being the user's own login) must count as configured.
-    update_broker(factory, _broker_id_of(factory, ids["customer_a"]), mt5_server="BrokerLegacy-Live")
+    # The account number is the user's own login and the server is the broker's
+    # configuration, so a stored secret on the row is the whole credential.
+    update_broker(factory, load_user(factory, ids["customer_a"]).broker_id, mt5_server="BrokerLegacy-Live")
 
     async def seed_password() -> None:
         async with factory() as session:
@@ -550,33 +642,11 @@ def test_row_with_broker_level_server_and_password_is_reported_configured(users_
     }
 
 
-def _broker_id_of(factory: async_sessionmaker[AsyncSession], user_id: int) -> int:
-    return load_user(factory, user_id).broker_id
-
-
 # --- resolution precedence (composition root) ---------------------------------
 
 
-def test_resolution_uses_the_login_and_the_users_own_server() -> None:
-    broker = Broker(name="Broker A", code="RA", mt5_server="BrokerFallback-Live")
-    user = User(
-        broker_id=1,
-        login="90003",
-        password_hash="x",
-        mt5_server=MT5_SERVER,
-        mt5_password_encrypted="cipher",
-        is_active=True,
-        role=UserRole.CUSTOMER,
-    )
-
-    resolved = deps.resolve_mt5_account_credentials(user, broker)
-
-    assert (resolved.login, resolved.server) == (90003, MT5_SERVER)
-    assert resolved.password_encrypted == "cipher"
-
-
 def test_resolution_uses_the_login_and_the_broker_server() -> None:
-    broker = Broker(name="Broker A", code="RA", mt5_server="BrokerFallback-Live")
+    broker = Broker(name="The Broker", code="RA", mt5_server="BrokerFallback-Live")
     user = User(
         broker_id=1,
         login="90003",
@@ -589,10 +659,33 @@ def test_resolution_uses_the_login_and_the_broker_server() -> None:
     resolved = deps.resolve_mt5_account_credentials(user, broker)
 
     assert (resolved.login, resolved.server) == (90003, "BrokerFallback-Live")
+    assert resolved.password_encrypted == "cipher"
+
+
+def test_a_user_row_cannot_carry_an_mt5_server() -> None:
+    """The per-user server override is structurally gone, not merely ignored."""
+    user = User(
+        broker_id=1,
+        login="90003",
+        password_hash="x",
+        mt5_password_encrypted="cipher",
+        is_active=True,
+        role=UserRole.CUSTOMER,
+    )
+
+    assert not hasattr(user, "mt5_server")
+    assert not hasattr(user, "mt5_login")
+
+
+def test_the_server_is_only_the_brokers_own() -> None:
+    """No broker and a blank broker both fail closed; nothing else sets a server."""
+    assert deps.effective_mt5_server(None) is None
+    assert deps.effective_mt5_server(Broker(name="B", code="B", mt5_server="   ")) is None
+    assert deps.effective_mt5_server(Broker(name="B", code="B", mt5_server=" Broker-Live ")) == "Broker-Live"
 
 
 def test_non_numeric_login_is_not_an_mt5_login() -> None:
-    broker = Broker(name="Broker A", code="RA", mt5_server="BrokerFallback-Live")
+    broker = Broker(name="The Broker", code="RA", mt5_server="BrokerFallback-Live")
     user = User(
         broker_id=1,
         login="customer-without-mt5",
@@ -616,11 +709,11 @@ def test_provisioned_secret_reaches_the_session_boundary_masked(users_db) -> Non
         )
 
     row = load_user(factory, ids["customer_a"])
-    credentials = deps.resolve_mt5_account_credentials(row, Broker(name="B", code="B", mt5_server=MT5_SERVER))
+    credentials = deps.resolve_mt5_account_credentials(row, Broker(name="B", code="B", mt5_server=BROKER_SERVER))
 
     # The session boundary receives exactly the provisioned identity plus the
     # CIPHERTEXT — and its repr cannot carry the ciphertext either.
-    assert (credentials.login, credentials.server) == (90003, MT5_SERVER)
+    assert (credentials.login, credentials.server) == (90003, BROKER_SERVER)
     assert credentials.password_encrypted is not None
     assert INVESTOR_SECRET not in repr(credentials)
     assert credentials.password_encrypted not in repr(credentials)

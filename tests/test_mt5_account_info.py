@@ -33,11 +33,17 @@ class FakeMT5:
         initialize_result: object = True,
         initialize_error: Exception | None = None,
         account_info_result: object = None,
+        account_info_results: list[object] | None = None,
         account_info_error: Exception | None = None,
     ):
         self.initialize_result = initialize_result
         self.initialize_error = initialize_error
         self.account_info_result = account_info_result
+        # Queued answers, consumed before ``account_info_result``. An Exception
+        # instance is raised instead of returned, which is how a test lets the
+        # session boundary's identity verification succeed and the provider's
+        # OWN read then fail or find nothing.
+        self._account_info_queue = list(account_info_results or [])
         self.account_info_error = account_info_error
         self.authenticate_calls: list[dict[str, object]] = []
         self.accessed: list[str] = []
@@ -62,10 +68,34 @@ class FakeMT5:
         return (-1, "simulated MT5 failure")
 
     def account_info(self) -> object:
+        """The terminal's record for the account it is authenticated as.
+
+        The configured payload carries the account data the provider maps; its
+        identity fields come from the account this fake last authenticated, so
+        the session boundary's verification sees the tenant that asked for the
+        read instead of the payload's fixed demo identity.
+        """
         self._record("account_info")
         if self.account_info_error is not None:
             raise self.account_info_error
-        return self.account_info_result
+        if self._account_info_queue:
+            result = self._account_info_queue.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+        else:
+            result = self.account_info_result
+        if result is None:
+            return None
+        last_auth = self.authenticate_calls[-1] if self.authenticate_calls else None
+        if last_auth is None:  # pragma: no cover - every read authenticates first
+            return result
+        try:
+            fields = dict(vars(result))
+        except TypeError:  # pragma: no cover - not a record-like payload
+            return result
+        fields["login"] = last_auth["login"]
+        fields["server"] = last_auth["server"]
+        return SimpleNamespace(**fields)
 
 
 # A realistic MT5 account_info() payload (attribute access, not a dict).
@@ -200,20 +230,38 @@ def test_initialize_raising_external_exception_translated_to_runtime_error(provi
 
 
 def test_account_info_returning_none_raises_runtime_error(provider):
+    # The boundary's identity verification gets the first answer; the provider's
+    # own read then finds the account gone ("no account" is not "no data").
+    fake = FakeMT5(account_info_results=[MT5_ACCOUNT, None])
+
     with pytest.raises(RuntimeError) as exc_info:
-        provider(FakeMT5(account_info_result=None)).get_account_info()
+        provider(fake).get_account_info()
 
     assert "account information unavailable" in str(exc_info.value)
 
 
 def test_account_info_raising_external_exception_translated_to_runtime_error(provider):
-    fake = FakeMT5(account_info_error=OSError("simulated terminal disconnect"))
+    # Verification succeeds, then the provider's own read hits the terminal
+    # failure: the provider — not the session boundary — translates it.
+    fake = FakeMT5(
+        account_info_results=[MT5_ACCOUNT, OSError("simulated terminal disconnect")]
+    )
 
     with pytest.raises(RuntimeError) as exc_info:
         provider(fake).get_account_info()
 
     assert str(exc_info.value) == "MT5 account information request failed"
     assert isinstance(exc_info.value.__cause__, OSError)
+
+
+def test_provider_rereads_the_verified_account(provider):
+    fake = FakeMT5(account_info_result=MT5_ACCOUNT)
+
+    info = provider(fake).get_account_info()
+
+    # One verification read by the session boundary plus the provider's own read.
+    assert fake.accessed.count("account_info") == 2
+    assert info.login == 10001 and info.server == SERVER
 
 
 # --- read-only guarantee ----------------------------------------------------------------

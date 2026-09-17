@@ -9,7 +9,7 @@ position's factual fundamental exposure — for an optional focus instrument
 Strictly read-only intelligence: no forecast, no probability, no direction, no
 trading action, and no endpoint here can mutate anything. Tenant identity comes
 only from the authenticated database user, so a caller can never read another
-tenant's positions.
+customer's positions.
 """
 from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -133,17 +133,17 @@ class ResearchContextResponse(BaseModel):
 
 
 class FinancialResearchResponse(BaseModel):
-    # broker_id is the authenticated user's own tenant identity, echoed for the
+    # broker_id is the authenticated user's own broker (this deployment's single broker), echoed for the
     # client; it is never accepted as request input. The research context itself
-    # is instrument/window data with no tenant-sensitive content, so the echo is
-    # the response's only tenant fact.
+    # is instrument/window data with no customer-sensitive content, so the echo is
+    # the response's only customer fact.
     broker_id: int
     as_of: datetime
     window_from: datetime
     window_to: datetime
     # The instruments actually researched, in the BROKER's own canonical
     # spelling (Step 51): a request for "xauusd.r" is answered with "XAUUSD.r".
-    # A requested name this tenant's broker does not offer is never echoed here
+    # A requested name this customer's broker does not offer is never echoed here
     # because the request fails closed with 404 instead.
     focus_symbols: list[str]
     # The set everything was graded against: the focus symbols themselves
@@ -153,7 +153,7 @@ class FinancialResearchResponse(BaseModel):
 
 
 class FundamentalIntelligenceResponse(BaseModel):
-    # broker_id is the authenticated user's own tenant identity, echoed for the
+    # broker_id is the authenticated user's own broker (this deployment's single broker), echoed for the
     # client; it is never accepted as request input.
     broker_id: int
     as_of: datetime
@@ -195,7 +195,7 @@ def _calendar_context(context: FundamentalContext) -> CalendarContextResponse:
 @router.get("/fundamental-intelligence/today", response_model=FundamentalIntelligenceResponse)
 async def get_todays_fundamental_intelligence(
     # Optional focus instrument (e.g. XAUUSD). It is only a label for relevance
-    # computation: tenant scope still comes solely from the authenticated user.
+    # computation: customer scope still comes solely from the authenticated user.
     symbol: str | None = Query(
         None,
         min_length=1,
@@ -289,12 +289,12 @@ async def get_todays_financial_research(
 ) -> FinancialResearchResponse:
     """Graded published-source news for an explicit window and instrument(s).
 
-    Read-only research context: no account, no positions, no tenant data beyond
+    Read-only research context: no account, no positions, no customer data beyond
     the broker_id echo. The window must be UTC-aware and half-open; the focus
     symbols are labels for relevance grading only and never widen what is read.
 
     Step 51: every requested instrument is resolved against the authenticated
-    tenant's own MT5 catalog before anything is researched. A name this broker
+    customer's own MT5 catalog before anything is researched. A name this broker
     does not offer fails closed (404) instead of being researched as an
     unverified spelling, and the response echoes the broker's canonical symbols.
     """
@@ -310,9 +310,9 @@ async def get_todays_financial_research(
 
     # Resolution and research both read MT5/the news source, so each blocking
     # call is offloaded through the consolidated MT5 blocking boundary. The
-    # resolved symbols are then handed to build_research, which verifies them
-    # again against the same catalog: the research context can only ever grade
-    # broker-confirmed spellings, whatever its caller does.
+    # resolution computed here is handed to build_research, which grades ONLY
+    # the broker-confirmed spellings it carries — the same guarantee as before,
+    # but the catalog is no longer read a second time for the same request.
     try:
         resolution: FocusResolution = await run_mt5_call(
             research_service.resolve_focus_symbols, requested_symbols
@@ -338,7 +338,7 @@ async def get_todays_financial_research(
         return research_service.build_research(
             from_time,
             to_time,
-            focus_symbols=resolution.resolved,
+            resolution=resolution,
         )
 
     try:

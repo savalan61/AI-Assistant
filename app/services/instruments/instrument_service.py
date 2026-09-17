@@ -18,6 +18,7 @@ catalog, and the fundamental relevance profiles in
 ``app.services.instrument_intelligence`` stay an optional intelligence
 enhancement layered on top, never a prerequisite.
 """
+from collections.abc import Iterable
 from typing import NamedTuple
 
 from app.providers.instrument import Instrument, InstrumentProvider
@@ -108,8 +109,59 @@ class InstrumentCatalog(NamedTuple):
     truncated: bool
 
 
+class InstrumentResolution(NamedTuple):
+    """One requested name's outcome, resolved against one catalog snapshot.
+
+    ``requested`` is the caller's name after normalisation, so a batch caller can
+    pair outcomes with its own input. ``instrument`` is the broker's own record
+    when the name resolved (exactly, case-insensitively, or through a unique
+    broker decoration), and ``reason`` is then ``None``. When the name did not
+    resolve, ``instrument`` is ``None`` and ``reason`` is the very message
+    ``resolve()`` raises for that name — so the batch path reports WHY with the
+    same wording, and never invents a reason of its own.
+    """
+
+    requested: str
+    instrument: Instrument | None
+    reason: str | None
+
+
+def _match_from_catalog(
+    requested: str, catalog: tuple[Instrument, ...]
+) -> tuple[Instrument | None, str | None]:
+    """Apply the catalog-fallback rules to one requested name.
+
+    The single implementation of Steps 52-54 semantics — first a unique
+    case-insensitive match, then a unique broker-DECORATED spelling — shared by
+    the single-name and multi-name entry points, so the two can never disagree.
+    Returns ``(instrument, None)`` for a unique match and ``(None, reason)``
+    otherwise; the reason is exactly the ``ValueError`` message a caller raises.
+    """
+    matches = tuple(
+        instrument for instrument in catalog if instrument.symbol.casefold() == requested.casefold()
+    )
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        # Distinct broker symbols that differ only by case: guessing one
+        # would silently resolve the wrong instrument.
+        return None, f"Instrument name is ambiguous: {requested}"
+
+    suffix_matches = tuple(
+        instrument for instrument in catalog if _is_broker_suffix_variant(instrument.symbol, requested)
+    )
+    if len(suffix_matches) == 1:
+        return suffix_matches[0], None
+    if len(suffix_matches) > 1:
+        # Several suffixed variants of the same base (XAUUSD.r and XAUUSD.m):
+        # they are different instruments, so picking one would be a guess. The
+        # caller must name the spelling it wants.
+        return None, f"Instrument name is ambiguous: {requested}"
+    return None, f"MT5 does not offer instrument {requested}"
+
+
 class InstrumentService:
-    """Read-only instrument discovery for the authenticated tenant's broker.
+    """Read-only instrument discovery for the authenticated customer's broker.
 
     Boundary: API -> InstrumentService -> InstrumentProvider -> MT5. The service
     never holds credentials, never talks to MT5 directly and never mutates
@@ -145,43 +197,67 @@ class InstrumentService:
 
         Unknown or ambiguous input raises ValueError (a client error); an MT5
         availability failure raised by the provider propagates as RuntimeError.
+
+        This is exactly ``resolve_many((symbol,))`` promoted to an exception: one
+        name, at most one catalog read, and the same rules the multi-name path
+        applies, so the two can never drift apart.
         """
-        requested = normalize_symbol(symbol)
-        try:
-            return self._provider.get_instrument(requested)
-        except ValueError:
-            pass
+        outcome = self.resolve_many((symbol,))[0]
+        if outcome.instrument is None:
+            # An unresolved outcome always carries the reason, and that reason is
+            # the message this method has always raised for that name.
+            raise ValueError(outcome.reason)
+        return outcome.instrument
 
-        # Only reached for a spelling the terminal did not recognise directly.
-        # One catalog read serves both remaining steps, so resolution never
-        # costs more than one extra vendor call.
-        catalog = self._catalog()
+    def resolve_many(self, symbols: Iterable[str]) -> tuple[InstrumentResolution, ...]:
+        """Resolve several requested symbols against ONE catalog snapshot.
 
-        matches = tuple(
-            instrument
-            for instrument in catalog
-            if instrument.symbol.casefold() == requested.casefold()
-        )
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            # Distinct broker symbols that differ only by case: guessing one
-            # would silently resolve the wrong instrument.
-            raise ValueError(f"Instrument name is ambiguous: {requested}")
+        The same deterministic rules ``resolve()`` applies to one name (the exact
+        spelling, then a unique case-insensitive match, then a unique
+        broker-decorated spelling), applied to each name in order — but the
+        broker's catalog is discovered AT MOST ONCE for the whole operation.
 
-        suffix_matches = tuple(
-            instrument
-            for instrument in catalog
-            if _is_broker_suffix_variant(instrument.symbol, requested)
-        )
-        if len(suffix_matches) == 1:
-            return suffix_matches[0]
-        if len(suffix_matches) > 1:
-            # Several suffixed variants of the same base (XAUUSD.r and
-            # XAUUSD.m): they are different instruments, so picking one would be
-            # a guess. The caller must name the spelling it wants.
-            raise ValueError(f"Instrument name is ambiguous: {requested}")
-        raise ValueError(f"MT5 does not offer instrument {requested}")
+        Why it exists: the MT5 Python API serializes every read on the one
+        process-wide session, so scanning the same catalog once per requested
+        name made a request that named several suffixed instruments pay a
+        catalog read per name for data that cannot change between them. Here the
+        exact lookups run first (one vendor call each, exactly as before), and
+        the first name that needs the fallback triggers the single catalog read
+        that every remaining name then reuses. A catalog read still happens only
+        when a name actually needs it: resolving names the terminal spells
+        exactly costs no scan at all.
+
+        Request-local by construction: the snapshot is a local variable of this
+        call. Nothing is cached on the service, nothing is shared between calls,
+        requests or customers, and the caller's ordering is preserved (one outcome
+        per requested name, in input order; a repeated name is looked up again
+        rather than deduplicated here).
+
+        ``ValueError`` from input normalisation still propagates (a malformed
+        name is a caller error, not an unresolved instrument), and an MT5
+        availability failure still propagates as ``RuntimeError`` — an
+        infrastructure failure is never reported as "the broker does not offer
+        it".
+        """
+        requested = tuple(normalize_symbol(symbol) for symbol in symbols)
+        catalog: tuple[Instrument, ...] | None = None
+        outcomes: list[InstrumentResolution] = []
+        for name in requested:
+            try:
+                instrument = self._provider.get_instrument(name)
+            except ValueError:
+                # Only reached for a spelling the terminal did not recognise
+                # directly. ONE catalog read serves every remaining name in this
+                # operation, and none is made when no name needs it.
+                if catalog is None:
+                    catalog = self._catalog()
+                matched, reason = _match_from_catalog(name, catalog)
+                if matched is None:
+                    outcomes.append(InstrumentResolution(requested=name, instrument=None, reason=reason))
+                    continue
+                instrument = matched
+            outcomes.append(InstrumentResolution(requested=name, instrument=instrument, reason=None))
+        return tuple(outcomes)
 
     def list_instruments(self, search: str | None = None) -> InstrumentCatalog:
         """List (optionally search) the broker's instruments, bounded and ordered.

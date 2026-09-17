@@ -25,7 +25,7 @@ accepted and reported under the profile's canonical symbol. Commodity words and
 bare currencies are still refused, so a topic word can never silently become the
 user's instrument.
 
-Detection is a LABEL, never a scope decision: the caller's tenant identity and
+Detection is a LABEL, never a scope decision: the caller's customer identity and
 the positions it may see still come only from the authenticated user, so a
 detected symbol can never widen what is read.
 """

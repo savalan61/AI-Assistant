@@ -38,12 +38,13 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def crud_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], dict[str, int]]":
-    """Seed two brokers.
+    """Seed the deployment's ONE broker: super_admin, admin and two customers.
 
-    Broker A: super_admin (id in ids["super_a"]), admin (ids["admin_a"]),
-    customer (ids["customer_a"]). Broker B: super_admin (ids["super_b"]) and
-    customer (ids["customer_b"]) — the cross-tenant target. Yields (factory,
-    ids dict).
+    ids["super_a"]/["admin_a"]/["customer_a"]/["customer_b"] are all rows of the
+    single brokers row, because a one-broker deployment has no second tenant.
+    Two customers keep the customer-to-customer boundary testable: they are
+    separate accounts that neither role may confuse with one another.
+    Yields (factory, ids dict).
     """
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/users_crud_test.db")
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -54,9 +55,8 @@ def crud_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], dict[str, int]
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="UC-A")
-            broker_b = Broker(name="Broker B", code="UC-B")
-            session.add_all([broker_a, broker_b])
+            broker_a = Broker(name="The Broker", code="UC-ONE", mt5_server="TheBroker-Live")
+            session.add(broker_a)
             await session.flush()
             rows = {
                 "super_a": User(
@@ -81,17 +81,11 @@ def crud_db(tmp_path) -> "tuple[async_sessionmaker[AsyncSession], dict[str, int]
                     is_active=True,
                     role=UserRole.CUSTOMER,
                 ),
-                "super_b": User(
-                    broker_id=broker_b.id,
-                    login="999904",
-                    password_hash=hash_password(PASSWORD),
-                    is_active=True,
-                    role=UserRole.SUPER_ADMIN,
-                ),
                 "customer_b": User(
-                    broker_id=broker_b.id,
+                    broker_id=broker_a.id,
                     login="999905",
                     password_hash="x-not-a-real-hash",
+                    email="customer.b@broker.example",
                     is_active=True,
                     role=UserRole.CUSTOMER,
                 ),
@@ -217,9 +211,8 @@ def test_cannot_create_second_super_admin(crud_db) -> None:
     assert response.status_code == 422
     async def count_super() -> int:
         async with factory() as session:
-            result = await session.execute(
-                select(User).where(User.role == UserRole.SUPER_ADMIN, User.broker_id == 1)
-            )
+            # Deployment-wide: exactly one super_admin exists, period.
+            result = await session.execute(select(User).where(User.role == UserRole.SUPER_ADMIN))
             return len(result.scalars().all())
 
     assert asyncio.run(count_super()) == 1
@@ -417,24 +410,49 @@ def test_delete_unknown_user_is_404(crud_db) -> None:
     assert response.status_code == 404
 
 
-# --- cross-tenant isolation ----------------------------------------------------
+# --- a foreign user row is inert, not a second tenant ---------------------------
 
 
-def test_cross_broker_get_update_delete_are_404(crud_db) -> None:
-    """A broker-B id is indistinguishable from a non-existent one (Step 38 convention)."""
+def test_a_user_row_of_any_other_broker_is_indistinguishable_from_missing(crud_db) -> None:
+    """Broker identity is a data-integrity invariant, not a selector.
+
+    A row pointing at any other broker id (a leftover, or a bad migration) is
+    neither part of this deployment nor usable: it is reported with exactly the
+    same 404 as a non-existent id, and it is never modified. Its existence is
+    therefore invisible through the API — which is what keeps one broker's data
+    from becoming another broker's control plane.
+    """
     factory, ids = crud_db
     headers = super_header(ids)
-    with make_client(factory) as client:
-        get_response = client.get(f"/users/{ids['customer_b']}", headers=headers)
-        patch_response = client.patch(
-            f"/users/{ids['customer_b']}", json={"is_active": False}, headers=headers
-        )
-        delete_response = client.delete(f"/users/{ids['customer_b']}", headers=headers)
 
-    assert get_response.status_code == 404
-    assert patch_response.status_code == 404
-    assert delete_response.status_code == 404
-    row = load_user(factory, ids["customer_b"])
+    async def insert_foreign_row() -> int:
+        from sqlalchemy import text
+
+        async with factory() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO users (broker_id, login, password_hash, is_active, role) "
+                    "VALUES (4242, '999999', 'x-not-a-real-hash', 1, 'customer')"
+                )
+            )
+            await session.commit()
+            result = await session.execute(text("SELECT id FROM users WHERE login = '999999'"))
+            return int(result.scalar_one())
+
+    foreign_id = asyncio.run(insert_foreign_row())
+
+    with make_client(factory) as client:
+        get_response = client.get(f"/users/{foreign_id}", headers=headers)
+        patch_response = client.patch(f"/users/{foreign_id}", json={"is_active": False}, headers=headers)
+        delete_response = client.delete(f"/users/{foreign_id}", headers=headers)
+        # The same answer for an id that does not exist at all: the two are
+        # indistinguishable, so existence elsewhere is never revealed.
+        missing_response = client.get("/users/424242", headers=headers)
+
+    assert (get_response.status_code, patch_response.status_code, delete_response.status_code) == (404, 404, 404)
+    assert get_response.status_code == missing_response.status_code
+    assert get_response.json() == missing_response.json()
+    row = load_user(factory, foreign_id)
     assert row is not None and row.is_active is True  # untouched
 
 

@@ -146,11 +146,18 @@ class _RecordingEconomicService(EconomicIntelligenceService):
         self.context = context
         self.error = error
         self.calls: list[datetime | None] = []
+        self.position_snapshots: list[tuple[Position, ...] | None] = []
 
     def build_today_context(
-        self, minimum_impact: EventImpact | None = None, now: datetime | None = None
+        self,
+        minimum_impact: EventImpact | None = None,
+        now: datetime | None = None,
+        positions: tuple[Position, ...] | None = None,
     ) -> EconomicIntelligenceContext:
         self.calls.append(now)
+        # The snapshot the agent reuses is recorded so tests can prove the
+        # duplicated read is gone (the agent passes the financial context's own).
+        self.position_snapshots.append(positions)
         if self.error is not None:
             raise self.error
         assert self.context is not None
@@ -444,10 +451,13 @@ def test_the_financial_context_is_read_before_the_calendar() -> None:
 
     class _OrderedEconomic(_RecordingEconomicService):
         def build_today_context(
-            self, minimum_impact: EventImpact | None = None, now: datetime | None = None
+            self,
+            minimum_impact: EventImpact | None = None,
+            now: datetime | None = None,
+            positions: tuple[Position, ...] | None = None,
         ) -> EconomicIntelligenceContext:
             order.append("economic")
-            return super().build_today_context(minimum_impact, now)
+            return super().build_today_context(minimum_impact, now, positions)
 
     agent = AgentService(
         _OrderedFinancial(make_financial_context()),

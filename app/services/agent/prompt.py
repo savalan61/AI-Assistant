@@ -41,7 +41,7 @@ Six deliberate restrictions on what is sent:
   agent composed one: the same graded news — SAME item renderer, SAME discrete
   relevance levels, SAME factor notes — for the explicit look-back window that
   precedes the calendar window and the instruments the request names. It carries
-  no account, position or tenant data by construction. Its window is stated in
+  no account, position or customer data by construction. Its window is stated in
   the header so the model can never read look-back facts as belonging to today,
   and its provenance marker travels exactly as the other blocks' does;
 * account identity is omitted (login, holder name, server, account number).
@@ -409,7 +409,7 @@ def _research_block(research: FinancialResearchContext) -> list[str]:
     Same discipline as the fundamental block — published source facts, not
     analysis, with the provenance marker — plus an explicit window statement so
     look-back items can never be read as belonging to today. No account, no
-    position and no tenant data exists in this context by construction.
+    position and no customer data exists in this context by construction.
     """
     news_source = research.news_data_source if research.news_available else "unavailable"
     lines = [

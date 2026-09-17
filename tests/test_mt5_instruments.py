@@ -17,7 +17,14 @@ from app.providers.mt5_instruments import MT5InstrumentProvider
 
 # The only MT5 functions a read-only instrument-discovery provider may ever
 # touch (the session boundary authenticates; the provider itself only reads).
-ALLOWED_MT5_FUNCTIONS = {"initialize", "login", "last_error", "symbol_info", "symbols_get"}
+ALLOWED_MT5_FUNCTIONS = {
+    "initialize",
+    "login",
+    "last_error",
+    "symbol_info",
+    "symbols_get",
+    "account_info",
+}
 TRADING_FUNCTIONS = {
     "order_send",
     "order_check",
@@ -80,6 +87,19 @@ class FakeMT5:
     def last_error(self) -> tuple[int, str]:
         self._record("last_error")
         return (-1, "simulated MT5 failure")
+
+    def account_info(self) -> object:
+        """The terminal reports the account it is authenticated as.
+
+        The session boundary verifies this against the requesting tenant before
+        every read, so the fake reports whatever account it last authenticated
+        (see ``authenticate_calls``) — exactly as a real terminal would.
+        """
+        self._record("account_info")
+        last_auth = self.authenticate_calls[-1] if self.authenticate_calls else None
+        if last_auth is None:  # pragma: no cover - every read authenticates first
+            return None
+        return SimpleNamespace(login=last_auth["login"], server=last_auth["server"])
 
     def symbol_info(self, symbol: str) -> object:
         self._record("symbol_info")

@@ -140,54 +140,54 @@ def test_placeholder_api_key_leaves_the_free_pool_empty(
     assert deps.get_free_llm_pool().size == 0
 
 
-# --- get_llm_provider: broker-aware router selection ---------------------------------
+# --- get_llm_provider: deployment-configured router selection ---------------------------------
 
 
-def test_no_active_broker_config_selects_the_free_pool(
+def test_no_active_configuration_selects_the_free_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def no_configured_provider(*, session: object) -> LLMProvider | None:
         return None
 
     free_provider = FakeLLMProvider(response="from free pool")
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "resolve_llm_provider", no_configured_provider)
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: free_provider)
 
-    provider = asyncio.run(deps.get_llm_provider(7, object()))
+    provider = asyncio.run(deps.get_llm_provider(object()))
 
     assert isinstance(provider, LLMRouter)
-    assert provider.uses_broker_provider is False
-    assert provider.broker_id == 7
+    # No configured provider for this deployment -> the shared free pool applies.
+    assert provider.uses_configured_provider is False
 
 
-def test_active_broker_config_selects_the_broker_provider(
+def test_active_configuration_selects_the_configured_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    broker_provider = FakeLLMProvider(response="from broker provider")
+    configured_provider = FakeLLMProvider(response="from the configured provider")
 
-    async def with_broker_provider(*, session: object, broker_id: int) -> LLMProvider:
-        return broker_provider
+    async def with_configured_provider(*, session: object) -> LLMProvider:
+        return configured_provider
 
     free_provider = FakeLLMProvider(response="from free pool")
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", with_broker_provider)
+    monkeypatch.setattr(deps, "resolve_llm_provider", with_configured_provider)
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: free_provider)
 
-    provider = asyncio.run(deps.get_llm_provider(7, object()))
+    provider = asyncio.run(deps.get_llm_provider(object()))
 
     assert isinstance(provider, LLMRouter)
-    assert provider.uses_broker_provider is True
+    assert provider.uses_configured_provider is True
 
 
 def test_broker_configuration_error_surfaces_as_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def broken_config(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def broken_config(*, session: object) -> LLMProvider | None:
         raise BrokerLLMConfigurationError("broker LLM credentials are unavailable")
 
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", broken_config)
+    monkeypatch.setattr(deps, "resolve_llm_provider", broken_config)
 
     with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(deps.get_llm_provider(7, object()))
+        asyncio.run(deps.get_llm_provider(object()))
 
     assert excinfo.value.status_code == 503
     assert excinfo.value.detail == "Agent service temporarily unavailable"
@@ -201,10 +201,10 @@ def test_broker_configuration_error_is_translated_before_any_mt5_work(
 ) -> None:
     # The seam must run before provider construction: a broker configuration
     # failure costs no MT5 initialization attempt.
-    async def broken_config(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def broken_config(*, session: object) -> LLMProvider | None:
         raise BrokerLLMConfigurationError("broken")
 
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", broken_config)
+    monkeypatch.setattr(deps, "resolve_llm_provider", broken_config)
 
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(deps.get_agent_service(make_user(), object()))
@@ -216,11 +216,11 @@ def test_broker_configuration_error_is_translated_before_any_mt5_work(
 def test_agent_service_is_built_with_the_router_over_the_free_pool(
     monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
 ) -> None:
-    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def no_configured_provider(*, session: object) -> LLMProvider | None:
         return None
 
     free_provider = FakeLLMProvider()
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "resolve_llm_provider", no_configured_provider)
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: free_provider)
 
     service = asyncio.run(deps.get_agent_service(make_user(), object()))
@@ -235,10 +235,10 @@ def test_agent_service_is_built_with_the_router_over_the_free_pool(
 def test_agent_service_reuses_the_single_mt5_composition_paths(
     monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
 ) -> None:
-    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def no_configured_provider(*, session: object) -> LLMProvider | None:
         return None
 
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "resolve_llm_provider", no_configured_provider)
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
 
     first = asyncio.run(deps.get_agent_service(make_user(), object()))
@@ -274,10 +274,10 @@ def test_outbound_data_policy_comes_from_settings(monkeypatch: pytest.MonkeyPatc
 def test_agent_service_is_built_with_the_configured_policy(
     monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
 ) -> None:
-    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def no_configured_provider(*, session: object) -> LLMProvider | None:
         return None
 
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "resolve_llm_provider", no_configured_provider)
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
     monkeypatch.setattr(settings, "LLM_SEND_TRADE_HISTORY", False, raising=True)
 
@@ -290,10 +290,10 @@ def test_agent_service_is_built_with_the_configured_policy(
 def test_agent_service_is_built_with_the_economic_intelligence_service(
     monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
 ) -> None:
-    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def no_configured_provider(*, session: object) -> LLMProvider | None:
         return None
 
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "resolve_llm_provider", no_configured_provider)
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
 
     service = asyncio.run(deps.get_agent_service(make_user(), object()))
@@ -307,10 +307,10 @@ def test_agent_service_is_built_with_the_economic_intelligence_service(
 def test_agent_service_is_built_with_the_fundamental_intelligence_service(
     monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
 ) -> None:
-    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def no_configured_provider(*, session: object) -> LLMProvider | None:
         return None
 
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "resolve_llm_provider", no_configured_provider)
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
     # Pin the news source the same way the calendar source is pinned elsewhere:
     # the deterministic development feed, never a local machine's selection.
@@ -332,10 +332,10 @@ def test_agent_service_is_built_with_the_fundamental_intelligence_service(
 def test_agent_service_is_built_with_the_financial_research_service(
     monkeypatch: pytest.MonkeyPatch, inert_mt5_providers
 ) -> None:
-    async def no_broker_provider(*, session: object, broker_id: int) -> LLMProvider | None:
+    async def no_configured_provider(*, session: object) -> LLMProvider | None:
         return None
 
-    monkeypatch.setattr(deps, "resolve_broker_llm_provider", no_broker_provider)
+    monkeypatch.setattr(deps, "resolve_llm_provider", no_configured_provider)
     monkeypatch.setattr(deps, "get_free_llm_pool", lambda: FakeLLMProvider())
     # Pin the source the same way the fundamental wiring test above does: the
     # deterministic development feed, never a local machine's selection.

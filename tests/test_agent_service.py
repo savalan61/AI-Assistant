@@ -424,9 +424,13 @@ def test_context_failure_happens_before_the_llm_is_called() -> None:
 
 def test_boundary_exposes_only_a_read_capability() -> None:
     # No capability other than resolving a request exists on this boundary —
-    # there is no trading/order tool to call.
+    # there is no trading/order tool to call. `handle` is the one-phase
+    # composition; `prepare`/`respond` are the same read-only work split so the
+    # API can release the MT5 worker before the model round trip (the model call
+    # touches no MT5). The set comparison stays exact: a new public name here
+    # must be a deliberate, reviewed decision.
     public = {name for name in dir(AgentService) if not name.startswith("_")}
-    assert public == {"handle"}
+    assert public == {"handle", "prepare", "respond"}
 
 
 def test_agent_response_is_immutable() -> None:

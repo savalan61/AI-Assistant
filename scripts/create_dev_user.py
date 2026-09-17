@@ -1,4 +1,9 @@
-"""Development-only seed: create the first Broker and User for local testing.
+"""Development-only seed: create the deployment's Broker and first User.
+
+This project is a ONE-BROKER product: the Broker row created here is the broker
+the deployment serves (the application resolves the single row and refuses to
+serve a database with none or several), while its mt5_server is the single MT5
+server every customer's account lives on.
 
 This script is intentionally kept OUTSIDE the app package so it can never be
 part of the production runtime or API surface. It never registers a public
@@ -32,7 +37,10 @@ from app.core.security import hash_password
 from app.db.database import async_session
 from app.db.models import Broker, User, UserRole
 
-# Clearly development-only tenant identity, so no real broker code can collide.
+# Clearly development-only broker identity, so no real broker code can collide.
+# This deployment serves exactly ONE broker, and that row is what the application
+# resolves (app/core/dependencies.py load_deployment_broker); this is the code the
+# script uses when it has to create that single row.
 DEV_BROKER_NAME = "Development Broker (local)"
 DEV_BROKER_CODE = "DEV-LOCAL"
 # Development MT5 account/login number: the user's single identity, which is
@@ -55,24 +63,63 @@ def _parse_args() -> argparse.Namespace:
         metavar="ROLE",
         help="If the dev user already exists, set its role (e.g. super_admin).",
     )
+    parser.add_argument(
+        "--mt5-server",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Set the broker's MT5 server (the one server every customer account lives on). "
+            "Required before MT5 reads or credential provisioning can work; omitted leaves "
+            "the stored value unchanged."
+        ),
+    )
     return parser.parse_args()
 
 
-async def _create_dev_data(session: AsyncSession, password: str, update_password: bool, set_role: str | None) -> int:
+async def _create_dev_data(
+    session: AsyncSession,
+    password: str,
+    update_password: bool,
+    set_role: str | None,
+    mt5_server: str | None,
+) -> int:
     # Reuse the application's own hashing so the stored format matches login.
     password_hash = hash_password(password)
 
-    # Tenant root: look up by the unique broker code; create only if missing.
-    broker = (await session.execute(select(Broker).where(Broker.code == DEV_BROKER_CODE))).scalar_one_or_none()
-    if broker is None:
+    # The ONE broker this deployment serves: the single brokers row that
+    # app/core/dependencies.py load_deployment_broker resolves. Idempotent — an
+    # existing row is reused whatever its code is, and a database with several
+    # rows is refused rather than silently picking one.
+    existing = (await session.execute(select(Broker).order_by(Broker.id.asc()))).scalars().all()
+    if len(existing) > 1:
+        print(
+            f"refusing to run: {len(existing)} brokers rows exist, but this product serves "
+            "exactly one broker. Keep that row and remove the others.",
+            file=sys.stderr,
+        )
+        return 3
+    if existing:
+        broker = existing[0]
+        print(f"broker already exists: {broker.code!r} (id={broker.id})")
+    else:
         broker = Broker(name=DEV_BROKER_NAME, code=DEV_BROKER_CODE, mt5_server=None, is_active=True)
         session.add(broker)
         await session.flush()  # assign broker.id before creating the user
         print(f"created broker: {DEV_BROKER_CODE} (id={broker.id})")
-    else:
-        print(f"broker already exists: {DEV_BROKER_CODE} (id={broker.id})")
 
-    # User identity is unique per broker: look up by (broker_id, login).
+    if mt5_server is not None:
+        # The deployment's single MT5 server: every customer's identity is
+        # (this server, that customer's login), and nothing per-user can change
+        # it. Printed because it is deployment configuration, not a secret.
+        broker.mt5_server = mt5_server
+        print(f"broker MT5 server set to: {mt5_server}")
+    elif not (broker.mt5_server or "").strip():
+        print(
+            "warning: this broker has no MT5 server, so MT5 reads and credential "
+            "provisioning will fail closed until --mt5-server is supplied"
+        )
+
+    # User identity is unique (there is one broker): look up by login.
     user = (
         await session.execute(select(User).where(User.broker_id == broker.id, User.login == DEV_LOGIN))
     ).scalar_one_or_none()
@@ -124,7 +171,9 @@ def main() -> int:
         print(f"refusing to run: APP_ENV is {settings.APP_ENV!r}, not 'development'", file=sys.stderr)
         return 2
 
-    return asyncio.run(_create_dev_data(async_session(), args.password, args.update_password, args.set_role))
+    return asyncio.run(
+        _create_dev_data(async_session(), args.password, args.update_password, args.set_role, args.mt5_server)
+    )
 
 
 if __name__ == "__main__":

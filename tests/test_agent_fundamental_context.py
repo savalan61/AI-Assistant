@@ -145,7 +145,10 @@ class _RecordingEconomicService(EconomicIntelligenceService):
         self.calls: list[datetime | None] = []
 
     def build_today_context(
-        self, minimum_impact: EventImpact | None = None, now: datetime | None = None
+        self,
+        minimum_impact: EventImpact | None = None,
+        now: datetime | None = None,
+        positions: tuple[Position, ...] | None = None,
     ) -> EconomicIntelligenceContext:
         self.calls.append(now)
         if self.error is not None:
@@ -708,10 +711,13 @@ def test_the_financial_context_is_read_before_the_calendar_and_the_calendar_befo
 
     class _OrderedEconomic(_RecordingEconomicService):
         def build_today_context(
-            self, minimum_impact: EventImpact | None = None, now: datetime | None = None
+            self,
+            minimum_impact: EventImpact | None = None,
+            now: datetime | None = None,
+            positions: tuple[Position, ...] | None = None,
         ) -> EconomicIntelligenceContext:
             order.append("economic")
-            return super().build_today_context(minimum_impact, now)
+            return super().build_today_context(minimum_impact, now, positions)
 
     class _OrderedFundamental(_RecordingFundamentalService):
         def build_context(

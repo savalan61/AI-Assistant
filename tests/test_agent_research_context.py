@@ -151,7 +151,10 @@ class _RecordingEconomicService(EconomicIntelligenceService):
         self.calls: list[datetime | None] = []
 
     def build_today_context(
-        self, minimum_impact: EventImpact | None = None, now: datetime | None = None
+        self,
+        minimum_impact: EventImpact | None = None,
+        now: datetime | None = None,
+        positions: tuple[Position, ...] | None = None,
     ) -> EconomicIntelligenceContext:
         self.calls.append(now)
         if self.error is not None:
@@ -176,6 +179,10 @@ class _RecordingResearchService(FinancialResearchService):
         # Resolution is the REAL implementation (Step 51), so what the agent
         # asked the catalog for can be asserted.
         self.resolutions: list[FocusResolution] = []
+        # The resolutions the agent REUSED: with the duplicate read removed, the
+        # agent's own resolution travels into build_research instead of the
+        # catalog being read a second time.
+        self.reused_resolutions: list[FocusResolution | None] = []
 
     def resolve_focus_symbols(
         self, focus_symbols: tuple[str, ...] | list[str]
@@ -189,8 +196,13 @@ class _RecordingResearchService(FinancialResearchService):
         from_time: datetime,
         to_time: datetime,
         focus_symbols: tuple[str, ...] | list[str] = (),
+        resolution: FocusResolution | None = None,
     ) -> FinancialResearchContext:
-        self.calls.append((from_time, to_time, tuple(focus_symbols)))
+        self.reused_resolutions.append(resolution)
+        # The symbols actually graded: the supplied resolution's (broker-confirmed)
+        # when one is reused, otherwise the requested names as before.
+        graded = resolution.resolved if resolution is not None else tuple(focus_symbols)
+        self.calls.append((from_time, to_time, tuple(graded)))
         if self.error is not None:
             raise self.error
         assert self.context is not None
@@ -758,9 +770,9 @@ def test_the_research_context_is_built_after_the_fundamental_context() -> None:
             return super().build_context(calendar, focus_symbol)
 
     class _OrderedResearch(_RecordingResearchService):
-        def build_research(self, from_time, to_time, focus_symbols=()):  # type: ignore[no-untyped-def]
+        def build_research(self, from_time, to_time, focus_symbols=(), resolution=None):  # type: ignore[no-untyped-def]
             order.append("research")
-            return super().build_research(from_time, to_time, focus_symbols)
+            return super().build_research(from_time, to_time, focus_symbols, resolution)
 
     agent = AgentService(
         _RecordingFinancialContextService(make_financial_context()),

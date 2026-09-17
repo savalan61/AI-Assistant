@@ -76,10 +76,14 @@ def make_fake_position_provider_class(positions: tuple[Position, ...], error: Ex
     both delegation and that the blocking read left the event-loop thread.
     """
     call_threads: list[int] = []
+    credentials_seen: list[object] = []
 
     class FakeMT5PositionProvider:
         def __init__(self, session_manager: object = None, credentials: object = None) -> None:
-            pass
+            # Recorded so a test can prove which customer's MT5 identity the read
+            # was composed with — the customer-to-customer crossing check. Kept in
+            # its own list: ``call_threads`` counts READ calls only.
+            credentials_seen.append(credentials)
 
         def get_positions(self) -> tuple[Position, ...]:
             call_threads.append(threading.get_ident())
@@ -87,7 +91,7 @@ def make_fake_position_provider_class(positions: tuple[Position, ...], error: Ex
                 raise error
             return positions
 
-    return FakeMT5PositionProvider, call_threads
+    return FakeMT5PositionProvider, call_threads, credentials_seen
 
 
 class FailingCalendarProvider:
@@ -117,9 +121,9 @@ def test_only_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture()
 def patched_positions(monkeypatch):
     def _install(positions: tuple[Position, ...] = (), error: Exception | None = None):
-        cls, record = make_fake_position_provider_class(positions, error)
+        cls, call_threads, credentials_seen = make_fake_position_provider_class(positions, error)
         monkeypatch.setattr(deps, "MT5PositionProvider", cls)
-        return record
+        return {"call_threads": call_threads, "credentials": credentials_seen}
 
     yield _install
     # monkeypatch restores the real provider class after each test.
@@ -139,39 +143,39 @@ def intelligence_env(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="TI-A")
-            broker_b = Broker(name="Broker B", code="TI-B")
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="The Broker", code="TI-ONE", mt5_server="TheBroker-Live")
+            session.add(broker)
             await session.commit()
+            # Two CUSTOMERS of the one broker (two MT5 accounts) and the
+            # deployment's single super_admin.
             customer_a = User(
-                broker_id=broker_a.id,
+                broker_id=broker.id,
                 login="10001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
             customer_b = User(
-                broker_id=broker_b.id,
+                broker_id=broker.id,
                 login="10002",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.CUSTOMER,
             )
-            super_b = User(
-                broker_id=broker_b.id,
-                login="super-b",
+            super_admin = User(
+                broker_id=broker.id,
+                login="9001",
                 password_hash="x" * 60,
                 is_active=True,
                 role=UserRole.SUPER_ADMIN,
             )
-            session.add_all([customer_a, customer_b, super_b])
+            session.add_all([customer_a, customer_b, super_admin])
             await session.commit()
             return {
-                "broker_a_id": broker_a.id,
-                "broker_b_id": broker_b.id,
+                "broker_id": broker.id,
                 "customer_a_id": customer_a.id,
                 "customer_b_id": customer_b.id,
-                "super_b_id": super_b.id,
+                "super_admin_id": super_admin.id,
             }
 
     ids = asyncio.run(seed())
@@ -265,7 +269,7 @@ def test_response_contract_is_ai_ready(intelligence_env, patched_positions) -> N
 
 
 def test_customer_receives_only_their_own_position_context(intelligence_env, patched_positions) -> None:
-    call_threads = patched_positions((XAUUSD,))
+    call_threads = patched_positions((XAUUSD,))["call_threads"]
 
     _, body = get_intelligence(intelligence_env, intelligence_env["customer_a_id"])
 
@@ -275,27 +279,32 @@ def test_customer_receives_only_their_own_position_context(intelligence_env, pat
     assert len(call_threads) == 1
 
 
-# --- tenant scope ---------------------------------------------------------------------
+# --- identity scope -------------------------------------------------------------------
 
 
-def test_each_user_gets_their_own_tenant_identity(intelligence_env, patched_positions) -> None:
-    patched_positions((XAUUSD,))
+def test_each_customer_is_read_with_its_own_account(intelligence_env, patched_positions) -> None:
+    """Two customers of the one broker, each read with its own MT5 identity."""
+    record = patched_positions((XAUUSD,))
 
     _, body_a = get_intelligence(intelligence_env, intelligence_env["customer_a_id"])
     _, body_b = get_intelligence(intelligence_env, intelligence_env["customer_b_id"])
 
-    assert body_a["broker_id"] == intelligence_env["broker_a_id"]
-    assert body_b["broker_id"] == intelligence_env["broker_b_id"]
-    assert body_a["broker_id"] != body_b["broker_id"]
+    assert body_a["broker_id"] == intelligence_env["broker_id"]
+    assert body_b["broker_id"] == intelligence_env["broker_id"]
+    # Each answer's position read was composed with the calling customer's own MT5
+    # identity: neither customer's account was used for the other.
+    logins = [getattr(credentials, "login", None) for credentials in record["credentials"]]
+    assert logins == [10001, 10002]
 
 
-def test_admin_roles_do_not_bypass_tenant_identity(intelligence_env, patched_positions) -> None:
+def test_admin_roles_do_not_bypass_the_authenticated_identity(intelligence_env, patched_positions) -> None:
     patched_positions((XAUUSD,))
 
-    # A super_admin authenticated against broker B is still scoped to broker B.
-    _, body = get_intelligence(intelligence_env, intelligence_env["super_b_id"])
+    # A super_admin is still just an authenticated user: the answer is composed
+    # for the deployment's broker, never for a broker it could name.
+    _, body = get_intelligence(intelligence_env, intelligence_env["super_admin_id"])
 
-    assert body["broker_id"] == intelligence_env["broker_b_id"]
+    assert body["broker_id"] == intelligence_env["broker_id"]
 
 
 def test_broker_id_and_user_id_query_parameters_cannot_change_scope(intelligence_env, patched_positions) -> None:
@@ -311,7 +320,7 @@ def test_broker_id_and_user_id_query_parameters_cannot_change_scope(intelligence
         return {key: value for key, value in body.items() if key != "as_of"}
 
     assert without_as_of(with_params) == without_as_of(plain)
-    assert with_params["broker_id"] == intelligence_env["broker_a_id"]
+    assert with_params["broker_id"] == intelligence_env["broker_id"]
 
 
 # --- filtering --------------------------------------------------------------------------
@@ -384,7 +393,7 @@ def test_calendar_provider_failure_returns_generic_503(intelligence_env, patched
 
 
 def test_reading_positions_is_offloaded_off_the_event_loop(intelligence_env, patched_positions) -> None:
-    call_threads = patched_positions((XAUUSD,))
+    call_threads = patched_positions((XAUUSD,))["call_threads"]
     main_thread = threading.get_ident()
 
     status, _ = get_intelligence(intelligence_env, intelligence_env["customer_a_id"])
@@ -434,7 +443,7 @@ def test_placeholder_calendar_fails_closed_outside_development(
     assert status == 503
     assert body == {"detail": "Economic calendar data source is not configured"}
     # It failed before doing any work.
-    assert record == []
+    assert record["call_threads"] == []
 
 
 def test_production_source_selection_fails_closed_until_a_vendor_exists(
@@ -455,7 +464,7 @@ def test_production_source_selection_fails_closed_until_a_vendor_exists(
     assert status == 503
     assert body == {"detail": "Economic calendar data source is not configured"}
     # It failed before doing any work.
-    assert record == []
+    assert record["call_threads"] == []
 
 
 @pytest.mark.parametrize("environment", ["staging", "production", ""])

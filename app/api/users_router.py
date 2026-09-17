@@ -1,8 +1,8 @@
-"""Users API: tenant-scoped user management.
+"""Users API: customer-scoped user management.
 
 Covers creating Customer/Admin users inside the caller's own broker, listing
 those users, super-admin user management (get one, update, delete) and
-provisioning a user's MT5 INVESTOR (read-only) credential. The tenant is
+provisioning a user's MT5 INVESTOR (read-only) credential. The customer is
 always the authenticated database user's broker — no endpoint accepts a
 broker_id — and no response ever carries a password hash, an MT5 credential,
 or any other secret.
@@ -16,8 +16,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import (
+    effective_mt5_server,
     get_current_broker_manager,
     get_current_super_admin,
+    load_deployment_broker,
     resolve_mt5_account_credentials,
 )
 from app.core.encryption import EncryptionError, encrypt_secret
@@ -41,7 +43,7 @@ _PHONE_PATTERN = re.compile(r"^\+?[0-9]{7,15}$")
 # Only the fields a Broker Admin may choose. Deliberately excluded: id,
 # broker_id, password_hash, is_active, mt5_password_encrypted. extra=
 # "forbid" turns any supplied field outside this list into a 422 validation
-# error instead of a silently ignored value, so tenant/role/credential
+# error instead of a silently ignored value, so customer/role/credential
 # forging attempts fail loudly rather than disappearing.
 class CreateUserRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -240,20 +242,16 @@ class UserResponse(BaseModel):
     is_active: bool
 
 
-# MT5 server names are short identifiers (e.g. "BrokerName-Live2"); the cap
-# matches the User and Broker columns so oversized input cannot become a
-# database error.
-_MT5_SERVER_MAX_LENGTH = 100
 # Upper bound on a stored credential. MT5 passwords are far shorter; the cap
 # only stops an oversized secret being encrypted into the column.
 _MT5_PASSWORD_MAX_LENGTH = 128
 
 
 class MT5CredentialRequest(BaseModel):
-    """Write-only payload provisioning a user's MT5 INVESTOR credential.
+    """Write-only payload provisioning a customer's MT5 INVESTOR credential.
 
     Deliberately excludes broker_id, user_id, role and is_active: the target
-    comes from the path (scoped to the caller's tenant) and the tenant from the
+    comes from the path (scoped to the caller's broker) and the broker from the
     authenticated caller, so extra="forbid" turns any such attempt into a 422
     rather than a silently ignored value.
 
@@ -261,31 +259,22 @@ class MT5CredentialRequest(BaseModel):
     API only accepts a read-only credential, and the password field is named
     after that fact.
 
-    There is also deliberately no MT5 account-number field: since Step 42 the
-    user's own ``login`` IS the MT5 account number, so provisioning cannot
-    point the credential at an account the user is not identified by.
+    There is deliberately no MT5 server field either. This is a one-broker
+    deployment, so the MT5 server is the broker's own configuration (one server,
+    every customer on it): a request cannot point a credential at any other
+    server — including another broker's — which is exactly what used to make a
+    customer's reads land on somebody else's account.
+
+    There is also deliberately no MT5 account-number field: the user's own
+    ``login`` IS the MT5 account number, so provisioning cannot point the
+    credential at an account the user is not identified by.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    mt5_server: str
     # Write-only: no response schema in this module has a matching field, so a
     # plaintext credential cannot be echoed back by construction.
     mt5_investor_password: str
-
-    @field_validator("mt5_server")
-    @classmethod
-    def _validate_mt5_server(cls, value: str) -> str:
-        # Surrounding whitespace is trimmed (a pasted server name), but a value
-        # that is empty or contains control characters is rejected.
-        trimmed = value.strip()
-        if not trimmed:
-            raise ValueError("mt5_server must not be empty")
-        if len(trimmed) > _MT5_SERVER_MAX_LENGTH:
-            raise ValueError(f"mt5_server must be at most {_MT5_SERVER_MAX_LENGTH} characters")
-        if any(character < " " for character in trimmed):
-            raise ValueError("mt5_server must not contain control characters")
-        return trimmed
 
     @field_validator("mt5_investor_password")
     @classmethod
@@ -341,7 +330,7 @@ async def create_user(
 
     Tenant isolation is structural: broker_id is always taken from the
     database-backed manager record, never from the request, so a Broker Admin
-    cannot create a user in another tenant.
+    cannot create a user in another customer.
     """
     requested_role = request.role if request.role is not None else UserRole.CUSTOMER
     if requested_role is UserRole.ADMIN and current_admin.role is not UserRole.SUPER_ADMIN:
@@ -352,7 +341,7 @@ async def create_user(
             detail="Only a super_admin can create an admin user",
         )
     user = User(
-        # The admin's own broker is the tenant boundary for the new user.
+        # The admin's own broker is the customer boundary for the new user.
         broker_id=current_admin.broker_id,
         login=request.login,
         # Hashed immediately; the plaintext never touches persistence or logs.
@@ -371,7 +360,7 @@ async def create_user(
     try:
         await session.commit()
     except IntegrityError:
-        # Expected failure at the commit boundary: the tenant-scoped unique
+        # Expected failure at the commit boundary: the customer-scoped unique
         # constraints (login/email/phone per broker) rejected the insert.
         await session.rollback()
         raise _duplicate_conflict()
@@ -385,15 +374,15 @@ async def list_users(
     current_admin: User = Depends(get_current_broker_manager),
     session: AsyncSession = Depends(get_db),
 ) -> list[UserResponse]:
-    """List the users the authenticated manager may administer in their own tenant.
+    """List the users the authenticated manager may administer in their own customer.
 
-    The tenant boundary is structural: the filter uses the database-backed
+    The customer boundary is structural: the filter uses the database-backed
     manager's broker_id and no broker_id parameter exists, so a client can
     never select another broker. Visibility follows the role hierarchy:
     - super_admin: admins and customers of their broker (the users they manage)
     - admin: customers of their broker only — never admins or super_admins
     The requesting manager is always excluded (you cannot list yourself), so
-    a tenant with no manageable users is a normal 200 with an empty list.
+    a customer with no manageable users is a normal 200 with an empty list.
     """
     # Role-conditional visibility, evaluated at the authorization boundary
     # from the database-backed role — never from request input.
@@ -434,7 +423,7 @@ async def create_admin(
     super_admin record, never from the request.
     """
     admin = User(
-        # The super_admin's own broker is the tenant boundary for the new admin.
+        # The super_admin's own broker is the customer boundary for the new admin.
         broker_id=current_super_admin.broker_id,
         login=request.login,
         # Hashed immediately; the plaintext never touches persistence or logs.
@@ -451,7 +440,7 @@ async def create_admin(
     try:
         await session.commit()
     except IntegrityError:
-        # Expected failure at the commit boundary: the tenant-scoped unique
+        # Expected failure at the commit boundary: the customer-scoped unique
         # constraints (login/email/phone per broker) rejected the insert.
         # The one-super-admin partial index cannot fire here — this endpoint
         # only ever writes role='admin' rows.
@@ -493,7 +482,7 @@ async def update_user(
     explicit ``null`` clears email/phone only. Role changes follow the
     invariants: a promotion to super_admin is refused outright (422, schema
     validator), and the broker's only super_admin cannot be demoted (409).
-    Username/email/phone changes go through the same tenant-scoped uniqueness
+    Username/email/phone changes go through the same customer-scoped uniqueness
     as creation, so a duplicate is a generic 409. A supplied password is
     hashed immediately; the plaintext never touches persistence or logs.
     """
@@ -528,7 +517,7 @@ async def update_user(
         await session.commit()
     except IntegrityError:
         # Expected failure at the commit boundary: a changed login, email
-        # or phone collided with the tenant-scoped unique constraints.
+        # or phone collided with the customer-scoped unique constraints.
         await session.rollback()
         raise _duplicate_conflict()
 
@@ -547,7 +536,7 @@ async def delete_user(
     super_admin-only. The broker's only super_admin cannot be deleted — that
     is necessarily the caller itself, since the database partial unique index
     guarantees at most one super_admin per broker (409). Every other
-    in-tenant user is deletable; other tenants are unreachable (404).
+    in-customer user is deletable; other customers are unreachable (404).
     """
     target = await _manageable_target(session, current_super_admin, user_id)
     if target.role is UserRole.SUPER_ADMIN:
@@ -564,7 +553,7 @@ async def delete_user(
 # --- MT5 credential provisioning ---------------------------------------------
 #
 # A broker administrator provisions the MT5 INVESTOR (read-only) credential of
-# a user in its own tenant. Only three facts are ever written — the account
+# a user in its own customer. Only three facts are ever written — the account
 # number, the server, and the encrypted password — and the plaintext exists only
 # for the duration of the request that supplied it.
 
@@ -579,14 +568,17 @@ def _credentials_unavailable() -> HTTPException:
 
 
 async def _manageable_target(session: AsyncSession, caller: User, user_id: int) -> User:
-    """Load the in-tenant user ``caller`` may manage, or 404.
+    """Load the user ``caller`` may manage inside this deployment, or 404.
 
-    Tenant isolation is structural: a target outside the caller's broker is
-    reported exactly like a non-existent one, so a caller can never learn which
-    user ids exist in another tenant. Role hierarchy: an admin manages customer
-    records only; a super_admin holds broker-level privileges and may manage
-    admins, customers and itself — every super_admin-only endpoint relies on
-    that last property, because the admin branch below never fires for it.
+    This deployment serves exactly one broker and get_current_user() has already
+    bound the caller to it, so every user the API can reach belongs to that same
+    broker: the broker comparison below is a data-integrity invariant (a row
+    pointing at any other broker is not this deployment's user), and a user id
+    that does not exist is reported with the identical 404 so the two cannot be
+    told apart. Role hierarchy: an admin manages customer records only; a
+    super_admin holds deployment-level privileges and may manage admins,
+    customers and itself — every super_admin-only endpoint relies on that last
+    property, because the admin branch below never fires for it.
     """
     target = await session.get(User, user_id)
     if target is None or target.broker_id != caller.broker_id:
@@ -601,7 +593,7 @@ async def _manageable_target(session: AsyncSession, caller: User, user_id: int) 
 
 async def _mt5_credential_status(session: AsyncSession, user: User) -> MT5CredentialStatus:
     """Project one user's effective MT5 credential configuration (never the secret)."""
-    broker = await session.get(Broker, user.broker_id)
+    broker = await load_deployment_broker(session)
     # Reuse the composition root's resolver so this status reports exactly what
     # an MT5-backed request for this user would use — one definition of
     # "effective", including the legacy fallback.
@@ -625,15 +617,28 @@ async def set_mt5_credentials(
     current_admin: User = Depends(get_current_broker_manager),
     session: AsyncSession = Depends(get_db),
 ) -> MT5CredentialStatus:
-    """Provision or replace a user's MT5 INVESTOR (read-only) credential.
+    """    Provision or replace a user's MT5 INVESTOR (read-only) credential.
 
     Both manager roles reach this endpoint (get_current_broker_manager rejects
-    customers with 403); the target is resolved inside the caller's tenant and
+    customers with 403); the target is resolved inside the caller's broker and
     the role rule is applied there. The password is encrypted before it reaches
     the database and is never returned, logged or included in an error; on an
     encryption failure the request fails closed (503) and nothing is written.
+
+    Only the secret is written: the account number is the user's own ``login``
+    and the MT5 server is the deployment broker's configuration, so neither can
+    be redirected by this — or any other — request. When the broker has no MT5
+    server configured there is nothing this credential could ever be used
+    against, so provisioning refuses (503) instead of storing a secret that
+    cannot work.
     """
     target = await _manageable_target(session, current_admin, user_id)
+    broker = await load_deployment_broker(session)
+    if broker is None or not broker.is_active or not effective_mt5_server(broker):
+        # The broker row is missing, suspended, or has no MT5 server: a
+        # deployment-level configuration problem, reported with the established
+        # generic detail and never disclosing which of the three it was.
+        raise _credentials_unavailable()
     try:
         # Encrypted immediately: the plaintext lives only inside this call and
         # is never logged. A broker never learns the customer's MT5 password
@@ -642,9 +647,9 @@ async def set_mt5_credentials(
     except EncryptionError:
         raise _credentials_unavailable()
 
-    # The account number is the user's own login, so provisioning writes only
-    # the server and the encrypted secret — never a duplicate account column.
-    target.mt5_server = request.mt5_server
+    # Only the encrypted secret is stored: the account number is the user's own
+    # login and the server is the broker's, so there is no customer- or
+    # account-selecting column to write.
     target.mt5_password_encrypted = encrypted
     await session.commit()
     await session.refresh(target)

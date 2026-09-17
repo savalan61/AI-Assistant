@@ -1,12 +1,13 @@
-"""Resolve a broker's active LLM provider from its stored configuration.
+"""Resolve the deployment's active LLM provider from its stored configuration.
 
-Resolution is by ``broker_id``, supplied by the application composition boundary
-from the authenticated database user — never from an Agent request body. This is
-the only place that turns a stored ciphertext into a live credential for agent
-traffic, and it is deliberately conservative about what it reports:
+This is a ONE-BROKER deployment, so there is exactly ONE stored configuration —
+the broker's own — and no broker argument exists to resolve against: a request
+can neither select nor influence which credential is used. This is the only
+place that turns a stored ciphertext into a live credential for agent traffic,
+and it is deliberately conservative about what it reports:
 
 * no configuration row, or a disabled one -> ``None``. The caller then uses the
-  shared free pool; that is a deliberate broker state, not an error.
+  shared free pool; that is a deliberate deployment state, not an error.
 * an active configuration that cannot become a usable provider (undecryptable
   ciphertext, missing encryption key, unsupported provider kind, or a rejected
   credential shape) -> ``BrokerLLMConfigurationError``. The caller fails safely
@@ -35,9 +36,9 @@ class BrokerLLMConfigurationError(RuntimeError):
     """
 
 
-async def resolve_broker_llm_provider(session: AsyncSession, broker_id: int) -> LLMProvider | None:
-    """Return the broker's active provider, or ``None`` when none is active."""
-    config = await _load_active_config(session, broker_id)
+async def resolve_llm_provider(session: AsyncSession) -> LLMProvider | None:
+    """Return the deployment's active provider, or ``None`` when none is active."""
+    config = await _load_active_config(session)
     if config is None:
         return None
 
@@ -76,12 +77,14 @@ async def resolve_broker_llm_provider(session: AsyncSession, broker_id: int) -> 
         raise BrokerLLMConfigurationError("broker LLM configuration is invalid") from exc
 
 
-async def _load_active_config(session: AsyncSession, broker_id: int) -> BrokerLLMConfig | None:
-    """Load the broker's enabled configuration (at most one row per broker)."""
+async def _load_active_config(session: AsyncSession) -> BrokerLLMConfig | None:
+    """Load this deployment's enabled configuration.
+
+    The brokers table holds one row, so the configuration table can hold one
+    row; ``scalar_one_or_none`` makes a second row a loud failure rather than a
+    silent pick, exactly as the database's unique constraint intends.
+    """
     result = await session.execute(
-        select(BrokerLLMConfig).where(
-            BrokerLLMConfig.broker_id == broker_id,
-            BrokerLLMConfig.is_active.is_(True),
-        )
+        select(BrokerLLMConfig).where(BrokerLLMConfig.is_active.is_(True))
     )
     return result.scalar_one_or_none()

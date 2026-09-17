@@ -6,14 +6,22 @@ holding the real Broker/User/BrokerLLMConfig models; the real authentication and
 super_admin authorization dependencies run (real JWT decode + database role
 check). The LLM provider seam is patched with a deterministic offline double, so
 no test performs a network call. JWT and encryption config use test-only values.
+
+The worker-boundary tests at the bottom measure anyio's per-event-loop worker
+limiter — the exact token run_mt5_call borrows — to prove the connection test's
+model round trip holds no MT5 worker: the endpoint crosses only the run_llm_call
+boundary /agent uses, on the real router coroutine with the real boundaries.
 """
 import asyncio
+import inspect
 import logging
 import socket
 import threading
+import time
 from typing import Any, AsyncIterator
 
 import pytest
+from anyio.to_thread import current_default_thread_limiter
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -21,7 +29,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import app.services.broker_llm_config.broker_llm_config_service as tester_module
+from app.api import broker_llm_config_router
 from app.api.broker_llm_config_router import router
+from app.core.blocking import run_mt5_call
+from app.services.broker_llm_config import LLMConnectionStatus, LLMConnectionTester
 from app.core.config import settings as app_settings
 from app.core.encryption import decrypt_secret, encrypt_secret, generate_encryption_key
 from app.core.security import create_access_token
@@ -76,10 +87,11 @@ def offline_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def broker_db(tmp_path) -> dict[str, Any]:
-    """Seed two tenants: broker A (super/admin/customer) and broker B (super).
+    """Seed the deployment's ONE broker with a super_admin, an admin and a customer.
 
-    Broker A's rows exist so the API's tenant boundary can be attacked: every
-    test asserts that broker B can neither read nor modify A's configuration.
+    This is a one-broker product: the LLM configuration belongs to the whole
+    deployment, and the boundary to attack is the ROLE boundary (an admin or a
+    customer must never reach it), which every test here asserts.
     """
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path.as_posix()}/broker_llm_test.db")
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -88,9 +100,8 @@ def broker_db(tmp_path) -> dict[str, Any]:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
-            broker_a = Broker(name="Broker A", code="LLM-A")
-            broker_b = Broker(name="Broker B", code="LLM-B")
-            session.add_all([broker_a, broker_b])
+            broker = Broker(name="The Broker", code="LLM-ONE", mt5_server="TheBroker-Live")
+            session.add(broker)
             await session.flush()
 
             def make(broker: Broker, login: str, role: UserRole) -> User:
@@ -102,19 +113,16 @@ def broker_db(tmp_path) -> dict[str, Any]:
                     role=role,
                 )
 
-            super_a = make(broker_a, "super-a", UserRole.SUPER_ADMIN)
-            admin_a = make(broker_a, "admin-a", UserRole.ADMIN)
-            cust_a = make(broker_a, "10001", UserRole.CUSTOMER)
-            super_b = make(broker_b, "super-b", UserRole.SUPER_ADMIN)
-            session.add_all([super_a, admin_a, cust_a, super_b])
+            top = make(broker, "9001", UserRole.SUPER_ADMIN)
+            manager = make(broker, "9002", UserRole.ADMIN)
+            customer = make(broker, "10001", UserRole.CUSTOMER)
+            session.add_all([top, manager, customer])
             await session.commit()
             return {
-                "broker_a_id": broker_a.id,
-                "broker_b_id": broker_b.id,
-                "super_a_id": super_a.id,
-                "admin_a_id": admin_a.id,
-                "cust_a_id": cust_a.id,
-                "super_b_id": super_b.id,
+                "broker_a_id": broker.id,
+                "super_a_id": top.id,
+                "admin_a_id": manager.id,
+                "cust_a_id": customer.id,
             }
 
     ids = asyncio.run(seed())
@@ -167,11 +175,16 @@ def install_fake_provider(
     *,
     error: Exception | None = None,
     answer: str = "OK",
+    release: threading.Event | None = None,
+    entered: threading.Event | None = None,
 ) -> "tuple[list[tuple[str, str, str]], list[int]]":
     """Patch the provider seam used by the connection tester.
 
     Records the credentials the tester passed down and the thread the blocking
-    call ran on. Never performs network I/O.
+    call ran on. Never performs network I/O. When ``release`` is given, the fake
+    model call is HELD inside whichever thread ran it until the test sets the
+    event (and ``entered`` is set the moment the call starts), which is what
+    makes an in-flight round trip observable to the worker-boundary tests.
     """
     calls: list[tuple[str, str, str]] = []
     threads: list[int] = []
@@ -189,6 +202,10 @@ def install_fake_provider(
 
         def complete(self, prompt: object) -> str:
             threads.append(threading.get_ident())
+            if entered is not None:
+                entered.set()
+            if release is not None and not release.wait(timeout=30):  # pragma: no cover - a hung model call
+                raise RuntimeError("the test never released the model call")
             if error is not None:
                 raise error
             return answer
@@ -215,6 +232,27 @@ async def _count_configs(factory: async_sessionmaker[AsyncSession], broker_id: i
 
 def count_configs(env: dict[str, Any], broker_id: int) -> int:
     return asyncio.run(_count_configs(env["factory"], broker_id))
+
+
+# The real endpoint coroutine, under a name pytest will not try to collect: the
+# suite runs no asyncio plugin (async scenarios are driven with asyncio.run),
+# and the endpoint's own name starts with test_.
+run_connection_test = broker_llm_config_router.test_llm_connection
+
+
+async def _load_user(factory: async_sessionmaker[AsyncSession], user_id: int) -> User:
+    async with factory() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        return result.scalar_one()
+
+
+async def _await_event(event: threading.Event, *, timeout: float = 20.0) -> None:
+    """Wait (bounded) for the gated model phase to start, without hanging the suite."""
+    deadline = time.monotonic() + timeout
+    while not event.is_set():
+        if time.monotonic() > deadline:
+            raise AssertionError("the gated model call never started")
+        await asyncio.sleep(0.005)
 
 
 def stored_ciphertext(env: dict[str, Any], broker_id: int) -> str:
@@ -409,53 +447,16 @@ def test_api_key_is_never_logged(broker_db, monkeypatch: pytest.MonkeyPatch, cap
 # --- tenant isolation -------------------------------------------------------------------
 
 
-def test_another_broker_cannot_read_or_modify_the_configuration(broker_db) -> None:
+def test_request_cannot_choose_a_broker(broker_db) -> None:
+    # There is exactly one broker, so a caller has nothing to choose — and the
+    # request cannot even try: the field is structurally impossible.
     super_a_id = broker_db["super_a_id"]
-    super_b_id = broker_db["super_b_id"]
-    put_config(broker_db, super_a_id, VALID_BODY)
 
-    # Broker B has no configuration of its own ...
-    assert get_config(broker_db, super_b_id)[0] == 404
-
-    # ... and creating one leaves broker A's row untouched.
-    status, body = put_config(
-        broker_db,
-        super_b_id,
-        {**VALID_BODY, "model": "broker-b-model", "base_url": "https://b.example.test/v1"},
-    )
-
-    assert status == 200
-    assert body["model"] == "broker-b-model"
-    a_status, a_body = get_config(broker_db, super_a_id)
-    assert a_status == 200
-    assert a_body["model"] == "test-model"
-    assert a_body["base_url"] == "https://llm.example.test/v1"
-    assert count_configs(broker_db, broker_db["broker_a_id"]) == 1
-    assert count_configs(broker_db, broker_db["broker_b_id"]) == 1
-
-
-def test_another_broker_can_never_see_the_other_tenants_endpoint_or_metadata(broker_db) -> None:
-    super_a_id = broker_db["super_a_id"]
-    super_b_id = broker_db["super_b_id"]
-    put_config(broker_db, super_a_id, VALID_BODY)
-
-    status, body = get_config(broker_db, super_b_id)
-
-    assert status == 404
-    assert "llm.example.test" not in str(body)
-
-
-def test_request_cannot_choose_another_broker(broker_db) -> None:
-    super_a_id = broker_db["super_a_id"]
-    super_b_id = broker_db["super_b_id"]
-    put_config(broker_db, super_b_id, {**VALID_BODY, "model": "broker-b-model"})
-
-    # A broker_id in the body is structurally impossible (extra="forbid").
     body_status, _ = put_config(broker_db, super_a_id, {**VALID_BODY, "broker_id": 2})
     assert body_status == 422
 
-    # A broker_id query parameter does not exist and is ignored: the response
-    # stays scoped to the authenticated broker (which has no configuration).
+    # A broker_id query parameter does not exist: it is ignored and the response
+    # stays the deployment's own configuration (none yet, so 404).
     query_status, query_body = get_config(broker_db, super_a_id, query="?broker_id=2")
     assert query_status == 404
     assert query_body == {"detail": "LLM configuration is not set for this broker"}
@@ -465,11 +466,11 @@ def test_request_cannot_choose_another_broker(broker_db) -> None:
         path_response = client.get(f"{CONFIG_PATH}/2", headers=auth_header(token_for(super_a_id)))
     assert path_response.status_code == 404
 
-    # And nothing was written for the attacker's broker.
+    # Nothing was written by any of those attempts.
     assert count_configs(broker_db, broker_db["broker_a_id"]) == 0
 
 
-def test_one_configuration_per_broker_is_enforced_by_the_database(broker_db) -> None:
+def test_one_configuration_for_the_deployment_is_enforced_by_the_database(broker_db) -> None:
     put_config(broker_db, broker_db["super_a_id"], VALID_BODY)
 
     async def insert_duplicate() -> None:
@@ -570,15 +571,178 @@ def test_connection_test_with_undecryptable_credential_fails_closed(
     assert body == {"detail": "LLM credential storage is temporarily unavailable"}
 
 
-def test_connection_test_rejects_other_tenants_credentials(broker_db, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connection_test_cannot_be_reached_by_a_non_super_admin(broker_db, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stored credential is the deployment's; the only way to exercise it is
+    # the super_admin role, and an admin/customer is refused before any provider
+    # is built (so the configured key is never decrypted for them).
     calls, _ = install_fake_provider(monkeypatch)
     put_config(broker_db, broker_db["super_a_id"], VALID_BODY)
 
-    # Broker B has no configuration, so its test can never touch broker A's.
-    status, _ = post_connection_test(broker_db, broker_db["super_b_id"])
+    admin_status, _ = post_connection_test(broker_db, broker_db["admin_a_id"])
+    customer_status, _ = post_connection_test(broker_db, broker_db["cust_a_id"])
 
-    assert status == 404
+    assert (admin_status, customer_status) == (403, 403)
     assert calls == []
+
+
+# --- the connection test holds no MT5 blocking worker -------------------------------------
+# The endpoint used to cross the consolidated MT5 boundary (run_mt5_call) with
+# the model round trip inside it, so one administrative "test this
+# configuration" call parked a worker thread an MT5 read needs for the whole
+# provider latency — the same defect the /agent split fixed. These tests drive
+# the REAL router coroutine (test_llm_connection) with the REAL boundaries from
+# app.core.blocking, over the same offline double, and measure anyio's
+# per-event-loop worker limiter: exactly what run_mt5_call borrows. A held
+# provider answer makes the in-flight round trip observable.
+
+
+def test_connection_test_holds_no_mt5_worker_while_the_model_is_thinking(
+    broker_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While the probe's model call is in flight, zero MT5 workers are borrowed.
+
+    Matched with the control below: the probe is sensitive because the OLD
+    run_mt5_call shape measurably parks the worker (it cannot even serve another
+    MT5 read); the in-flight model round trip shows no borrowed token at all, so
+    it cannot be starving MT5 reads.
+    """
+
+    async def scenario() -> int:
+        limiter = current_default_thread_limiter()
+        entered = threading.Event()
+        release = threading.Event()
+        install_fake_provider(monkeypatch, entered=entered, release=release)
+        put_config(broker_db, broker_db["super_a_id"], VALID_BODY)
+        user = await _load_user(broker_db["factory"], broker_db["super_a_id"])
+
+        # The real dependencies the endpoint resolves: DB session, authenticated
+        # super_admin, real LLMConnectionTester, real boundaries.
+        session = broker_db["factory"]()
+        try:
+            task = asyncio.ensure_future(run_connection_test(user, session, LLMConnectionTester()))
+            await _await_event(entered)
+            # The model round trip is in flight right now.
+            while_model = limiter.borrowed_tokens
+            release.set()
+            response = await task
+        finally:
+            await session.close()
+
+        assert response.status == LLMConnectionStatus.OK
+        return while_model
+
+    assert asyncio.run(scenario()) == 0
+
+
+def test_an_mt5_read_can_complete_while_a_connection_test_is_in_flight(
+    broker_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operational consequence, at the hardest setting: ONE MT5 worker.
+
+    With the worker pool squeezed to a single token and the probe's model call
+    held open, a call through run_mt5_call still completes — the worker was
+    never taken by the connection test.
+    """
+
+    async def scenario() -> str:
+        limiter = current_default_thread_limiter()
+        limiter.total_tokens = 1  # the whole pool: one worker
+        entered = threading.Event()
+        release = threading.Event()
+        install_fake_provider(monkeypatch, entered=entered, release=release)
+        put_config(broker_db, broker_db["super_a_id"], VALID_BODY)
+        user = await _load_user(broker_db["factory"], broker_db["super_a_id"])
+
+        session = broker_db["factory"]()
+        try:
+            task = asyncio.ensure_future(run_connection_test(user, session, LLMConnectionTester()))
+            await _await_event(entered)
+
+            # The only MT5 worker is free while the probe waits on the model.
+            read = await asyncio.wait_for(run_mt5_call(lambda: "mt5 read completed"), timeout=10)
+
+            release.set()
+            response = await task
+        finally:
+            await session.close()
+
+        assert response.status == LLMConnectionStatus.OK
+        return read
+
+    assert asyncio.run(scenario()) == "mt5 read completed"
+
+
+def test_the_old_mt5_boundary_call_would_have_held_the_worker(
+    broker_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: the OLD router call really does occupy the worker for the probe.
+
+    This is the exact call the endpoint used to make — tester.check inside
+    run_mt5_call — and with one worker it leaves that worker unavailable, so the
+    tests above are meaningful rather than vacuously true: the measurement
+    discriminates the two shapes.
+    """
+
+    async def scenario() -> None:
+        limiter = current_default_thread_limiter()
+        limiter.total_tokens = 1  # the whole pool: one worker
+        entered = threading.Event()
+        release = threading.Event()
+        install_fake_provider(monkeypatch, entered=entered, release=release)
+
+        # The pre-change router call: the model probe INSIDE the MT5 boundary.
+        task = asyncio.ensure_future(
+            run_mt5_call(LLMConnectionTester().check, API_KEY, VALID_BODY["base_url"], VALID_BODY["model"])
+        )
+        await _await_event(entered)
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(run_mt5_call(lambda: "never runs"), timeout=0.5)
+
+        release.set()
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_the_connection_tester_crosses_only_the_llm_boundary(
+    broker_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call runs off the loop on the LLM pool, and the endpoint names no MT5."""
+
+    async def scenario() -> bool:
+        entered = threading.Event()
+        release = threading.Event()
+        _, threads = install_fake_provider(monkeypatch, entered=entered, release=release)
+        put_config(broker_db, broker_db["super_a_id"], VALID_BODY)
+        user = await _load_user(broker_db["factory"], broker_db["super_a_id"])
+
+        loop_thread = threading.get_ident()
+        session = broker_db["factory"]()
+        try:
+            task = asyncio.ensure_future(run_connection_test(user, session, LLMConnectionTester()))
+            await _await_event(entered)
+            release.set()
+            await task
+        finally:
+            await session.close()
+
+        # The blocking provider call ran on a worker thread, never the event
+        # loop, and (by the limiter test above) never the MT5 worker pool either.
+        return bool(threads) and threads[0] != loop_thread
+
+    assert asyncio.run(scenario())
+
+    source = inspect.getsource(broker_llm_config_router)
+
+    # The endpoint crosses the consolidated boundaries, and only those.
+    assert "from app.core.blocking import run_llm_call" in source
+    assert "run_mt5_call" not in source, "the LLM probe must never cross the MT5 boundary"
+    assert "starlette.concurrency" not in source and "run_in_threadpool" not in source
+    assert "run_in_executor" not in source
+    # Read-only by construction: the endpoint gained no order/mutation surface.
+    for forbidden in ("order_send", "order_check", "positions_modify", "positions_close"):
+        assert forbidden not in source
 
 
 # --- outbound endpoint security (SSRF) ---------------------------------------------------

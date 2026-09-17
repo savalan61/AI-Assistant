@@ -9,9 +9,9 @@ current single-process development architecture:
   limitation of the development deployment, replaced later by a shared store
   if/when multi-worker deployment arrives. No Redis, no database table.
 * **Identity**: keyed by the authenticated ``user_id`` (the database ``User.id``),
-  so tenants are isolated by construction — the key is ``(broker_id, user_id)``
-  and ``user_id`` alone is already globally unique. Identity comes only from
-  the authenticated user object, never from the request body.
+  which is globally unique, so one customer consuming its quota can never
+  consume or observe another customer's. Identity comes only from the
+authenticated user object, never from the request body.
 * **Day boundary**: UTC calendar day, consistent with the application's UTC
   conventions. The day is injected (``now``), so tests stay deterministic.
 * **Ordering guarantee**: a request is either admitted (count incremented) or
@@ -41,18 +41,18 @@ class AgentUsageLimiter:
     def daily_limit(self) -> int:
         return self._daily_limit
 
-    def check_and_consume(self, broker_id: int, user_id: int, now: datetime) -> None:
-        """Admit one request for the user on ``now``'s UTC day, or raise.
+    def check_and_consume(self, user_id: int, now: datetime) -> None:
+        """Admit one request for the customer on ``now``'s UTC day, or raise.
 
-        ``broker_id``/``user_id`` must come from the authenticated database
-        user. Naive ``now`` values are rejected loudly rather than guessed as
-        local time (the established project convention). Raises
-        UsageLimitExceededError when the user has already reached the daily
-        limit; a rejected request consumes nothing.
+        ``user_id`` must come from the authenticated database user (there is one
+        broker, so this is the only scoping needed). Naive ``now`` values are
+        rejected loudly rather than guessed as local time (the established
+        project convention). Raises UsageLimitExceededError when the customer has
+        already reached the daily limit; a rejected request consumes nothing.
         """
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
-        key = (broker_id, user_id, now.astimezone(UTC).date().isoformat())
+        key = (user_id, now.astimezone(UTC).date().isoformat())
         with self._lock:
             current = self._counts.get(key, 0)
             if current >= self._daily_limit:

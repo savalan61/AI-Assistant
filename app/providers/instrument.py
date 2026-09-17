@@ -58,6 +58,12 @@ class InstrumentProvider(abc.ABC):
         Raises ValueError when the broker does not offer the symbol (a client
         error) and RuntimeError when the broker/terminal cannot answer at all
         (an availability error); callers map the two differently.
+
+        The MT5 implementation raises ``MT5ClientError`` (a ``ValueError``
+        subclass, see ``app.core.mt5_session``) for the client case, so the
+        session boundary can tell a normal "no such symbol" answer from a
+        transport failure. Callers that only care about the client/availability
+        split keep catching ``ValueError``/``RuntimeError`` unchanged.
         """
         ...
 
