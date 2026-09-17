@@ -2,6 +2,7 @@
 
 ## Current Status
 
++ Step 56 evaluation fixes — relevance boundary + OpenRouter HTTP-200 envelopes (this checkpoint)
 + Step 56 — Real LLM Fundamental Chat (OpenRouter, development-only)
 Fix — Instrument Profile Alias Coverage Audit (this checkpoint)
 + Fix — Economic Calendar Position Relevance via Instrument Profiles
@@ -30,6 +31,46 @@ Fix — Instrument Profile Alias Coverage Audit (this checkpoint)
 + maintenance — role-migration ordering fix & development user seed
 
 Status:
+
+Step 56 evaluation fixes: VERIFIED + COMMITTED — two focused commits, local,
+not pushed:
+- Relevance boundary: 320317465bae1d7c32806669c5b2613bf771592b
+  ("fix(agent): enforce deterministic relevance boundary") — the LLM-facing
+  calendar/fundamental/research prompt blocks now withhold items the
+  deterministic relevance layer graded NOT_OBVIOUSLY_RELEVANT for every
+  instrument in play (stating the withheld count), so the model can no longer
+  promote them into the analysis. The boundary only bounds what the layer
+  assessed; empty/unavailable/all-unrelated/UNKNOWN states stay distinct; no
+  relevance level changes. 18 focused tests in the new
+  tests/test_agent_relevance_boundary.py.
+- HTTP-200 error envelopes: 56256f89ab90346335c2079266a6ca6fd7889c12
+  ("fix(llm): handle OpenRouter HTTP-200 error envelopes") — the OpenAI-
+  compatible adapter classifies a JSON error envelope received with HTTP 200
+  before reading choices, with the same transient/non-transient split as HTTP
+  status codes: 429/5xx or the observed provider_overloaded marker raises the
+  existing LLMFallbackError so the pool may fall through; auth-shaped or
+  unrecognized envelopes raise the existing plain RuntimeError so the pool
+  stops. Success, non-2xx, non-JSON and malformed-payload behavior unchanged;
+  no envelope message is echoed into errors. 14 focused tests added.
+Full suite after both fixes: 1656 passed, 2 pre-existing third-party
+  deprecation warnings. HEAD after the fixes: 56256f8 on master (ahead of
+  origin/master by 27; nothing pushed).
+
+Post-fix live smoke (one real OpenRouter request through the real composition
+root pool, pinned nvidia/nemotron-3-super-120b-a12b:free, real AgentService and
+deterministic development sources): SUCCESS in 13.5 s. The response's
+calendar list contained exactly the three events the relevance layer related
+to XAUUSD (API crude stocks, US CPI, initial jobless claims) with the BoJ
+decision and the EUR/GBP events absent, and its news list was exactly the
+three retained items (CPI preview, gold-ETF flows, Fed minutes). Facts and
+interpretation were clearly separated ("Published Facts" / "Interpretation"
+sections), no BoJ promotion, no trading advice/target/probability, no
+invented numbers — the BoJ relevance leak observed in the Step 56 evaluation
+is fixed in the real response. (One earlier same-request attempt failed fast
+with the pool's terminal "no LLM provider is currently available": the free
+tier returned a transient overload envelope, which the fix correctly converts
+to LLMFallbackError — with a single-provider pool there is nothing to fall
+through to. The disclosed second attempt succeeded with no provider failure.)
 
 Step 56: VERIFIED + COMMITTED (one focused commit carrying the OpenRouter
 settings, the development-only free-pool wiring, the focused offline tests,
@@ -1505,6 +1546,65 @@ Status: VERIFIED + COMMITTED
 - Focused tests grew 10 → 14 (override reads the requested file; default path
   keeps the base class; env_file=None drops only the dotenv source while still
   reading the process environment; the keyword form is absent from source).
+
+
+### Step 56 Evaluation Fixes — Relevance Boundary + OpenRouter HTTP-200 Envelopes
+
+Status: VERIFIED + COMMITTED (two focused commits, following the established
+convention of implementation + tests together; local, not pushed)
+
+The Step 56 LLM quality evaluation surfaced two defects, fixed and committed
+separately:
+
+1. Relevance leak (commit 320317465bae1d7c32806669c5b2613bf771592b,
+   "fix(agent): enforce deterministic relevance boundary"). The LLM-facing
+   blocks handed every published calendar event and news item to the model,
+   including items the deterministic relevance layer had graded
+   NOT_OBVIOUSLY_RELEVANT for every instrument in play — the evaluation watched
+   the model discuss the BoJ decision as a gold driver after the context
+   supplied it as unrelated. The relevance layer is now a hard filter on the
+   evidence itself in app/services/agent/prompt.py: an item not related to any
+   instrument in play is withheld from the calendar, fundamental and research
+   blocks, and the withheld count is stated in the block so "withheld" can
+   never read as "nothing happened". The boundary only bounds what the layer
+   actually assessed (no instrument in play renders the published items whole,
+   so the mandatory calendar is never emptied by a vacuous classification), the
+   empty / unavailable / all-unrelated / UNKNOWN states stay distinct, retained
+   items keep their provenance and factor notes, and no classification level
+   changes. 18 focused offline tests pin the behavior, including set equality
+   between the rendered calendar and the relevance layer's own verdicts for
+   gold, crude, an index, and all three together.
+
+2. HTTP-200 error envelopes (commit 56256f89ab90346335c2079266a6ca6fd7889c12,
+   "fix(llm): handle OpenRouter HTTP-200 error envelopes"). OpenRouter can
+   answer HTTP 200 with a JSON error envelope (an upstream provider overload
+   behind the relay); the adapter passed raise_for_status(), then failed on the
+   missing "choices" with a plain RuntimeError, so a transient overload was
+   surfaced as a non-fallback failure and the ordered provider pool neither
+   retried nor fell through. The adapter now classifies the envelope before any
+   attempt to read choices, with the same transient/non-transient split as HTTP
+   status codes: a 429/5xx code (numeric or numeric-string) or the observed
+   provider_overloaded marker raises the EXISTING LLMFallbackError so the pool
+   may try its next provider; an auth-shaped or unrecognized envelope raises
+   the EXISTING plain RuntimeError so the pool stops. No second fallback
+   exception was introduced. Success, non-2xx, non-JSON and malformed-payload
+   behavior is unchanged, and no envelope message is ever echoed into an
+   error. 14 focused offline tests, including a pool-level test that exercises
+   the actual fall-through: first provider answers HTTP 200 with the overload
+   envelope, second provider serves the request.
+
+Verification: full suite 1656 passed (2 pre-existing third-party deprecation
+warnings), compileall clean, Pyright 0 errors/0 warnings on all changed files,
+git diff --check clean, no mutating MT5 call in app/, the configured OpenRouter
+key value appears in zero tracked files, and no real OpenRouter request is made
+by the automated tests. The only real request was the disclosed post-fix live
+smoke described under Status above.
+
+Remaining observation from the live smoke (not a defect, recorded for a future
+step): the pinned free tier still intermittently returns transient overload
+envelopes; with a single-provider pool these surface as the pool's safe
+terminal 503. A second pooled provider (a future configuration decision, not a
+code change) would absorb them.
 
 
 ### Fix — Instrument Profile Alias Coverage Audit
@@ -3860,6 +3960,14 @@ Resolved:
   calendar read requests, and an explicit guard asserts the served date equals
   the response's `window_from`, so a stale constant cannot silently pass again.
   Test-only: no application behaviour, configuration or schema changed.
+- (Step 56 evaluation finding) The LLM-facing relevance leak — the model could
+  promote items graded NOT_OBVIOUSLY_RELEVANT into its fundamental analysis —
+  RESOLVED by commit 320317465bae1d7c32806669c5b2613bf771592b (the relevance
+  boundary in the prompt layer; confirmed fixed in the post-fix live smoke).
+- (Step 56 evaluation finding) The OpenRouter HTTP-200 error envelope surfacing
+  a transient upstream overload as a non-fallback RuntimeError — RESOLVED by
+  commit 56256f89ab90346335c2079266a6ca6fd7889c12 (envelope classification in
+  the OpenAI-compatible adapter, reusing the existing LLMFallbackError).
 
 These issues are known and must NOT be fixed automatically.
 
