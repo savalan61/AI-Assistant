@@ -3767,14 +3767,6 @@ This limitation must be reported rather than hidden.
     instrument keeps the fail-closed verdict — which is the intended trust
     posture, but it means calendar relevance for the long tail of broker
     symbols stays limited until profiles are extended.
-26. One economic-intelligence API test is clock-dependent: the offline QuantGist
-    fixture in tests/test_economic_intelligence_api.py hardcodes the row's
-    `release_date` to 2026-09-16 while the same test asserts that TODAY'S UTC
-    date appears in the returned timestamp, so the case passes only on that one
-    calendar day (re-run on 2026-09-17: 1604 passed, 1 failed — that case). The
-    fixture's own docstring says the row is meant to be dated from the requested
-    date, so the date should be derived from the request/clock rather than
-    hardcoded. Test-only: no application behaviour is involved.
 22. Broker-suffix resolution (Step 52, extended in Step 54) requires the
     candidate to be the requested name plus a decoration: a separator with an
     empty or short alphanumeric tail, or a short alphabetic lowercase tag. An
@@ -3841,6 +3833,13 @@ Resolved:
   number) — RESOLVED by Step 43: the request names its broker, the credential
   lookup is scoped to the resolved broker_id, and the throttle's login bucket is
   per (broker, login).
+- (Former item 26) The clock-dependent economic-intelligence API test fixture —
+  RESOLVED by commit 5d63f62372021d6f8bbb57f7954f81cd2d66993a: the offline
+  QuantGist fixture in tests/test_economic_intelligence_api.py no longer
+  hardcodes `release_date` 2026-09-16; it dates its row from the UTC window each
+  calendar read requests, and an explicit guard asserts the served date equals
+  the response's `window_from`, so a stale constant cannot silently pass again.
+  Test-only: no application behaviour, configuration or schema changed.
 
 These issues are known and must NOT be fixed automatically.
 
