@@ -484,46 +484,71 @@ def test_placeholder_calendar_still_works_in_development(
     assert body["data_source"] == "fake-development-placeholder"
 
 
-def make_offline_quantgist_provider(*, api_key: str, base_url: str, timeout_seconds: float):
-    """QuantGist provider whose HTTP goes to an offline mock transport.
+class OfflineQuantGistSource:
+    """Composition-root stand-in for the QuantGist provider, fully offline.
 
-    The row is dated from the requested date, so the test cannot depend on (or
-    race) the wall clock, and no request in this test reaches the network.
+    The single fixture row is dated from the window each calendar read asks for
+    (its UTC start date), so the row follows the request rather than a
+    hardcoded day and the test cannot go stale. ``served_release_dates`` records
+    the exact date every served row was stamped with, so the test can prove the
+    fixture tracked the requested window; no request reaches the network.
     """
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        # Verified live envelope: one global release_time-ascending feed under
-        # 'data', paginated; the endpoint ignores every date filter.
-        release_date = "2026-09-16"
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": f"evt_{release_date}",
-                        "title": "US Consumer Price Index (CPI) YoY",
-                        "currency": "USD",
-                        "impact": "high",
-                        "release_time": f"{release_date}T12:30:00Z",
-                        "forecast": 3.1,
-                        "previous": 3.2,
-                        "actual": None,
-                    }
-                ],
-                "page": 1,
-                "per_page": 20,
-                "total": 1,
-                "total_pages": 1,
-                "has_more": False,
-            },
-        )
+    def __init__(self) -> None:
+        # The release date the handler actually threaded onto its row, one entry
+        # per calendar read.
+        self.served_release_dates: list[str] = []
 
-    return QuantGistEconomicCalendarProvider(
-        api_key=api_key,
-        base_url=base_url,
-        timeout_seconds=timeout_seconds,
-        transport=httpx.MockTransport(handler),
-    )
+    def __call__(
+        self, *, api_key: str, base_url: str, timeout_seconds: float
+    ) -> QuantGistEconomicCalendarProvider:
+        # The window the current read asked for is captured before the provider
+        # pages, because the HTTP request itself carries no date (the live API
+        # ignores every date filter).
+        requested_from: list[datetime] = []
+        served_release_dates = self.served_release_dates
+
+        class WindowDatedQuantGistProvider(QuantGistEconomicCalendarProvider):
+            def get_events(
+                self, from_time: datetime, to_time: datetime
+            ) -> tuple[EconomicEvent, ...]:
+                requested_from.append(from_time)
+                return super().get_events(from_time, to_time)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Verified live envelope: one global release_time-ascending feed
+            # under 'data', paginated; the endpoint ignores every date filter.
+            release_date = requested_from[-1].astimezone(UTC).date().isoformat()
+            served_release_dates.append(release_date)
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": f"evt_{release_date}",
+                            "title": "US Consumer Price Index (CPI) YoY",
+                            "currency": "USD",
+                            "impact": "high",
+                            "release_time": f"{release_date}T12:30:00Z",
+                            "forecast": 3.1,
+                            "previous": 3.2,
+                            "actual": None,
+                        }
+                    ],
+                    "page": 1,
+                    "per_page": 20,
+                    "total": 1,
+                    "total_pages": 1,
+                    "has_more": False,
+                },
+            )
+
+        return WindowDatedQuantGistProvider(
+            api_key=api_key,
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            transport=httpx.MockTransport(handler),
+        )
 
 
 def test_configured_quantgist_source_flows_through_the_endpoint(
@@ -532,7 +557,8 @@ def test_configured_quantgist_source_flows_through_the_endpoint(
     patched_positions((XAUUSD,))
     monkeypatch.setattr(app_settings, "APP_ENV", "development", raising=True)
     monkeypatch.setattr(app_settings, "QUANTGIST_API_KEY", "qg_test_unit-only", raising=True)
-    monkeypatch.setattr(deps, "QuantGistEconomicCalendarProvider", make_offline_quantgist_provider)
+    source = OfflineQuantGistSource()
+    monkeypatch.setattr(deps, "QuantGistEconomicCalendarProvider", source)
 
     status, body = get_intelligence(intelligence_env, intelligence_env["customer_a_id"])
 
@@ -547,4 +573,12 @@ def test_configured_quantgist_source_flows_through_the_endpoint(
     assert event["impact"] == "HIGH"
     # The vendor's release_time arrives as the contract's tz-aware timestamp.
     assert is_utc_iso(event["timestamp"])
-    assert datetime.now(UTC).date().isoformat() in str(event["timestamp"])
+    # The fixture must be dated from the window the endpoint itself requested
+    # (today's UTC day), never a hardcoded day: this guard fails loudly if a
+    # stale constant is reintroduced, and ties the row to the response window.
+    window_from = datetime.fromisoformat(str(body["window_from"]))
+    assert window_from.tzinfo is not None
+    window_start_date = window_from.astimezone(UTC).date().isoformat()
+    assert source.served_release_dates == [window_start_date]
+    event_date = datetime.fromisoformat(str(event["timestamp"])).astimezone(UTC).date().isoformat()
+    assert event_date == window_start_date
