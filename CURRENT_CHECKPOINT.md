@@ -2,6 +2,7 @@
 
 ## Current Status
 
++ Step 56 — Real LLM Fundamental Chat (OpenRouter, development-only)
 Fix — Instrument Profile Alias Coverage Audit (this checkpoint)
 + Fix — Economic Calendar Position Relevance via Instrument Profiles
 + Step 54 — General Broker Decoration Resolution
@@ -30,6 +31,10 @@ Fix — Instrument Profile Alias Coverage Audit (this checkpoint)
 
 Status:
 
+Step 56: VERIFIED + COMMITTED (one focused commit carrying the OpenRouter
+settings, the development-only free-pool wiring, the focused offline tests,
+.env.example and this documentation; no separate checkpoint-status commit
+follows, so this document records the state rather than a hash)
 Instrument-profile alias coverage audit: VERIFIED + COMMITTED (b9c5ca8 —
 "feat(instruments): document verified broker alias spellings in profiles";
 local, not pushed)
@@ -60,6 +65,19 @@ Step 42: VERIFIED + COMMITTED + PUSHED (95d00d9)
 Steps 12–41: COMMITTED + PUSHED; the Step 41 commit is 1577672
 
 Checkpoint commit:
+
+The Step 56 change set (the OpenRouter settings in app/core/config.py —
+OPENROUTER_API_KEY / OPENROUTER_BASE_URL / OPENROUTER_MODEL, one pinned free
+model — the development-only branch in get_free_llm_pool that appends it as an
+OpenAICompatibleLLMProvider, the focused offline test module and the
+.env.example/checkpoint documentation) — the change set this checkpoint
+describes — is implemented, verified and committed as ONE focused commit
+carrying the diff, the tests and this documentation together, following the
+established single-commit convention. No agent, prompt, provider contract,
+calendar/news/fundamental-intelligence, router, schema or trading path changed:
+OpenRouter is one more provider behind the EXISTING LLMProvider seam, served in
+development only, so a paid production provider remains a later configuration
+decision. No live API request was made by the automated tests.
 
 The instrument-profile alias coverage audit change set (the verified broker
 spellings added to the existing oil and NASDAQ-100 profile root lists — data,
@@ -3656,11 +3674,13 @@ This limitation must be reported rather than hidden.
     current single-process development architecture; distributed production
     limiting is future work and must not be added (no Redis, no database
     limiter) without an explicit decision.
-11. The shared Free LLM Pool is empty until a deployment-level OpenAI-compatible
-    endpoint (LLM_API_KEY/LLM_MODEL) is configured, and no real free-tier
-    provider has been integrated. With neither a broker configuration nor a
-    deployment endpoint, POST /agent fails safely with 503. Provider pool
-    ordering, health and quota monitoring are future work.
+11. The shared Free LLM Pool holds the deployment-level OpenAI-compatible
+    endpoint (LLM_API_KEY/LLM_MODEL) when one is configured, and (since Step 56)
+    the pinned OpenRouter free model in development when OPENROUTER_API_KEY is
+    set — so a development deployment gets real answers, while no free-tier
+    provider is pooled outside development. With neither a broker configuration
+    nor any configured provider, POST /agent fails safely with 503. Provider
+    pool ordering, health and quota monitoring remain future work.
 12. Broker LLM configuration has no audit trail (who changed what, and when)
     and no API-key rotation flow (re-encrypting existing rows under a new key).
 13. Residual limitations of the Step 35 hardening, each a deliberate trade-off:

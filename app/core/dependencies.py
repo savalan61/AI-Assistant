@@ -331,12 +331,20 @@ def get_fundamental_intelligence_service() -> FundamentalIntelligenceService:
 def get_free_llm_pool() -> LLMProvider:
     """The shared system fallback pool used when a broker has no active provider.
 
-    Providers are tried in order, falling through only on transient failures.
-    Today the pool holds at most the deployment-level OpenAI-compatible
-    endpoint from settings (the operator's own provider); real free-tier
-    providers are appended here later. An absent or unusable deployment
-    endpoint simply leaves the pool empty, which fails safely (503) rather than
-    ever inventing an answer.
+    Providers are tried in order, falling through only on transient failures:
+
+    * the deployment-level OpenAI-compatible endpoint from settings (the
+      operator's own provider, and the seam a paid production provider plugs
+      into);
+    * Step 56: the pinned OpenRouter free model, added in DEVELOPMENT only and
+      only when its key is configured. It is the real model the development chat
+      uses, behind the SAME OpenAICompatibleLLMProvider as the endpoint above, so
+      the agent still depends only on LLMProvider and the vendor stays
+      replaceable. Outside development the key is ignored, so a configured
+      free-tier credential can never serve a broker's customers.
+
+    An absent or unusable provider simply leaves the pool empty, which fails
+    safely (503) rather than ever inventing an answer.
     """
     providers: list[LLMProvider] = []
     if settings.LLM_API_KEY.strip() and settings.LLM_MODEL.strip():
@@ -353,6 +361,31 @@ def get_free_llm_pool() -> LLMProvider:
             # A placeholder/blank credential counts as "not configured": the
             # pool stays empty and the request fails safely with 503.
             providers = []
+    # Step 56: the development free tier. Development-only is the whole point of
+    # the guard - the key is a stand-in, never a production vendor - so a key
+    # set in any other environment is deliberately ignored here.
+    if (
+        settings.APP_ENV == "development"
+        and settings.OPENROUTER_API_KEY.strip()
+        and settings.OPENROUTER_MODEL.strip()
+    ):
+        try:
+            providers.append(
+                OpenAICompatibleLLMProvider(
+                    api_key=settings.OPENROUTER_API_KEY,
+                    base_url=settings.OPENROUTER_BASE_URL,
+                    # The pinned model is a setting, not a per-request choice:
+                    # one model, no dynamic pool.
+                    model=settings.OPENROUTER_MODEL,
+                    timeout_seconds=settings.LLM_TIMEOUT_SECONDS,
+                )
+            )
+        except RuntimeError:
+            # A placeholder/blank credential counts as "not configured": skip
+            # just this provider rather than disturbing the endpoint already in
+            # the pool (unlike the deployment endpoint above, whose own invalid
+            # configuration empties the pool).
+            pass
     return LLMProviderPool(providers)
 
 

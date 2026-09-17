@@ -102,6 +102,9 @@ def test_free_pool_is_empty_when_the_deployment_endpoint_is_unconfigured(
 ) -> None:
     monkeypatch.setattr(settings, "LLM_API_KEY", "", raising=True)
     monkeypatch.setattr(settings, "LLM_MODEL", "", raising=True)
+    # Pin the Step 56 development free tier off too: this test describes the
+    # deployment endpoint alone, never a developer's local OpenRouter key.
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "", raising=True)
 
     pool = deps.get_free_llm_pool()
 
@@ -118,6 +121,8 @@ def test_free_pool_holds_the_deployment_endpoint_when_configured(
     monkeypatch.setattr(settings, "LLM_API_KEY", "wiring-test-key", raising=True)
     monkeypatch.setattr(settings, "LLM_MODEL", "wiring-test-model", raising=True)
     monkeypatch.setattr(settings, "LLM_BASE_URL", "https://wiring.test/v1", raising=True)
+    # Keep the pool to the deployment endpoint alone (Step 56 pins its own).
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "", raising=True)
 
     pool = deps.get_free_llm_pool()
 
@@ -130,6 +135,7 @@ def test_placeholder_api_key_leaves_the_free_pool_empty(
 ) -> None:
     monkeypatch.setattr(settings, "LLM_API_KEY", "YOUR_API_KEY", raising=True)
     monkeypatch.setattr(settings, "LLM_MODEL", "wiring-test-model", raising=True)
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "", raising=True)
 
     assert deps.get_free_llm_pool().size == 0
 

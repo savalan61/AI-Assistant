@@ -91,6 +91,27 @@ class Settings(BaseSettings):
     LLM_MODEL: str = ""
     LLM_TIMEOUT_SECONDS: float = 30.0
 
+    # --- OpenRouter (DEVELOPMENT/TEST FREE TIER ONLY) ---------------------------
+    # The real LLM the development chat uses, behind the SAME OpenAI-compatible
+    # provider as the deployable endpoint above: the agent still depends only on
+    # LLMProvider, so this vendor can be swapped (or a paid provider added) by
+    # configuration/construction, never by changing the agent.
+    #
+    # OpenRouter is a development stand-in, not this project's production model:
+    # it is served inside APP_ENV=development only (see get_free_llm_pool), so a
+    # configured key never sends a broker's customers to the free tier. The key
+    # is read only from configuration/config-file/process environment - it is
+    # never committed, never logged and never returned - and an empty key simply
+    # leaves this provider out of the pool (the request fails closed, it never
+    # degrades to another source).
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    # The ONE pinned free model. "Pin one model" is deliberate: there is no
+    # dynamic model pool and no paid routing, so a development answer is
+    # reproducible and costs nothing. Changing it is a config edit, not a
+    # per-request choice. ":free" is OpenRouter's zero-cost tier.
+    OPENROUTER_MODEL: str = "nvidia/nemotron-3-super-120b-a12b:free"
+
     # Which economic-calendar source this deployment serves. The calendar is
     # MANDATORY for every Agent request, so the source is an explicit choice
     # that fails closed instead of degrading: "auto" (the default) keeps the
