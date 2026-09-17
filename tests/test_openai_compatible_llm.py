@@ -9,8 +9,9 @@ import json
 import httpx
 import pytest
 
-from app.providers.fake_llm import FakeLLMProvider
+from app.providers.fake_llm import FakeFreeLLMProvider, FakeLLMProvider
 from app.providers.llm import LLMFallbackError, LLMPrompt, LLMProvider
+from app.providers.llm_pool import LLMProviderPool
 from app.providers.openai_compatible_llm import OpenAICompatibleLLMProvider
 
 PROMPT = LLMPrompt(instructions="be factual", content="what is my exposure?")
@@ -208,6 +209,117 @@ def test_empty_text_raises_runtime_error() -> None:
 
     with pytest.raises(RuntimeError, match="empty response"):
         make_provider(handler).complete(PROMPT)
+
+
+# --- HTTP 200 with a JSON error envelope ------------------------------------------------
+
+
+def error_envelope(
+    message: str = "Upstream error from Nvidia: Service temporarily overloaded",
+    *,
+    code: object = 503,
+    metadata: object = {"error_type": "provider_overloaded"},
+) -> dict[str, object]:
+    """The exact envelope shape observed from a real gateway during Step 56."""
+    error: dict[str, object] = {"message": message, "code": code}
+    if metadata is not None:
+        error["metadata"] = metadata
+    return {"id": "gen-...", "error": error}
+
+
+def test_http_200_provider_overloaded_envelope_raises_fallback_error() -> None:
+    # The Step 56 finding: HTTP 200 + a provider_overloaded envelope became a
+    # plain invalid-response RuntimeError, so the pool never fell through.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=error_envelope())
+
+    with pytest.raises(LLMFallbackError, match="temporarily unavailable"):
+        make_provider(handler).complete(PROMPT)
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        error_envelope(code=429, metadata=None),
+        error_envelope(code=503, metadata=None),
+        error_envelope(code="503", metadata=None),  # code as string
+        error_envelope(),  # code + named metadata marker
+        error_envelope(code=None, metadata={"error_type": "provider_overloaded"}),
+        {"error": {"type": "provider_overloaded"}},
+        {"error": {"error_type": "provider_overloaded"}},
+    ],
+    ids=["429", "503", "string-503", "named-metadata", "metadata-only-code-none", "type", "error_type"],
+)
+def test_transient_envelope_shapes_raise_fallback_error(envelope: dict[str, object]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=envelope)
+
+    with pytest.raises(LLMFallbackError, match="temporarily unavailable"):
+        make_provider(handler).complete(PROMPT)
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"error": {"message": "invalid api key", "code": 401}},
+        {"error": {"message": "permission denied", "code": 403}},
+        {"error": {"message": "bad request", "code": 400}},
+        {"error": {"type": "authentication_error"}},
+        {"error": "upstream blew up"},  # not a dict: never classified transient
+        {"error": {}},
+        {"error": {"code": "not-a-number"}},
+        {"error": {"code": 401, "metadata": {"error_type": "provider_overloaded"}}},
+    ],
+    ids=["401", "403", "400", "auth-type", "string", "empty", "non-numeric", "non-transient-code"],
+)
+def test_non_transient_envelope_raises_plain_runtime_error(envelope: dict[str, object]) -> None:
+    # An auth-shaped envelope is a configuration problem: it must fail loudly
+    # instead of being silently retried against the next provider.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=envelope)
+
+    with pytest.raises(RuntimeError, match="invalid response") as exc_info:
+        make_provider(handler).complete(PROMPT)
+    assert not isinstance(exc_info.value, LLMFallbackError)
+
+
+def test_envelope_message_is_never_echoed_into_the_error() -> None:
+    leaked = "sensitive-upstream-detail-echoed-by-gateway"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=error_envelope(message=leaked))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        make_provider(handler).complete(PROMPT)
+    assert leaked not in str(exc_info.value)
+
+
+def test_transient_envelope_failure_lets_the_pool_fall_through() -> None:
+    # The pool-level regression: the first provider answers HTTP 200 with an
+    # overload envelope, the second one succeeds, and the request completes.
+    def overloaded(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=error_envelope())
+
+    first = make_provider(overloaded)
+    second = FakeFreeLLMProvider("second", response="from second")
+
+    answer = LLMProviderPool([first, second]).complete(PROMPT)
+
+    assert answer == "from second"
+    assert second.call_count == 1
+
+
+def test_non_transient_envelope_failure_stops_the_pool_immediately() -> None:
+    def unauthorized(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": {"message": "invalid api key", "code": 401}})
+
+    first = make_provider(unauthorized)
+    second = FakeFreeLLMProvider("second", response="from second")
+
+    with pytest.raises(RuntimeError, match="invalid response"):
+        LLMProviderPool([first, second]).complete(PROMPT)
+
+    assert second.call_count == 0
 
 
 # --- secret safety ---------------------------------------------------------------------

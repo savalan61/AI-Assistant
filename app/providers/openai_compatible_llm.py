@@ -26,6 +26,11 @@ Design notes:
   provider pool may try its next provider. Authentication, request, and
   malformed-response failures raise plain RuntimeError and are never retried
   elsewhere, because that would mask a real misconfiguration.
+* Some gateways answer HTTP 200 with a JSON error envelope instead of a status
+  code (an upstream provider overload behind a relay, for example). The
+  envelope is classified before any attempt to read choices, with the same
+  transient/non-transient split as HTTP status codes: an overload stays
+  fallback-eligible for the pool, an auth-shaped envelope fails loudly.
 * Synchronous by contract: it runs on the worker threadpool behind the
   existing run_mt5_call boundary, never on the event loop.
 * Read-only: it can only generate text from a prompt. There is no tool, no
@@ -48,6 +53,12 @@ _TEMPERATURE = 0.2  # low but non-zero: deterministic-leaning, still natural
 # Default real-world transport. Production uses this; tests inject a
 # httpx.MockTransport instead, keeping the suite fully offline.
 _DEFAULT_TRANSPORT = httpx.HTTPTransport()
+
+# Error-envelope markers treated as transient when a gateway answers HTTP 200
+# with an error instead of a status code. Deliberately tiny: only the condition
+# actually observed from a real gateway is classified by name, and every other
+# envelope stays a hard invalid-response error rather than being blindly retried.
+_TRANSIENT_ERROR_MARKERS = frozenset({"provider_overloaded"})
 
 
 class OpenAICompatibleLLMProvider(LLMProvider):
@@ -116,11 +127,26 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             raise RuntimeError("LLM provider returned an invalid response") from exc
         try:
             payload = response.json()
+        except ValueError:
+            # Non-JSON body: the payload is never echoed into the error (it
+            # could embed secrets echoed by a misbehaving server), so failures
+            # stay generic.
+            raise RuntimeError("LLM provider returned an invalid response")
+        if isinstance(payload, dict) and "error" in payload:
+            # HTTP 200 with a JSON error envelope: the status code carried no
+            # failure signal, so the envelope itself is classified exactly as an
+            # HTTP status would have been, before any attempt to read choices.
+            # The transient case stays fallback-eligible for the pool; anything
+            # else (auth-shaped, unrecognizable) fails loudly right here. The
+            # envelope's message is never echoed (it could embed secrets).
+            if _envelope_is_transient(payload["error"]):
+                raise LLMFallbackError("LLM provider is temporarily unavailable")
+            raise RuntimeError("LLM provider returned an invalid response")
+        try:
             text = payload["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError):
-            # Non-JSON body or an unexpected shape: the payload is never echoed
-            # into the error (it could embed secrets echoed by a misbehaving
-            # server), so failures stay generic.
+        except (KeyError, IndexError, TypeError):
+            # An unexpected shape: the payload is never echoed into the error,
+            # so failures stay generic.
             raise RuntimeError("LLM provider returned an invalid response")
         # Distinguish the two unusable-text cases: a non-string content field
         # is a malformed payload; a string without content is merely empty.
@@ -129,3 +155,30 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         if not text.strip():
             raise RuntimeError("LLM provider returned an empty response")
         return text
+
+
+def _envelope_is_transient(error: object) -> bool:
+    """Whether a JSON error envelope describes a transient upstream condition.
+
+    The same split as the HTTP status rule above: a numeric ``code``/``status``
+    of 429 or 5xx is transient (overload, rate limit, upstream failure). Some
+    gateways name the condition instead of coding it; only the documented
+    overload marker counts there. Anything else — an auth-shaped envelope, an
+    unrecognized shape, or a plain string — is not transient, so a pool stops
+    on it instead of masking a real misconfiguration.
+    """
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code", error.get("status"))
+    if isinstance(code, str) and code.strip().isdigit():
+        code = int(code.strip())
+    if isinstance(code, int):
+        return code == 429 or code >= 500
+    markers = {error.get("type"), error.get("error_type")}
+    metadata = error.get("metadata")
+    if isinstance(metadata, dict):
+        markers.add(metadata.get("error_type"))
+    return any(
+        isinstance(marker, str) and marker.strip().lower() in _TRANSIENT_ERROR_MARKERS
+        for marker in markers
+    )
